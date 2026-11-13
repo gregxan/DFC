@@ -1,0 +1,48 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "PICO_BOARD": "seeed_xiao_rp2350",
+        "PICO_PLATFORM": "rp2350-arm-s",
+        "PICO_SDK_PATH": "${sourceDir}/lib/pico-sdk",
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release (production)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "OFF" }
+    },
+    {
+      "name": "diag",
+      "displayName": "Release + USB status (verification)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON" }
+    },
+    {
+      "name": "diag-pattern",
+      "displayName": "Release + USB status, TX pattern mode (V-1, V-4)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_MODE": "pattern" }
+    },
+    {
+      "name": "debug",
+      "displayName": "Debug (-O0, for stepping only)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "APP_USB_STATUS": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release" },
+    { "name": "diag", "configurePreset": "diag" },
+    { "name": "diag-pattern", "configurePreset": "diag-pattern" },
+    { "name": "debug", "configurePreset": "debug" }
+  ]
+}
