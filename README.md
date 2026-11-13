@@ -1,7 +1,7 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.1
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.2
 ([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
@@ -14,7 +14,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 
 | Document | Contents |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.1), the baseline for this firmware |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.2), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7 |
 
@@ -31,7 +31,7 @@ src/tick.[ch]           1 kHz hardware-timer tick
 src/diag.[ch]           counters, high-water marks, timing instrumentation
 src/status.[ch]         optional USB CDC status lines (diag builds only)
 src/main.c              reference main loop (echo or pattern mode)
-src/i2c_bus_clear.pio   PIO program: 9 SCL clocks after a bus fault
+src/i2c_bus_clear.pio   PIO program: 9 SCL clocks after a bus fault (M-18)
 tools/*.py              Windows test scripts (V-1 … V-4)
 .vscode/                launch.json (SWD debug), tasks.json, settings
 ```

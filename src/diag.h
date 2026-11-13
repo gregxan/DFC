@@ -29,7 +29,7 @@ typedef enum {
     DIAG_MAG_MISSED_TICK,
     DIAG_MAG_TIMEOUT,
     DIAG_MAG_PRODUCT_ID_FAULT,
-    DIAG_MAG_BUS_CLEAR, /* additional: PIO bus-clear sequences started */
+    DIAG_MAG_BUS_CLEAR, /* D-1 (Rev 2.2): bus clears, start-up and post-abort */
     DIAG_COUNT
 } diag_ctr_t;
 

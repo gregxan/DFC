@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.1).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.2).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -69,11 +69,12 @@
 #define MAG_SET_INTERVAL 50u
 #endif
 
-/* After an arbitration-loss or user (timeout) abort, clock SCL nine times
- * with a PIO state machine so a slave left mid-byte releases SDA. Without it
- * a slave holding SDA low after a bus fault can block the bus permanently
- * and V-6 ("valid samples resume within 4 ms of release") cannot be met.
- * Set to 0 to disable. See docs/DESIGN.md, "Deviations and interpretations". */
+/* I2C bus clear (D-5, M-2, M-15, M-16, Rev 2.2): nine SCL clocks so a
+ * sensor left mid-byte releases SDA.
+ *   - once at start-up, before the product-ID read (blocking, ~110 us);
+ *   - after an arbitration-loss or timeout abort, by a PIO state machine
+ *     (non-blocking, ~100 us, done before the next tick).
+ * Set to 0 to disable both. See docs/DESIGN.md section 4, "Bus clear". */
 #ifndef MAG_BUS_CLEAR
 #define MAG_BUS_CLEAR 1
 #endif

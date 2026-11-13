@@ -171,15 +171,27 @@ IRQ only; global interrupts stay on.
 - **Persistent bus fault.** The tick only ever writes a few registers, so
   UART traffic is unaffected (M-16a).
 
-### Bus clear (`MAG_BUS_CLEAR`, default on)
+### Bus clear (M-18, Rev 2.2; `MAG_BUS_CLEAR`, default on)
 
-If the bus faults mid-read, the MMC5983MA can be left mid-byte, driving SDA
-low. Every later START would then lose arbitration, and valid samples would
-never resume. After an arbitration-loss or timeout abort, the I2C ISR hands
-SCL to a PIO state machine, which produces 9 open-drain clocks (~100 µs).
-The next tick finds it done, gives SCL back to I2C and starts normally.
-The next START resets the slave. This is non-blocking and never touches
-the I2C controller's configuration. See §6.
+If a read is cut off while the MMC5983MA is sending a 0 bit, the sensor
+keeps driving SDA low. Every later START then loses arbitration, and the
+RP2350 I2C block has no hardware bus-clear feature. The firmware clears the
+bus in two places:
+
+- **At startup (M-2).** `startup_bus_clear()` runs before the Product ID
+  read. It drives SCL as an open-drain GPIO for 9 clocks at ~100 kHz, then
+  sends START + STOP. It blocks for ~110 µs, which is allowed before the
+  main loop. This covers an MCU reset or reflash that interrupted a read.
+- **After an arbitration-loss or timeout abort (M-15, M-16).** The I2C ISR
+  hands SCL to a PIO state machine. The state machine sends 9 open-drain
+  clocks (~100 µs) and pushes a word when it's done. The next tick sees
+  that word, gives SCL back to I2C and starts the transaction. That START
+  resets the sensor. No CPU time is used while it runs. NACK aborts
+  (sensor absent) don't trigger a clear, because they can't leave SDA
+  stuck.
+
+Neither path touches the I2C controller's configuration. Every clear is
+counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 
 ## 5. Resources (R-1 … R-3)
 
@@ -187,7 +199,7 @@ the I2C controller's configuration. See §6.
 |---|---|
 | DMA | 6 channels: UART0 RX/TX, UART1 RX/TX, I2C command, I2C data (claimed dynamically) |
 | DMA IRQ | `DMA_IRQ_0` (UART TX completion only) |
-| PIO | PIO0, 1 state machine, 7 instructions (bus clear) |
+| PIO | PIO0, 1 state machine, 7 instructions (post-abort bus clear, M-18) |
 | Timer | TIMER0, 1 alarm |
 | RAM | 2 × 8 KB RX + 2 × 4 KB TX rings (24 KB) + ~2 KB state. Total `.bss` is ~26 KB. Code (~17 KB) also runs from RAM. |
 | Clock | `clk_peri` = `clk_sys` = 150 MHz (SDK default). The UART divisor gives 921,659 baud, an error of +0.0064 % (U-2). `link_init()` checks the actual rate against `LINK_BAUD_TOLERANCE_PPM` (1000 ppm) and reports it in the status (R-3). |
@@ -209,12 +221,12 @@ the I2C controller's configuration. See §6.
    tick (M-16) is counted as a *timeout*. Its `ABRT_USER_ABRT` is not also
    counted as an I2C error. NACKs, arbitration loss and unexpected STOPs
    are I2C errors. V-6's "sum of I2C errors and timeouts" is unaffected.
-4. **Bus clear (`MAG_BUS_CLEAR`).** This could be read as an "automatic
-   recovery action" under D-5. It is implemented as part of completing an
-   abort (M-15/M-16), because otherwise V-6's "valid samples resume within
-   4 ms of release" can't be guaranteed if the slave is left holding SDA.
-   It is counted in an extra counter (`DIAG_MAG_BUS_CLEAR`). Set
-   `MAG_BUS_CLEAR=0` to remove it.
+4. **Bus clear: resolved, written into the spec as Rev 2.2** (M-18, plus
+   amendments to M-2, M-15, M-16, D-1, D-5 and V-6; see
+   [REQUIREMENTS.md](REQUIREMENTS.md) §12). It runs at startup and after
+   arbitration-loss and timeout aborts, as described in §4.
+   `MAG_BUS_CLEAR=0` removes both. With it removed, M-16a and V-6 resume
+   are not guaranteed.
 5. **Startup product-ID failure.** The fault flag is set and the
    product-ID-fault counter is set to 1. No magnetometer transactions are
    attempted. The tick still runs (M-6).
@@ -263,6 +275,7 @@ the I2C controller's configuration. See §6.
 | M-7, M-8 | `mag_start()`, `build_cmds()` |
 | M-9 … M-14 | `publish()`, `mag_read_latest()` |
 | M-15 … M-17 | `i2c_isr()`, `mag_tick_isr()`, `hw_idle()`, `mag_read_latest()` |
+| M-18 | `startup_bus_clear()`, `bus_clear_start()`, `bus_clear_done()`, `src/i2c_bus_clear.pio` |
 | D-1, D-2 | `diag.h` counters, `diag_take()`, `diag_take_all()` |
 | D-3 | `g_diag_rx_hwm[]`, `g_diag_tx_hwm[]` |
 | D-5 | No counter or flag triggers anything; only M-15/M-16 aborts and U-9 resync |

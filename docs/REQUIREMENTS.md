@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.1**. The changes since Revision 2 are listed in section 11.
+**Revision 2.2**. The changes since Revision 2 are listed in sections 11 and 12.
 
 ## 1. Scope
 
@@ -79,7 +79,7 @@ Firmware for a Seeed XIAO RP2350 that:
 ### 5.1 Configuration
 
 - **M-1** I2C1 shall run at 400 kHz.
-- **M-2** At startup, firmware shall read the Product ID register (0x2F) and expect 0x30. On mismatch or no response, set the magnetometer fault flag and continue running the UARTs.
+- **M-2** At startup, firmware shall first perform one I2C bus clear (M-18), then read the Product ID register (0x2F) and expect 0x30. On mismatch or no response, set the magnetometer fault flag and continue running the UARTs. The startup bus clear may block, since it runs before the main loop. *(Amended in Rev 2.2.)*
 - **M-3** Bandwidth shall be set to BW = 11 (800 Hz) to permit a 1 kHz measurement rate.
 - **M-4** Offset drift shall be compensated with SET/RESET. Either:
   - automatic SET/RESET (Auto_SR_en), if verified effective with triggered measurements, or
@@ -112,20 +112,30 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 5.4 Errors
 
-- **M-15** On I2C abort (e.g. NACK), the I2C abort handler shall stop both magnetometer DMA channels, clear the abort condition, and increment the I2C error counter. The slot shall not be published, and sampling continues on the next tick.
-- **M-16** If a transaction is still in progress when the next tick fires, the timer handler shall skip that tick and increment the missed-tick counter. If no abort is already pending, it shall also initiate an abort of both DMA channels and the I2C transfer, without waiting for completion, and increment the timeout counter. A later tick shall start a new transaction only once the channels and the I2C controller are idle.
+- **M-15** On I2C abort (e.g. NACK), the I2C abort handler shall stop both magnetometer DMA channels, clear the abort condition, and increment the I2C error counter. If the abort was caused by arbitration loss or by a timeout abort (M-16), the handler shall also start a bus clear (M-18) as part of completing the abort. The slot shall not be published, and sampling continues on the next tick. *(Amended in Rev 2.2.)*
+- **M-16** If a transaction is still in progress when the next tick fires, the timer handler shall skip that tick and increment the missed-tick counter. If no abort is already pending, it shall also initiate an abort of both DMA channels and the I2C transfer, without waiting for completion, and increment the timeout counter. A later tick shall start a new transaction only once the channels, the I2C controller, and any bus clear in progress (M-18) are idle. *(Amended in Rev 2.2.)*
 - **M-16a** Valid samples shall resume within 4 ms of the tick on which a single hung transaction started. With a persistent bus fault, the abort shall repeat with no effect on UART traffic.
 - **M-17** The read-latest function shall report the sample as stale if its timestamp is more than 3 ms old.
+- **M-18** An I2C bus clear shall consist of nine open-drain SCL clocks, so a slave left mid-byte releases SDA. *(Added in Rev 2.2.)*
+  - A bus clear started from an interrupt handler shall be non-blocking. It shall run without CPU involvement (e.g. a PIO state machine) and shall finish within 200 µs, so it completes before the next tick.
+  - It shall not reconfigure, disable, or reset the I2C controller. It only lends the SCL pin to the clock generator and returns it to I2C afterwards.
+  - It shall have no effect on UART traffic.
+  - A firmware build option may disable bus clearing entirely. With it disabled, M-16a and the V-6 resume requirement are not guaranteed.
 
 ## 6. Status and Diagnostics
 
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
-  - magnetometer: I2C errors, missed ticks, timeouts, product ID fault
+  - magnetometer: I2C errors, missed ticks, timeouts, product ID fault, bus clears (startup and post-abort) *(bus clears added in Rev 2.2)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached).
 - **D-4** Firmware shall record the maximum main-loop iteration time in microseconds.
-- **D-5** No flag or counter shall trigger an automatic recovery action. Aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16), and resynchronising the RX read position after overflow (U-9), are normal operation, not recovery. Resets, re-initialisation, and retries remain prohibited.
+- **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
+  - aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16);
+  - the I2C bus clear at startup and on completing an arbitration-loss or timeout abort (M-2, M-15, M-18);
+  - resynchronising the RX read position after overflow (U-9).
+
+  Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
 
 ## 7. Resources
 
@@ -190,6 +200,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **V-6** Fault injection:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
   - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
+  - Resetting the MCU (e.g. from the debugger) while magnetometer transactions are running, repeated at least 100 times, never leaves the magnetometer fault flag set after boot. *(Added in Rev 2.2.)*
   - Holding one UART's RX line low, or leaving it disconnected, causes no data loss on the other UART and no magnetometer sequence gaps.
   - Deliberately stalling the main loop produces RX overflow counts and high-water marks consistent with the queue size.
 - **V-7** All verification tools (logic analyzer software, serial terminals, test scripts) shall run on Windows. Test scripts shall be written in Python.
@@ -215,3 +226,19 @@ Firmware for a Seeed XIAO RP2350 that:
   - Adding a trailing dummy read costs about 50 µs of M-8 margin and reads a write-only register.
 
   See docs/DESIGN.md §6.
+
+## 12. Revision 2.2 Changes
+
+- **Added M-18 (I2C bus clear).** Without a bus clear, a slave left driving SDA low by an interrupted read blocks every later START. The RP2350 I2C controller has no hardware bus-clear feature, so M-16a and the V-6 resume requirement could not be guaranteed.
+- **Amended M-2.** Perform one bus clear before the Product ID read, so an MCU reset during a read doesn't leave the magnetometer faulted.
+- **Amended M-15 and M-16.** A bus clear is part of completing an arbitration-loss or timeout abort. New transactions wait for it to finish.
+- **Amended D-1.** Added the bus-clear counter.
+- **Amended D-5.** The bus clear is classified as normal operation, alongside aborts and the RX resync. It is not a recovery action.
+- **Amended V-6.** Added the repeated MCU-reset test.
+
+Alternatives considered (docs/DESIGN.md §6):
+- No bus clear: strict reading of Rev 2 D-5, with V-6 resume left to chance.
+- Clearing only when SDA reads low: resume ~4.35 ms, outside M-16a.
+- Bit-banging from the tick: violates EX-4 or M-16a.
+- PWM with pulse-counting interrupts: more interrupt load, no benefit.
+- Switching sensor power: a hardware change and closer to a reset.

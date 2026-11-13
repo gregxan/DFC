@@ -109,7 +109,7 @@ static size_t build_cmds(uint32_t *c, bool with_set) {
 }
 
 #if MAG_BUS_CLEAR
-/* Called from the I2C ISR after an abort. Non-blocking: the PIO clocks
+/* D-5, M-15, M-16 (Rev 2.2). Called from the I2C ISR after an abort. Non-blocking: the PIO clocks
  * SCL in the background (~100 us); the tick checks for completion. */
 static void __not_in_flash_func(bus_clear_start)(void) {
     if (s_bc_running) {
@@ -368,14 +368,63 @@ static bool reg_read(uint8_t reg, uint8_t *val) {
     return i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, val, 1, false, 5000) == 1;
 }
 
+#if MAG_BUS_CLEAR
+/* Open-drain helpers for the startup bus clear: drive low or release. */
+static void od_low(uint pin) {
+    gpio_put(pin, false);
+    gpio_set_dir(pin, GPIO_OUT);
+}
+
+static void od_release(uint pin) {
+    gpio_set_dir(pin, GPIO_IN);
+}
+
+/* D-5, M-2 (Rev 2.2): one bus clear before the first I2C access, in case a
+ * reset of this MCU interrupted a read and left the sensor driving SDA.
+ * Blocking is allowed here (start-up, before the main loop). Nine SCL
+ * clocks at ~100 kHz, then START + STOP so the sensor returns to idle.
+ * Takes ~110 us. */
+static void startup_bus_clear(void) {
+    gpio_init(MAG_SDA_PIN);
+    gpio_init(MAG_SCL_PIN);
+    gpio_pull_up(MAG_SDA_PIN);
+    gpio_pull_up(MAG_SCL_PIN);
+    od_release(MAG_SDA_PIN);
+    od_release(MAG_SCL_PIN);
+    busy_wait_us(10);
+
+    /* SCL held low by something else (clock stretching or a fault): give it
+     * up to 1 ms, then clock anyway; the product-ID check reports a fault. */
+    for (unsigned i = 0; i < 100u && !gpio_get(MAG_SCL_PIN); i++) {
+        busy_wait_us(10);
+    }
+    for (unsigned i = 0; i < 9u; i++) {
+        od_low(MAG_SCL_PIN);
+        busy_wait_us(5);
+        od_release(MAG_SCL_PIN);
+        busy_wait_us(5);
+    }
+    /* START (SDA falls while SCL high), then STOP (SDA rises while SCL high). */
+    od_low(MAG_SDA_PIN);
+    busy_wait_us(5);
+    od_release(MAG_SDA_PIN);
+    busy_wait_us(5);
+    diag_inc(DIAG_MAG_BUS_CLEAR);
+}
+#endif
+
 bool mag_init(void) {
+    sleep_ms(10); /* MMC5983MA power-on time */
+
+#if MAG_BUS_CLEAR
+    startup_bus_clear();
+#endif
+
     i2c_init(MAG_I2C, MAG_I2C_HZ); /* M-1 */
     gpio_set_function(MAG_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(MAG_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(MAG_SDA_PIN);
     gpio_pull_up(MAG_SCL_PIN);
-
-    sleep_ms(10); /* MMC5983MA power-on time */
 
     /* M-2 */
     uint8_t id = 0;
