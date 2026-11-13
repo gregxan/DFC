@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.3**. The changes since Revision 2 are listed in sections 11 to 13.
+**Revision 2.4**. The changes since Revision 2 are listed in sections 11 to 14.
 
 ## 1. Scope
 
@@ -81,9 +81,12 @@ Firmware for a Seeed XIAO RP2350 that:
 - **M-1** I2C1 shall run at 400 kHz.
 - **M-2** At startup, firmware shall first perform one I2C bus clear (M-18), then read the Product ID register (0x2F) and expect 0x30. On mismatch or no response, set the magnetometer fault flag and continue running the UARTs. The startup bus clear may block, since it runs before the main loop. *(Amended in Rev 2.2.)*
 - **M-3** Bandwidth shall be set to BW = 11 (800 Hz) to permit a 1 kHz measurement rate.
-- **M-4** Offset drift shall be compensated with SET/RESET. Either:
-  - automatic SET/RESET (Auto_SR_en), if verified effective with triggered measurements, or
-  - a SET pulse inserted into the transaction at least every 100 samples.
+- **M-4** The sensor shall be conditioned with SET/RESET pulses. At startup, firmware shall perform one RESET → SET cycle, ending in SET so measurements have normal polarity. The ongoing strategy shall be selectable at run time through a global variable, `g_mag_sr_mode`. It is currently changed only from the debugger. *(Replaced in Rev 2.4.)*
+  - **Single cycle** (`MAG_SR_INIT_ONLY`, the initial value): no further pulses. Selecting this mode again at run time performs one more RESET → SET cycle: a RESET in one transaction, then a SET in the next.
+  - **Automatic** (`MAG_SR_AUTO`): Auto_SR_en is set in every write to Internal Control 0. It shall be verified effective with triggered measurements before it is relied on.
+  - **Pulse** (`MAG_SR_PULSE`): a SET pulse is inserted into the transaction, before the trigger write, every `g_mag_sr_interval` samples. The default is 50. Values are clamped to 1–100, so a pulse occurs at least every 100 samples.
+
+  A change to either variable shall take effect at the next transaction (within 1 ms). An invalid mode value shall be ignored, and the previous mode remains in use. Leaving a mode partway through a RESET → SET cycle shall still complete the SET. The single-cycle mode provides no ongoing compensation of offset drift.
 - **M-5** Every write to Internal Control 0 (0x09) shall include any persistent control bits (e.g. Auto_SR_en) along with TM_M.
 
 ### 5.2 Sampling
@@ -93,8 +96,8 @@ Firmware for a Seeed XIAO RP2350 that:
 - **M-7** Each transaction shall run entirely by DMA, using one channel to feed I2C command words and one to receive data. It consists of:
   - Reading 7 bytes from register 0x00 (the measurement triggered on the previous tick).
   - Writing TM_M to register 0x09 to trigger the next measurement.
-- **M-8** Each transaction shall complete within 400 µs of its tick. Expected duration is about 350 µs. The trigger write shall finish within 450 µs of the tick, leaving at least 50 µs between measurement completion and the next read.
-- **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid.
+- **M-8** Each transaction shall complete within 400 µs of its tick. Expected duration is about 330 µs, or about 400 µs for a transaction that includes a SET or RESET pulse (M-4). The pulse case is to be confirmed by measurement. *(Amended in Rev 2.4.)* The trigger write shall finish within 450 µs of the tick, leaving at least 50 µs between measurement completion and the next read.
+- **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid. A measurement triggered immediately after a RESET pulse has inverted polarity, and its sample shall also be marked invalid. *(Amended in Rev 2.4.)*
 - **M-10** Each sample shall be stored as:
   - the 7 raw data bytes,
   - a 64-bit microsecond timestamp of when that measurement was triggered (the previous tick),
@@ -200,6 +203,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **V-6** Fault injection:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
   - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
+  - Changing `g_mag_sr_mode` and `g_mag_sr_interval` from the debugger, while data flows, switches strategy within 1 ms. Each strategy produces the expected pulse pattern on the bus, and there are no UART errors or magnetometer sequence gaps. The only invalid sample is the one after each RESET. *(Added in Rev 2.4.)*
   - Resetting the MCU (e.g. from the debugger) while magnetometer transactions are running, repeated at least 100 times, never leaves the magnetometer fault flag set after boot. *(Added in Rev 2.2.)*
   - Holding one UART's RX line low, or leaving it disconnected, causes no data loss on the other UART and no magnetometer sequence gaps.
   - Deliberately stalling the main loop produces RX overflow counts and high-water marks consistent with the queue size.
@@ -251,3 +255,15 @@ Alternatives considered (docs/DESIGN.md §6):
 
   If both happen in the same abort (a bus error is reported alongside the firmware's abort), both counters are incremented, because two distinct events occurred.
 - V-1 and V-6 are unchanged.
+
+## 14. Revision 2.4 Changes
+
+- **Replaced M-4.**
+  - There are three SET/RESET strategies: a single cycle at startup (the default), automatic (Auto_SR_en), and a periodic SET pulse.
+  - The strategy is selectable at run time through `g_mag_sr_mode`.
+  - The pulse interval is set through `g_mag_sr_interval` (default 50, clamped to 1–100).
+  - A RESET → SET cycle runs at startup in every mode.
+  - Pulses are always SET, because a measurement after RESET reads with inverted polarity.
+- **Amended M-8.** Expected duration of transactions that carry a pulse.
+- **Amended M-9.** A sample measured after a RESET pulse is invalid.
+- **Amended V-6.** Added the run-time strategy-switch test.

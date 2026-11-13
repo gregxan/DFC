@@ -158,15 +158,28 @@ read phase returns non-0xFF data; the sample read by the transaction after
 that one is valid. Alternatively, toggle a spare pin in `mag_consume()` when
 `r.s.valid` first becomes true again.
 
-## Auto SET/RESET check (M-4)
+## SET/RESET strategies (M-4, Rev 2.4)
 
-Before accepting `MAG_SR_MODE = MAG_SR_AUTO`, confirm that `Auto_SR_en`
-works with single (`TM_M`) measurements:
+Use the `diag` build in a debug session, with the `MAGS` status line on
+screen. Set `g_mag_sr_mode` and `g_mag_sr_interval` in *Watch*, or with
+OpenOCD `mww`.
 
-1. Hold the sensor still. Log Z for 10 s with `MAG_SR_AUTO`.
-2. Apply a strong magnet briefly (it magnetises the sensor and shifts the
-   offset), remove it and log again.
-3. Repeat with `-DMAG_SR_MODE=MAG_SR_PULSE`.
+1. **Switching.** Watch SDA/SCL on the analyzer. Start in mode 0 (no pulse
+   writes). Switch to 2 with an interval of 10: a 4-write transaction
+   (read, SET, trigger) appears every 10 ms. Set the interval to 100: every
+   100 ms. Switch to 1: no pulse writes, and every trigger byte is `0x21`.
+   Switch back to 0: one transaction carries RESET, the next carries SET, and
+   `invalid` rises by exactly 1. Throughout, the soak test stays clean and
+   `gaps` stays 0.
+2. **Pulse transaction duration (M-8).** Measure from the tick (START) to the
+   final STOP on a SET or RESET transaction. Expected ~400 µs; the limit is
+   400 µs. If it is over, raise it so M-8 can be revisited.
+3. **Auto_SR_en effectiveness.** Do this before relying on mode 1.
+   1. Hold the sensor still and log Z for 10 s in mode 1.
+   2. Apply a strong magnet briefly. This magnetises the sensor and shifts
+      the offset.
+   3. Remove the magnet and log again.
+   4. Repeat in mode 2.
 
-If the offset doesn't return to its original value in auto mode but does in
-pulse mode, switch the default to `MAG_SR_PULSE`.
+   Mode 1 is effective if the offset returns to its original value, as it
+   does in mode 2.

@@ -24,12 +24,12 @@ extern volatile bool g_app_baud_ok;
 extern volatile uint32_t g_app_rx_pattern_errors[2];
 
 #define STATUS_PERIOD_US 1000000u
-#define N_LINES 5u
+#define N_LINES 6u
 
 static uint32_t s_total[DIAG_COUNT]; /* cumulative since boot */
 static uint64_t s_next_us;
 static unsigned s_line = N_LINES;    /* N_LINES = nothing pending */
-static char s_buf[200];
+static char s_buf[240]; /* < the 256-byte CDC TX buffer, so every line fits */
 static int s_len;
 static uint32_t s_seq;
 
@@ -67,11 +67,14 @@ static int format_line(unsigned line) {
     case 3:
         return snprintf(s_buf, n, "MAG fault=%u i2c_error=%" PRIu32 " missed_tick=%" PRIu32 " timeout=%" PRIu32
                         " pid_fault=%" PRIu32 " bus_clear=%" PRIu32 " valid=%" PRIu32 " invalid=%" PRIu32
-                        " gaps=%" PRIu32 " stale=%" PRIu32 " x=%" PRId32 " y=%" PRId32 " z=%" PRId32 "\r\n",
+                        " gaps=%" PRIu32 " stale=%" PRIu32 "\r\n",
                         (unsigned)mag_fault(), s_total[DIAG_MAG_I2C_ERROR], s_total[DIAG_MAG_MISSED_TICK],
                         s_total[DIAG_MAG_TIMEOUT], s_total[DIAG_MAG_PRODUCT_ID_FAULT], s_total[DIAG_MAG_BUS_CLEAR],
-                        g_app_mag_valid, g_app_mag_invalid, g_app_mag_gaps, g_app_mag_stale, g_app_mag_xyz[0],
-                        g_app_mag_xyz[1], g_app_mag_xyz[2]);
+                        g_app_mag_valid, g_app_mag_invalid, g_app_mag_gaps, g_app_mag_stale);
+    case 4:
+        return snprintf(s_buf, n, "MAGS sr_mode=%" PRIu32 " sr_interval=%" PRIu32 " x=%" PRId32 " y=%" PRId32
+                        " z=%" PRId32 "\r\n",
+                        g_mag_sr_mode, g_mag_sr_interval, g_app_mag_xyz[0], g_app_mag_xyz[1], g_app_mag_xyz[2]);
     default:
         return snprintf(s_buf, n, "TIM_NS isr_uart0=%" PRIu32 " isr_uart1=%" PRIu32 " isr_txdma=%" PRIu32
                         " isr_i2c=%" PRIu32 " isr_tick=%" PRIu32 " crit=%" PRIu32 " api_read=%" PRIu32

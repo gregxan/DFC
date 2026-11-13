@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.3).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.4).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -54,20 +54,25 @@
 #define MAG_STALE_US 3000u
 #endif
 
-/* M-4: SET/RESET strategy.
- *   MAG_SR_AUTO  - Auto_SR_en is set in every write to Internal Control 0.
- *   MAG_SR_PULSE - a SET pulse is written in the same transaction, before the
- *                  TM_M trigger, every MAG_SET_INTERVAL samples (<= 100).
- * Auto_SR_en with single (TM_M) measurements must be confirmed on the bench
- * before MAG_SR_AUTO is accepted (see docs/VERIFICATION.md). */
-#define MAG_SR_AUTO 0
-#define MAG_SR_PULSE 1
-#ifndef MAG_SR_MODE
-#define MAG_SR_MODE MAG_SR_AUTO
+/* M-4 (Rev 2.4): SET/RESET strategy, selectable at run time through the
+ * global g_mag_sr_mode (see mag.h; currently changed only from a debugger).
+ *   MAG_SR_INIT_ONLY - one RESET -> SET cycle at start-up, then none. If the
+ *                      mode is selected again at run time, one more cycle
+ *                      runs (RESET in one transaction, SET in the next).
+ *   MAG_SR_AUTO      - Auto_SR_en in every write to Internal Control 0.
+ *   MAG_SR_PULSE     - a SET pulse inserted before the TM_M trigger every
+ *                      g_mag_sr_interval samples (clamped to 1..100).
+ * A RESET start-up cycle runs in every mode. */
+#define MAG_SR_INIT_ONLY 0u
+#define MAG_SR_AUTO 1u
+#define MAG_SR_PULSE 2u
+#ifndef MAG_SR_MODE_DEFAULT
+#define MAG_SR_MODE_DEFAULT MAG_SR_INIT_ONLY
 #endif
-#ifndef MAG_SET_INTERVAL
-#define MAG_SET_INTERVAL 50u
+#ifndef MAG_SR_INTERVAL_DEFAULT
+#define MAG_SR_INTERVAL_DEFAULT 50u
 #endif
+#define MAG_SR_INTERVAL_MAX 100u /* M-4: at least every 100 samples */
 
 /* I2C bus clear (D-5, M-2, M-15, M-16, Rev 2.2): nine SCL clocks so a
  * sensor left mid-byte releases SDA.

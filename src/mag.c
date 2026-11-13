@@ -32,14 +32,11 @@
 #define ABRT_REASON_BITS 0x0001ffffu
 #define SLOT_NONE 2u
 
-#if MAG_SR_MODE == MAG_SR_AUTO
-#define CTRL0_PERSIST MMC_CTRL0_AUTO_SR_EN /* M-5 */
-#elif MAG_SR_MODE == MAG_SR_PULSE
-#define CTRL0_PERSIST 0u
-_Static_assert(MAG_SET_INTERVAL >= 1u && MAG_SET_INTERVAL <= 100u, "M-4: SET at least every 100 samples");
-#else
-#error "MAG_SR_MODE must be MAG_SR_AUTO or MAG_SR_PULSE"
-#endif
+/* Pulse inserted before the trigger write. */
+enum { PRE_NONE = 0, PRE_SET = 1, PRE_RESET = 2, PRE_COUNT = 3 };
+
+volatile uint32_t g_mag_sr_mode = MAG_SR_MODE_DEFAULT;
+volatile uint32_t g_mag_sr_interval = MAG_SR_INTERVAL_DEFAULT;
 
 typedef enum {
     MAG_FAULT,    /* M-2 failed: no transactions                       */
@@ -58,14 +55,21 @@ static bool s_fault = true;
 
 static volatile uint32_t s_cur_slot;
 static volatile uint32_t s_cur_tick;
-static volatile bool s_cur_has_set;
-static volatile bool s_trig_ok;      /* previous transaction's TM_M write completed */
+static volatile uint32_t s_cur_pre;  /* PRE_* used by the transaction in flight */
+static volatile bool s_trig_ok;       /* previous transaction's TM_M write completed */
 static volatile uint32_t s_trig_tick; /* tick of that transaction                    */
-static uint32_t s_since_set;
+static volatile bool s_trig_reset;    /* ...and it RESET first: polarity inverted    */
 
-/* Command lists: [0] trigger only, [1] SET pulse then trigger (MAG_SR_PULSE). */
-static uint32_t s_cmd[2][I2C_TX_FIFO_DEPTH] __attribute__((aligned(4)));
-static uint32_t s_cmd_len[2];
+/* M-4 state. Tick ISR (mode selection) and I2C ISR (publish) only; the I2C
+ * IRQ is masked while the tick runs, so they never interleave. */
+static uint32_t s_mode_applied;   /* mode the transactions currently follow    */
+static uint32_t s_cycle_step;     /* 0 none, 1 RESET pending, 2 SET pending      */
+static uint32_t s_since_pulse;    /* completed transactions since the last SET  */
+static bool s_pulse_now;          /* entering MAG_SR_PULSE: pulse immediately   */
+
+/* Command lists, [Auto_SR_en off/on][PRE_*]. */
+static uint32_t s_cmd[2][PRE_COUNT][I2C_TX_FIFO_DEPTH] __attribute__((aligned(4)));
+static uint32_t s_cmd_len[2][PRE_COUNT];
 
 static uint s_dma_cmd;
 static uint s_dma_data;
@@ -97,19 +101,62 @@ static inline void i2c_irq_unmask(void) {
     m33_hw->nvic_iser[MAG_I2C_IRQ / 32u] = 1u << (MAG_I2C_IRQ % 32u);
 }
 
-static size_t build_cmds(uint32_t *c, bool with_set) {
+/* persist: bits carried in every Internal Control 0 write (M-5). */
+static size_t build_cmds(uint32_t *c, uint32_t persist, unsigned pre) {
     size_t i = 0;
     c[i++] = MMC_REG_XOUT0; /* START + W(0x00) */
     for (unsigned k = 0; k < MMC_SAMPLE_BYTES; k++) {
         c[i++] = CMD_READ | (k == 0u ? CMD_RESTART : 0u); /* RESTART + R x7 */
     }
-    if (with_set) {
+    if (pre != PRE_NONE) {
         c[i++] = CMD_RESTART | MMC_REG_CTRL0;
-        c[i++] = CTRL0_PERSIST | MMC_CTRL0_SET;
+        c[i++] = persist | (pre == PRE_SET ? MMC_CTRL0_SET : MMC_CTRL0_RESET);
     }
-    c[i++] = CMD_RESTART | MMC_REG_CTRL0;                     /* RESTART + W(0x09)  */
-    c[i++] = CMD_STOP | CTRL0_PERSIST | MMC_CTRL0_TM_M;        /* TM_M, STOP (M-5)   */
+    c[i++] = CMD_RESTART | MMC_REG_CTRL0;               /* RESTART + W(0x09)  */
+    c[i++] = CMD_STOP | persist | MMC_CTRL0_TM_M;        /* TM_M, STOP (M-5)   */
     return i;
+}
+
+static inline uint32_t sr_interval(void) {
+    uint32_t n = g_mag_sr_interval;
+    if (n < 1u) {
+        n = 1u;
+    } else if (n > MAG_SR_INTERVAL_MAX) {
+        n = MAG_SR_INTERVAL_MAX;
+    }
+    return n;
+}
+
+/* M-4: pick the pulse for the next transaction, applying any mode change. */
+static unsigned __not_in_flash_func(sr_select)(uint32_t *persist) {
+    uint32_t mode = g_mag_sr_mode;
+    if (mode > MAG_SR_PULSE) {
+        mode = s_mode_applied; /* invalid value: ignore */
+    }
+    if (mode != s_mode_applied) {
+        if (s_cycle_step != 0u) {
+            /* Leaving an unfinished cycle: a RESET may already have been
+             * applied, so always finish with SET to restore polarity. */
+            s_cycle_step = 2u;
+        }
+        if (mode == MAG_SR_INIT_ONLY) {
+            s_cycle_step = 1u; /* one RESET -> SET cycle */
+        }
+        s_pulse_now = (mode == MAG_SR_PULSE);
+        s_mode_applied = mode;
+    }
+
+    *persist = (mode == MAG_SR_AUTO) ? MMC_CTRL0_AUTO_SR_EN : 0u;
+    if (s_cycle_step == 1u) {
+        return PRE_RESET;
+    }
+    if (s_cycle_step == 2u) {
+        return PRE_SET;
+    }
+    if (mode == MAG_SR_PULSE && (s_pulse_now || s_since_pulse + 1u >= sr_interval())) {
+        return PRE_SET;
+    }
+    return PRE_NONE;
 }
 
 #if MAG_BUS_CLEAR
@@ -194,24 +241,21 @@ static void __not_in_flash_func(mag_start)(uint32_t tick) {
     (void)hw->clr_tx_abrt;
     (void)hw->clr_stop_det;
 
-    unsigned v = 0;
-#if MAG_SR_MODE == MAG_SR_PULSE
-    if (s_since_set + 1u >= MAG_SET_INTERVAL) {
-        v = 1;
-    }
-#endif
+    uint32_t persist;
+    unsigned pre = sr_select(&persist);
+    unsigned p = persist ? 1u : 0u;
 
     uint32_t slot = (s_latest == 0u) ? 1u : 0u; /* M-11 */
     s_cur_slot = slot;
     s_cur_tick = tick;
-    s_cur_has_set = (v == 1u);
+    s_cur_pre = pre;
     s_state = MAG_BUSY;
 
     /* Data channel first so it is ready for the first received byte. */
     dma_hw->ch[s_dma_data].write_addr = (uint32_t)(uintptr_t)s_slots[slot].raw;
     dma_hw->ch[s_dma_data].al1_transfer_count_trig = MMC_SAMPLE_BYTES;
-    dma_hw->ch[s_dma_cmd].read_addr = (uint32_t)(uintptr_t)s_cmd[v];
-    dma_hw->ch[s_dma_cmd].al1_transfer_count_trig = s_cmd_len[v];
+    dma_hw->ch[s_dma_cmd].read_addr = (uint32_t)(uintptr_t)s_cmd[p][pre];
+    dma_hw->ch[s_dma_cmd].al1_transfer_count_trig = s_cmd_len[p][pre];
 }
 
 /* M-16: abort without waiting. */
@@ -226,7 +270,9 @@ static void __not_in_flash_func(publish)(void) {
     mag_sample_t *s = &s_slots[s_cur_slot];
     uint32_t tick = s_cur_tick;
     if (s_trig_ok) {
-        s->valid = true;
+        /* M-9 (Rev 2.4): a measurement triggered right after a RESET pulse
+         * has inverted polarity and is published as invalid. */
+        s->valid = !s_trig_reset;
         s->seq = s_trig_tick;
         s->timestamp_us = tick_time_us(s_trig_tick);
     } else {
@@ -240,10 +286,18 @@ static void __not_in_flash_func(publish)(void) {
 
     s_trig_ok = true;
     s_trig_tick = tick;
-    if (s_cur_has_set) {
-        s_since_set = 0;
+    uint32_t pre = s_cur_pre;
+    s_trig_reset = (pre == PRE_RESET);
+    if (pre == PRE_RESET) {
+        s_cycle_step = 2u; /* SET next */
+    } else if (pre == PRE_SET) {
+        if (s_cycle_step == 2u) {
+            s_cycle_step = 0u;
+        }
+        s_since_pulse = 0u;
+        s_pulse_now = false;
     } else {
-        s_since_set++;
+        s_since_pulse++;
     }
     s_state = MAG_IDLE;
 }
@@ -436,20 +490,37 @@ bool mag_init(void) {
     /* M-2 */
     uint8_t id = 0;
     bool ok = reg_read(MMC_REG_PRODUCT_ID, &id) && id == MMC_PRODUCT_ID;
-    /* M-3: 800 Hz bandwidth; continuous mode off; one SET to start clean. */
+    /* M-3: 800 Hz bandwidth; continuous mode off. */
     ok = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
     ok = ok && reg_write(MMC_REG_CTRL2, 0u);
-    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)(CTRL0_PERSIST | MMC_CTRL0_SET));
+
+    /* M-4 (Rev 2.4): one RESET -> SET cycle at start-up, in every mode,
+     * ending in SET so measurements have normal polarity. */
+    uint32_t mode = g_mag_sr_mode;
+    if (mode > MAG_SR_PULSE) {
+        mode = MAG_SR_MODE_DEFAULT;
+    }
+    uint8_t persist = (mode == MAG_SR_AUTO) ? (uint8_t)MMC_CTRL0_AUTO_SR_EN : 0u;
+    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)(persist | MMC_CTRL0_RESET));
+    sleep_ms(1);
+    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)(persist | MMC_CTRL0_SET));
+    sleep_ms(1);
     if (!ok) {
         g_diag_ctr[DIAG_MAG_PRODUCT_ID_FAULT] = 1u;
         s_fault = true;
         s_state = MAG_FAULT;
         return false;
     }
-    sleep_us(10);
-
-    s_cmd_len[0] = (uint32_t)build_cmds(s_cmd[0], false);
-    s_cmd_len[1] = (uint32_t)build_cmds(s_cmd[1], true);
+    for (unsigned a = 0; a < 2u; a++) {
+        for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
+            s_cmd_len[a][pre] = (uint32_t)build_cmds(s_cmd[a][pre], a ? MMC_CTRL0_AUTO_SR_EN : 0u, pre);
+        }
+    }
+    s_mode_applied = mode;
+    s_cycle_step = 0u;
+    s_since_pulse = 0u;
+    s_pulse_now = false;
+    s_trig_reset = false;
 
     i2c_hw_t *hw = i2c_regs();
     /* The blocking calls above left IC_TAR = 0x30, which the DMA
@@ -465,7 +536,7 @@ bool mag_init(void) {
     channel_config_set_read_increment(&c, true);
     channel_config_set_write_increment(&c, false);
     channel_config_set_dreq(&c, i2c_get_dreq(MAG_I2C, true));
-    dma_channel_configure(s_dma_cmd, &c, &hw->data_cmd, s_cmd[0], 0, false);
+    dma_channel_configure(s_dma_cmd, &c, &hw->data_cmd, s_cmd[0][PRE_NONE], 0, false);
 
     /* Data channel: IC_DATA_CMD -> slot, 8-bit. */
     s_dma_data = (uint)dma_claim_unused_channel(true);
@@ -500,7 +571,6 @@ bool mag_init(void) {
     irq_set_enabled(MAG_I2C_IRQ, true);
 
     s_trig_ok = false; /* M-9: the first transaction's data is invalid */
-    s_since_set = 0;
     s_fault = false;
     s_state = MAG_IDLE;
     return true;

@@ -15,10 +15,22 @@
 
 #include "mmc5983ma.h"
 
+#include "config.h"
+
+/* M-4 (Rev 2.4): SET/RESET strategy, one of MAG_SR_INIT_ONLY, MAG_SR_AUTO,
+ * MAG_SR_PULSE (config.h). Read at the start of every transaction, so a
+ * change (e.g. written from the debugger) takes effect within 1 ms. Invalid
+ * values are ignored and the previous mode stays in use. */
+extern volatile uint32_t g_mag_sr_mode;
+
+/* MAG_SR_PULSE only: samples from one SET pulse to the next. Values outside
+ * 1..MAG_SR_INTERVAL_MAX are clamped when used. */
+extern volatile uint32_t g_mag_sr_interval;
+
 /* M-10 */
 typedef struct {
     uint8_t raw[MMC_SAMPLE_BYTES];
-    bool valid;            /* false for the first sample after start/abort (M-9) */
+    bool valid;            /* false after start/abort (M-9) or after a RESET pulse */
     uint32_t seq;          /* index of the tick that triggered the measurement   */
     uint64_t timestamp_us; /* time of that tick                                  */
 } mag_sample_t;

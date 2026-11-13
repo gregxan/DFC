@@ -1,11 +1,12 @@
 """Reader for the firmware's USB CDC status lines (diag / diag-pattern builds).
 
-Each second the firmware emits five lines:
+Each second the firmware emits six lines:
 
     STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=..
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
     L1 ...
     MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. bus_clear=.. valid=.. ...
+    MAGS sr_mode=.. sr_interval=.. x=.. y=.. z=..
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
 
 Counters are cumulative since boot. Run standalone to print them:
@@ -25,7 +26,7 @@ import serial  # pyserial
 
 def parse_line(line: str) -> tuple[str, dict[str, int]] | None:
     parts = line.strip().split()
-    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "TIM_NS"):
+    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "TIM_NS"):
         return None
     values: dict[str, int] = {}
     for p in parts[1:]:
@@ -99,7 +100,7 @@ def delta(after: dict[str, dict[str, int]], before: dict[str, dict[str, int]], g
 
 def format_report(s: dict[str, dict[str, int]]) -> str:
     out = []
-    for g in ("STAT", "L0", "L1", "MAG", "TIM_NS"):
+    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "TIM_NS"):
         if g in s:
             out.append(g + " " + " ".join(f"{k}={v}" for k, v in s[g].items()))
     return "\n".join(out)

@@ -1,7 +1,7 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.3
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.4
 ([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
@@ -14,7 +14,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 
 | Document | Contents |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.3), the baseline for this firmware |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.4), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7 |
 
@@ -184,5 +184,7 @@ uint32_t ovf = diag_take(DIAG_L0_RX_OVERFLOW);      // atomic read-and-clear
 diag_loop_mark();                                    // once per iteration (D-4)
 ```
 
-The compile-time parameters (ring sizes, SET/RESET mode, bus clear, test
-pins) are in `src/config.h`.
+The compile-time parameters (ring sizes, SET/RESET defaults, bus clear,
+test pins) are in `src/config.h`. You can change the SET/RESET strategy at
+run time from the debugger through `g_mag_sr_mode` (0 single cycle, 1
+auto, 2 pulse) and `g_mag_sr_interval`. See docs/DESIGN.md §4.

@@ -112,17 +112,42 @@ START 0x30W 0x00   RESTART 0x30R  b0..b6 (7 reads)   RESTART 0x30W 0x09 (ctrl0|T
 ```
 
 That is about 121 SCL bit times, ~300 µs at 400 kHz, or ~330 µs with
-controller overheads (M-8: ≤ 400 µs). With `MAG_SR_MODE = MAG_SR_PULSE` an
-extra `RESTART 0x30W 0x09 SET` is inserted before the trigger every
-`MAG_SET_INTERVAL` (default 50) samples. That adds ~70 µs, so the trigger
+controller overheads (M-8: ≤ 400 µs). When the SET/RESET strategy calls for
+a pulse (see below), an extra `RESTART 0x30W 0x09 SET` (or `RESET`) is
+inserted before the trigger. That adds ~70 µs, so the trigger
 write finishes ≲ 400 µs after the tick and the 0.5 ms measurement ends
 ≲ 900 µs after it, before the next read (M-8: ≥ 50 µs margin).
 
 - Command DMA channel: `s_cmd` → `IC_DATA_CMD`, 32-bit, DREQ = I2C TX.
 - Data DMA channel: `IC_DATA_CMD` → `slots[!latest].raw`, 8-bit, 7
   transfers, DREQ = I2C RX (M-11).
-- Every write to Internal Control 0 carries `CTRL0_PERSIST`, which is
-  `Auto_SR_en` in `MAG_SR_AUTO` mode (M-5).
+- Every write to Internal Control 0 carries the persistent bits, which is
+  `Auto_SR_en` in `MAG_SR_AUTO` mode (M-5). Six command lists are prebuilt:
+  {Auto_SR_en off, on} × {no pulse, SET, RESET}.
+
+### SET/RESET strategy (M-4, Rev 2.4)
+
+- **At startup**, `mag_init()` writes RESET and then SET, waiting 1 ms after
+  each. This happens in every mode.
+- **Mode selection.** At the start of every transaction, `sr_select()` reads
+  `g_mag_sr_mode` and `g_mag_sr_interval`. You can write either from the
+  debugger, and the change applies within 1 ms. An invalid mode value is
+  ignored.
+
+| `g_mag_sr_mode` | Behaviour |
+|---|---|
+| `0` `MAG_SR_INIT_ONLY` (default) | No pulses. Selecting it at run time runs one cycle: RESET in one transaction, SET in the next. |
+| `1` `MAG_SR_AUTO` | `Auto_SR_en` in every Internal Control 0 write |
+| `2` `MAG_SR_PULSE` | SET before the trigger every `g_mag_sr_interval` transactions (clamped 1–100, default 50). The first pulse comes immediately on entering the mode. |
+
+- **Pulses are always SET.** After a RESET the sensor reads with inverted
+  polarity, so the sample measured after a RESET is published with
+  `valid = false` (M-9). The cycle always ends in SET, even if the mode
+  changes partway through.
+- **Retries.** If a pulse transaction is aborted, the cycle step or pulse
+  is retried on the next transaction.
+- **Status.** The `diag` builds report the current values on the `MAGS`
+  status line.
 
 ### Completion and publication (M-9 … M-14)
 
@@ -243,10 +268,11 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
    its own flags.
 8. **U-15a masking.** After any error, all three error interrupts of that
    UART are masked, matching the 1 % budget in U-15b.
-9. **Auto_SR_en (M-4).** `MAG_SR_AUTO` is the default, and the M-4 condition
-   ("if verified effective with triggered measurements") has **not** been
-   verified. If the bench test in VERIFICATION.md fails, build with
-   `-DMAG_SR_MODE=MAG_SR_PULSE`.
+9. **SET/RESET strategy: resolved, written into the spec as Rev 2.4**
+   (M-4 replaced; M-8, M-9 and V-6 amended; see
+   [REQUIREMENTS.md](REQUIREMENTS.md) §14). The strategy is selectable at
+   run time (§4). The default is a single cycle at startup. `MAG_SR_AUTO`
+   remains unverified with triggered measurements; see VERIFICATION.md.
 10. **Diagnostic builds.** In `diag` builds, `stdio_usb` runs `tud_task()`
     inline when a status line is written. The loop time reported there
     therefore includes USB work. EX-8 is shown on the `release` build by
@@ -273,7 +299,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-10 … U-14 | `link_write()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
-| M-1 … M-5 | `mag_init()`, `build_cmds()`, `MAG_SR_MODE` |
+| M-1 … M-5 | `mag_init()`, `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-6, M-6a | `tick.c` |
 | M-7, M-8 | `mag_start()`, `build_cmds()` |
 | M-9 … M-14 | `publish()`, `mag_read_latest()` |
