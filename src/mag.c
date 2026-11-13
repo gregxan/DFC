@@ -26,6 +26,10 @@
 #define CMD_RESTART I2C_IC_DATA_CMD_RESTART_BITS
 
 #define I2C_TX_FIFO_DEPTH 16u
+
+/* IC_TX_ABRT_SOURCE abort-cause flags (bits 16:0); bits 31:23 are the
+ * TX_FLUSH_CNT field, not a cause. */
+#define ABRT_REASON_BITS 0x0001ffffu
 #define SLOT_NONE 2u
 
 #if MAG_SR_MODE == MAG_SR_AUTO
@@ -261,8 +265,11 @@ static void __not_in_flash_func(i2c_isr)(void) {
         (void)hw->clr_tx_abrt;       /* releases the TX FIFO flush     */
         (void)hw->clr_stop_det;      /* the abort's STOP is not completion */
         bool user = (src & I2C_IC_TX_ABRT_SOURCE_ABRT_USER_ABRT_BITS) != 0u;
-        if (!user) {
-            diag_inc(DIAG_MAG_I2C_ERROR); /* NACK, arbitration loss, ... */
+        /* M-15 (Rev 2.3): count an I2C error for any bus-reported cause
+         * (NACK, arbitration loss, ...). An abort whose only cause is our
+         * own timeout abort (M-16) was already counted as a timeout. */
+        if (src & ABRT_REASON_BITS & ~I2C_IC_TX_ABRT_SOURCE_ABRT_USER_ABRT_BITS) {
+            diag_inc(DIAG_MAG_I2C_ERROR);
         }
         s_trig_ok = false;
         if (s_state == MAG_BUSY || s_state == MAG_ABORTING) {

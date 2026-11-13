@@ -151,8 +151,9 @@ IRQ only; global interrupts stay on.
 
 - **TX_ABRT** (NACK, arbitration loss, user abort) is handled in the I2C
   ISR. It writes `DMA_ABORT` for both channels without waiting, reads
-  `IC_CLR_TX_ABRT` and counts an I2C error unless the abort was the
-  firmware's own timeout abort. The state becomes `ABORTED` and the slot
+  `IC_CLR_TX_ABRT` and counts an I2C error for any bus-reported cause. An
+  abort caused only by the firmware's own timeout is counted only as a
+  timeout (M-15, Rev 2.3). The state becomes `ABORTED` and the slot
   is not published (M-15).
 - **Tick while BUSY** counts a missed tick and a timeout. It then writes
   `DMA_ABORT` and sets `IC_ENABLE.ABORT`, without waiting (M-16).
@@ -217,10 +218,12 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 2. **One STOP per transaction.** The read and the trigger write are joined
    by a repeated START, not STOP + START. This is standard I2C and saves a
    few bit times. Confirm it on the bench with the MMC5983MA.
-3. **Timeout aborts aren't counted as I2C errors.** An abort issued by the
-   tick (M-16) is counted as a *timeout*. Its `ABRT_USER_ABRT` is not also
-   counted as an I2C error. NACKs, arbitration loss and unexpected STOPs
-   are I2C errors. V-6's "sum of I2C errors and timeouts" is unaffected.
+3. **Timeout aborts are counted only as timeouts. Resolved, written into
+   the spec as Rev 2.3 (M-15; see [REQUIREMENTS.md](REQUIREMENTS.md) §13).**
+   An abort whose only cause is the firmware's own timeout abort
+   (`ABRT_USER_ABRT`) counts as a timeout, not an I2C error. Any other cause
+   reported in `IC_TX_ABRT_SOURCE` bits 16:0 counts as an I2C error, even
+   alongside a timeout abort. Unexpected STOPs also count as I2C errors.
 4. **Bus clear: resolved, written into the spec as Rev 2.2** (M-18, plus
    amendments to M-2, M-15, M-16, D-1, D-5 and V-6; see
    [REQUIREMENTS.md](REQUIREMENTS.md) §12). It runs at startup and after

@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.2**. The changes since Revision 2 are listed in sections 11 and 12.
+**Revision 2.3**. The changes since Revision 2 are listed in sections 11 to 13.
 
 ## 1. Scope
 
@@ -112,7 +112,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 5.4 Errors
 
-- **M-15** On I2C abort (e.g. NACK), the I2C abort handler shall stop both magnetometer DMA channels, clear the abort condition, and increment the I2C error counter. If the abort was caused by arbitration loss or by a timeout abort (M-16), the handler shall also start a bus clear (M-18) as part of completing the abort. The slot shall not be published, and sampling continues on the next tick. *(Amended in Rev 2.2.)*
+- **M-15** On I2C abort (e.g. NACK), the I2C abort handler shall stop both magnetometer DMA channels, clear the abort condition, and increment the I2C error counter if the controller reports any bus-detected cause (e.g. NACK, arbitration loss). An abort whose only cause is the firmware's own timeout abort (M-16) is counted only as a timeout, not as an I2C error. An unexpected STOP that ends a transaction before both DMA channels have finished is also an I2C error. If the abort was caused by arbitration loss or by a timeout abort (M-16), the handler shall also start a bus clear (M-18) as part of completing the abort. The slot shall not be published, and sampling continues on the next tick. *(Amended in Rev 2.2, Rev 2.3.)*
 - **M-16** If a transaction is still in progress when the next tick fires, the timer handler shall skip that tick and increment the missed-tick counter. If no abort is already pending, it shall also initiate an abort of both DMA channels and the I2C transfer, without waiting for completion, and increment the timeout counter. A later tick shall start a new transaction only once the channels, the I2C controller, and any bus clear in progress (M-18) are idle. *(Amended in Rev 2.2.)*
 - **M-16a** Valid samples shall resume within 4 ms of the tick on which a single hung transaction started. With a persistent bus fault, the abort shall repeat with no effect on UART traffic.
 - **M-17** The read-latest function shall report the sample as stale if its timestamp is more than 3 ms old.
@@ -242,3 +242,12 @@ Alternatives considered (docs/DESIGN.md §6):
 - Bit-banging from the tick: violates EX-4 or M-16a.
 - PWM with pulse-counting interrupts: more interrupt load, no benefit.
 - Switching sensor power: a hardware change and closer to a reset.
+
+## 13. Revision 2.3 Changes
+
+- **Amended M-15.** A timeout abort (M-16) raises the same abort interrupt as a bus error. Under the Rev 2 wording, one hung transaction would therefore be counted both as a timeout and as an I2C error. Each failure is now counted once:
+  - **I2C error:** any bus-reported cause, including an unexpected STOP.
+  - **Timeout:** the firmware abandoned the transaction.
+
+  If both happen in the same abort (a bus error is reported alongside the firmware's abort), both counters are incremented, because two distinct events occurred.
+- V-1 and V-6 are unchanged.
