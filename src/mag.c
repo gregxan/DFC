@@ -216,7 +216,8 @@ static void __not_in_flash_func(issue_abort)(void) {
     hw_set_bits(&i2c_regs()->enable, I2C_IC_ENABLE_ABORT_BITS);
 }
 
-/* M-12: publish the completed slot. I2C ISR only. */
+/* M-12 (Rev 2.1): publish the completed slot. Called from the I2C
+ * STOP-detect interrupt after both DMA channels are confirmed finished. */
 static void __not_in_flash_func(publish)(void) {
     mag_sample_t *s = &s_slots[s_cur_slot];
     uint32_t tick = s_cur_tick;

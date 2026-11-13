@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to "XIAO RP2350 Firmware Requirements, Revision 2".
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.1).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -82,7 +82,7 @@
 
 /* EX-5. RP2350 implements 4 priority bits; lower value = higher priority. */
 #define IRQ_PRIO_UART 0x00u /* UART error, TX DMA completion            */
-#define IRQ_PRIO_MAG 0x40u  /* I2C completion (STOP_DET) and I2C abort  */
+#define IRQ_PRIO_MAG 0x40u  /* I2C STOP detect (completion) + abort    */
 #define IRQ_PRIO_TICK 0x80u /* 1 kHz timer                              */
 #define IRQ_PRIO_USB 0xC0u  /* B-20: USB (diagnostic builds only)       */
 

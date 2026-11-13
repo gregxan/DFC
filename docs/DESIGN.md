@@ -126,9 +126,9 @@ write finishes ≲ 400 µs after the tick and the 0.5 ms measurement ends
 
 ### Completion and publication (M-9 … M-14)
 
-Completion is the I2C **STOP_DET** interrupt. The data channel's DMA finishes
-earlier, before the trigger write, so its completion can't mark the end of
-the transaction (see §6). The ISR checks that both DMA channels have
+Completion is the I2C **STOP_DET** interrupt (M-12, Rev 2.1). The data
+channel's DMA finishes earlier, before the trigger write, so its completion
+can't mark the end of the transaction (see §6). The ISR checks that both DMA channels have
 finished. It then fills in `valid`, `seq` and `timestamp_us` and issues
 `__dmb()`. Finally it publishes the slot with a single 32-bit store to
 `s_latest` (M-12).
@@ -194,13 +194,14 @@ the I2C controller's configuration. See §6.
 
 ## 6. Deviations and interpretations (please review)
 
-1. **Magnetometer completion interrupt = I2C `STOP_DET`.** EX-5 and M-12
-   speak of a "magnetometer DMA completion" interrupt. The data DMA
-   finishes before the trigger write is on the bus, and the command DMA
-   finishes when its last word enters the FIFO, so neither marks the end of
-   the transaction. `STOP_DET` and `TX_ABRT` share `I2C1_IRQ` at the
-   priority EX-5 gives "magnetometer DMA completion and I2C abort". The DMA
-   completion interrupts of the two magnetometer channels are not used.
+1. **Magnetometer completion interrupt = I2C `STOP_DET`. Resolved:
+   accepted and written into the spec as Rev 2.1 (EX-5, M-12; see
+   [REQUIREMENTS.md](REQUIREMENTS.md) §11).** The data DMA finishes before
+   the trigger write is on the bus, and the command DMA finishes when its
+   last word enters the FIFO, so neither marks the end of the transaction.
+   `STOP_DET` and `TX_ABRT` share `I2C1_IRQ` at the EX-5 magnetometer
+   priority. The DMA completion interrupts of the two magnetometer channels
+   are not used.
 2. **One STOP per transaction.** The read and the trigger write are joined
    by a repeated START, not STOP + START. This is standard I2C and saves a
    few bit times. Confirm it on the bench with the MMC5983MA.

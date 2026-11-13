@@ -1,7 +1,8 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA, Revision 2"*:
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.1
+([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
   interrupt in the data path. TX is DMA-driven from a ring buffer.
@@ -13,6 +14,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 
 | Document | Contents |
 |---|---|
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.1), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7 |
 
