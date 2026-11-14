@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.12).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.13).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -26,6 +26,53 @@
 #ifndef LINK_TX_RING_BITS
 #define LINK_TX_RING_BITS 12
 #endif
+
+/* ======================================================================
+ * Pin selection (XIAO RP2350). Read before changing any pin below.
+ * ======================================================================
+ *
+ * XIAO pad -> GPIO, front edge (from the Seeed pinout and the SDK board file
+ * seeed_xiao_rp2350.h):
+ *   D0 = GPIO26 (A0)   D4 = GPIO6         D8  = GPIO2
+ *   D1 = GPIO27 (A1)   D5 = GPIO7         D9  = GPIO4
+ *   D2 = GPIO28 (A2)   D6 = GPIO0         D10 = GPIO3
+ *   D3 = GPIO5         D7 = GPIO1
+ * Back pads used here: D11 = GPIO21, D12 = GPIO20. The other back pads
+ * (D13..D18) carry further GPIOs; take their numbers from the Seeed pinout,
+ * not from this comment.
+ *
+ * Used by the board itself; do not assign: GPIO19 (battery-sense enable),
+ * GPIO22/23 (RGB LED data/power), GPIO25 (user LED), GPIO29 (battery ADC).
+ * Only D0..D2 (GPIO26..28) can be analog inputs (ADC); keep them free if
+ * the application may need one.
+ *
+ * Alternatives on exposed pads, from the RP2350 datasheet GPIO function
+ * table (F2 = UART/I2C function, AUX = F11 "UART_AUX": TX/RX on the CTS/RTS
+ * positions; UART_FUNCSEL_NUM() picks the right one automatically):
+ *
+ *   UART0 (LINK_0)  TX/RX  GPIO0/1  = D6/D7   (current)
+ *                          GPIO2/3  = D8/D10  (AUX)  - conflicts with SPI0
+ *                                                       and the test pins
+ *   UART1 (LINK_1)  TX/RX  GPIO20/21 = D12/D11 (current, back pads)
+ *                          GPIO4/5  = D9/D3   (F2)  - conflicts with SPI0
+ *                                                       and the test pins
+ *                          GPIO26/27 = D0/D1  (AUX) - uses analog pins
+ *                          GPIO6/7  = D4/D5   (AUX) - conflicts with I2C1
+ *   I2C1 (magnetometer) SDA/SCL  GPIO6/7 = D4/D5 (current)
+ *                                GPIO2/3 = D8/D10, GPIO26/27 = D0/D1
+ *   I2C0 (would need MAG_I2C/MAG_I2C_IRQ changed in mag.c)
+ *                                GPIO0/1 = D6/D7 (UART0), GPIO4/5 = D9/D3
+ *
+ * Rules:
+ *  - TX and RX must belong to the same UART instance, and LINK_0 is
+ *    hard-wired to uart0, LINK_1 to uart1 (link_init()).
+ *  - SDA must be the even and SCL the odd pin of the same I2C instance. The
+ *    PIO bus clear (M-18) works on any SCL pin.
+ *  - Test pins (below) can be any free GPIO; they use plain SIO outputs.
+ *  - UART RX and I2C pins get internal pull-ups (HW-6a, HW-4), which also
+ *    keeps them clear of erratum RP2350-E9 (pull-down leakage, A2 only).
+ *  - Update README.md and docs/VERIFICATION.md wiring tables after a change.
+ */
 
 /* HW-2, HW-3 */
 #define LINK0_TX_PIN 0u  /* D6  */
@@ -116,15 +163,18 @@
 #define DIAG_TIMING 1
 #endif
 
-/* Test GPIOs for logic-analyzer measurements (V-2, V-3). Toggled by the
- * reference main loop. Set APP_TEST_PINS to 0 to leave them untouched. */
+/* HW-9 (Rev 2.13): test GPIOs for logic-analyzer measurements (V-2, V-3),
+ * toggled by the reference main loop. Off by default; the CMake option
+ * APP_TEST_PINS turns them on (the diag and diag-pattern presets do).
+ * They sit on the SPI0 pads, keeping all three analog inputs (D0..D2)
+ * free. If the application needs SPI0, move them to free back pads. */
 #ifndef APP_TEST_PINS
-#define APP_TEST_PINS 1
+#define APP_TEST_PINS 0
 #endif
-#define TEST_PIN_LINK0_RX_SEEN 26u  /* D0 */
-#define TEST_PIN_LINK0_TX_WRITE 27u /* D1 */
-#define TEST_PIN_LINK1_RX_SEEN 28u  /* D2 */
-#define TEST_PIN_LINK1_TX_WRITE 5u  /* D3 */
+#define TEST_PIN_LINK0_RX_SEEN 2u  /* D8  */
+#define TEST_PIN_LINK0_TX_WRITE 4u /* D9  */
+#define TEST_PIN_LINK1_RX_SEEN 3u  /* D10 */
+#define TEST_PIN_LINK1_TX_WRITE 5u /* D3  */
 
 /* Reference application behaviour (see main.c). */
 #define APP_MODE_ECHO 0

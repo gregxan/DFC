@@ -54,7 +54,7 @@ static void test_pins_init(void) {
 #define TEST_TOGGLE(mask) (sio_hw->gpio_togl = (mask))
 #else
 static void test_pins_init(void) {}
-#define TEST_TOGGLE(mask) ((void)(mask))
+#define TEST_TOGGLE(mask) ((void)0) /* argument not evaluated */
 #endif
 
 static uint8_t s_buf[256];

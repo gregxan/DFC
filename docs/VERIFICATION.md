@@ -21,8 +21,11 @@ py -m pip install -r tools/requirements.txt
 |---|---|---|
 | RX line (into the XIAO) | D7 / GPIO1 | D11 / GPIO21 |
 | TX line (out of the XIAO) | D6 / GPIO0 | D12 / GPIO20 |
-| RX_SEEN test pin | D0 / GPIO26 | D2 / GPIO28 |
-| TX_WRITE test pin | D1 / GPIO27 | D3 / GPIO5 |
+| RX_SEEN test pin | D8 / GPIO2 | D10 / GPIO3 |
+| TX_WRITE test pin | D9 / GPIO4 | D3 / GPIO5 |
+
+The test pins are driven only in builds with `APP_TEST_PINS` on: the
+`diag` and `diag-pattern` presets, or `-DAPP_TEST_PINS=ON`.
 
 - MMC5983MA on D4/D5, plus the USB cable for the `diag` builds' status port.
 
@@ -62,8 +65,8 @@ magnetometer samples (expect ~1000/s) and checks the fault flag.
 
 ## V-2 / V-3 Latency
 
-Use the `diag` build (echo mode), or `release` with `-DAPP_MODE=echo`, which
-is the default.
+Use the `diag` build (echo mode, test pins on). A `release` build needs
+`-DAPP_TEST_PINS=ON` for these measurements.
 
 1. Capture RX, TX, RX_SEEN and TX_WRITE of one UART. Make the capture long
    enough for ≥ 100,000 bytes (~3–4 min at Windows sleep granularity).
@@ -147,8 +150,9 @@ Notes:
 The timestamp is the time the trigger write completed, so its lag can be
 measured against the bus.
 
-1. Make a temporary build that toggles a spare GPIO (for example D8 /
-   GPIO2) in `i2c_isr()`, immediately after `now_us` is read.
+1. Make a temporary build that toggles a spare GPIO in `i2c_isr()`,
+   immediately after `now_us` is read. Use a free back pad; see the
+   pin-selection notes in `src/config.h`.
 2. On the analyzer, measure from the 9th SCL clock (ACK) of the trigger data
    byte to that toggle, for ≥ 10,000 transactions with UART traffic running.
 3. Report the median and the maximum. Expected: ~3 µs typical, < 20 µs

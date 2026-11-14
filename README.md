@@ -43,8 +43,8 @@ tools/*.py              Windows test scripts (V-1 … V-4)
 | UART0 TX / RX | D6 / D7 | 0 / 1 |
 | UART1 TX / RX | D12 / D11 (back pads) | 20 / 21 |
 | I2C1 SDA / SCL → MMC5983MA (3.3 V, addr 0x30) | D4 / D5 | 6 / 7 |
-| Test pins: UART0 RX_SEEN / TX_WRITE | D0 / D1 | 26 / 27 |
-| Test pins: UART1 RX_SEEN / TX_WRITE | D2 / D3 | 28 / 5 |
+| Test pins (diag builds only): UART0 RX_SEEN / TX_WRITE | D8 / D9 | 2 / 4 |
+| Test pins (diag builds only): UART1 RX_SEEN / TX_WRITE | D10 / D3 | 3 / 5 |
 
 Fit pull-ups to 3.3 V on SDA and SCL if the breakout has none: 4.7 kΩ at
 most, 2.7 kΩ recommended. Check that the rise time is ≤ 300 ns (HW-4).
@@ -54,7 +54,16 @@ them, but check the schematic:
 - a 10 µF low-ESR capacitor on CAP;
 - 1 µF on VDD.
 
-Leave MMC5983MA INT unconnected. The UARTs have no flow control, and both RX pins
+Leave MMC5983MA INT unconnected.
+
+The test pins sit on the SPI0 pads, so all three analog inputs (D0–D2) stay
+free. They're driven only in the `diag` and `diag-pattern` builds
+(`APP_TEST_PINS`). Before moving any pin, read the pin-selection notes at
+the top of `src/config.h`. They list the alternative pads for each UART and
+I2C, the pins the board itself uses, and the rules.
+
+Flash is set to the board's actual 2 MB. The SDK board file defaults to
+4 MB, which `CMakeLists.txt` overrides (B-11a). The UARTs have no flow control, and both RX pins
 have their internal pull-ups enabled.
 
 ## Setup on Windows (reference: VS Code extension)

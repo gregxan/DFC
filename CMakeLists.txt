@@ -6,6 +6,11 @@ cmake_minimum_required(VERSION 3.21)
 set(PICO_BOARD seeed_xiao_rp2350 CACHE STRING "Board type")
 set(PICO_PLATFORM rp2350-arm-s CACHE STRING "Platform")
 
+# B-11a (Rev 2.13): the XIAO RP2350 has 2 MB of flash (Seeed product page);
+# the SDK board file defaults to 4 MB. Set before the SDK is imported; the
+# SDK then uses it for the linker's flash region and passes it to C code.
+set(PICO_FLASH_SIZE_BYTES "2 * 1024 * 1024" CACHE STRING "Flash size (XIAO RP2350: 2 MB)")
+
 # B-9: the SDK is the pinned git submodule unless PICO_SDK_PATH is given.
 if(NOT DEFINED PICO_SDK_PATH AND NOT DEFINED ENV{PICO_SDK_PATH})
     set(PICO_SDK_PATH ${CMAKE_CURRENT_LIST_DIR}/lib/pico-sdk CACHE PATH "Pico SDK")
@@ -31,6 +36,7 @@ endif()
 pico_sdk_init()
 
 option(APP_USB_STATUS "Report status over USB CDC (diagnostic builds only)" OFF)
+option(APP_TEST_PINS "Drive the logic-analyzer test GPIOs (HW-9)" OFF)
 set(APP_MODE "echo" CACHE STRING "Reference application mode: echo or pattern")
 set_property(CACHE APP_MODE PROPERTY STRINGS echo pattern)
 
@@ -66,6 +72,12 @@ elseif(APP_MODE STREQUAL "echo")
     target_compile_definitions(firmware PRIVATE APP_MODE=0)
 else()
     message(FATAL_ERROR "APP_MODE must be 'echo' or 'pattern'")
+endif()
+
+if(APP_TEST_PINS)
+    target_compile_definitions(firmware PRIVATE APP_TEST_PINS=1)
+else()
+    target_compile_definitions(firmware PRIVATE APP_TEST_PINS=0)
 endif()
 
 # B-18: all code executes from SRAM.

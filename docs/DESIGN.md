@@ -419,7 +419,9 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | Req | Where |
 |---|---|
 | HW-1, B-11 | `CMakePresets.json`, `CMakeLists.txt` (`PICO_BOARD`, `PICO_PLATFORM`) |
-| HW-2, HW-3, HW-6, HW-6a | `config.h` pins; `link_setup()`: `uart_set_hw_flow(false)`, `gpio_pull_up(rx)` |
+| HW-2, HW-3, HW-6, HW-6a | `config.h` pins (and its pin-selection notes); `link_setup()`: `uart_set_hw_flow(false)`, `gpio_pull_up(rx)` |
+| HW-9 | `config.h` `TEST_PIN_*`, CMake option `APP_TEST_PINS` (on in the diag presets) |
+| B-11a | `CMakeLists.txt` `PICO_FLASH_SIZE_BYTES` |
 | HW-4, HW-5 | `config.h`; `mag_init()` pins, pull-ups, address 0x30 |
 | HW-7, HW-8 | C + Pico SDK; core 1 never launched |
 | EX-1, EX-2 | `main.c`; every API in `link.c` / `mag.c` / `diag.c` returns without waiting |

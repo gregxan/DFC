@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.12**. The changes since Revision 2 are listed in sections 11 to 22.
+**Revision 2.13**. The changes since Revision 2 are listed in sections 11 to 23.
 
 ## 1. Scope
 
@@ -28,6 +28,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **HW-6a** The internal pull-up shall be enabled on each UART RX pin (GPIO1, GPIO21) so a disconnected line idles high.
 - **HW-7** Firmware shall be written in C using the Pico SDK on the Arm Cortex-M33 cores.
 - **HW-8** All firmware shall run on core 0. Core 1 shall remain idle.
+- **HW-9** The logic-analyzer test pins (V-2, V-3) shall be on D8, D9 and D10 (GPIO2, 4, 3) and D3 (GPIO5), leaving the board's only analog inputs (D0–D2) free. They shall be driven only in builds that enable them: the diagnostic presets. Production builds leave them untouched. Pins used by the board itself (GPIO19, 22, 23, 25, 29) shall not be assigned. *(Added in Rev 2.13.)*
 
 ## 3. Execution Model
 
@@ -204,6 +205,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **B-9** The Pico SDK shall be pinned to a specific release (≥ 2.0), included as a git submodule, and initialized with `git submodule update --init --recursive` (needed for TinyUSB).
 - **B-10** The toolchain shall be the Arm GNU Toolchain (arm-none-eabi-gcc), with the exact version pinned.
 - **B-11** The build shall target `PICO_PLATFORM=rp2350-arm-s` and `PICO_BOARD=seeed_xiao_rp2350`.
+- **B-11a** The build shall set `PICO_FLASH_SIZE_BYTES` to 2 MB, the XIAO RP2350's actual flash per the Seeed product page. The SDK board file's default of 4 MB would let an image too large for the real flash link successfully. *(Added in Rev 2.13.)*
 
 ### 8.3 Windows Path and File Handling
 
@@ -401,3 +403,10 @@ These changes follow the RP2350 datasheet review (datasheet dated 1 October 2026
   - RP2350-E5: clear EN before aborting a DMA channel.
   - Disarm the tick alarm before re-arming when skipping ahead.
 - **Errata checked** (Appendix D, all 31 items). Only E5 and, in diagnostic builds, E12 apply. E12 is satisfied by `clk_sys` (150 MHz) being more than 10% faster than `clk_usb` (48 MHz).
+
+## 23. Revision 2.13 Changes
+
+These changes follow a check against the Seeed XIAO RP2350 product page.
+- **Added HW-9.** The test pins move from D0–D2, the board's only analog inputs, to the SPI0 pads, and are enabled only in diagnostic builds.
+- **Added B-11a.** Flash size is set to the board's actual 2 MB.
+- **Pin-selection guidance** in `src/config.h`: XIAO pad-to-GPIO map, board-reserved pins, and the alternative pads for each UART and I2C from the RP2350 datasheet GPIO function table.

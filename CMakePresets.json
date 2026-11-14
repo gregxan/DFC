@@ -24,13 +24,13 @@
       "name": "diag",
       "displayName": "Release + USB status (verification)",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_TEST_PINS": "ON" }
     },
     {
       "name": "diag-pattern",
       "displayName": "Release + USB status, TX pattern mode (V-1, V-4)",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_MODE": "pattern" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_MODE": "pattern", "APP_TEST_PINS": "ON" }
     },
     {
       "name": "debug",
