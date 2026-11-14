@@ -144,10 +144,8 @@ Notes:
 The timestamp is the time the trigger write completed, so its lag can be
 measured against the bus.
 
-1. Add a temporary toggle of a spare pin in `mag_consume()` with
-   `r.s.timestamp_us` recorded, or compare `timestamp_us` against the timer
-   in a debug session. The simplest way is a temporary build that toggles a
-   spare GPIO at the point in `i2c_isr()` where `now_us` is read.
+1. Make a temporary build that toggles a spare GPIO (for example D8 /
+   GPIO2) in `i2c_isr()`, immediately after `now_us` is read.
 2. On the analyzer, measure from the 9th SCL clock (ACK) of the trigger data
    byte to that toggle, for ≥ 10,000 transactions with UART traffic running.
 3. Report the median and the maximum. Expected: ~3 µs typical, < 20 µs
