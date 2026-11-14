@@ -262,10 +262,13 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
    (only possible with a debugger and `DBGPAUSE` disabled), the schedule
    skips forward on the same grid and counts each skipped tick as a missed
    tick.
-7. **C standard.** `-std=c11` and the B-22/B-23 warning flags apply to the
-   application sources. The SDK's own sources need GNU extensions (`asm`),
-   so the target as a whole compiles as `gnu11` and the SDK is compiled with
-   its own flags.
+7. **C standard and warnings: resolved, written into the spec as Rev 2.5**
+   (B-22 amended, B-25 added; see [REQUIREMENTS.md](REQUIREMENTS.md) §15).
+   Every C source in the image, the SDK's included, is compiled as
+   `-std=c11` with the full B-22/B-23 flags and `-Werror`. Two single-file
+   SDK exceptions are listed in `CMakeLists.txt`:
+   - `runtime_init.c`: `asm=__asm`.
+   - `stdio_usb.c`: `-Wsign-conversion` not fatal, diag builds only.
 8. **U-15a masking.** After any error, all three error interrupts of that
    UART are masked, matching the 1 % budget in U-15b.
 9. **SET/RESET strategy: resolved, written into the spec as Rev 2.4**
@@ -311,5 +314,5 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | R-1, R-2 | §5 |
 | B-1 … B-17 | README.md, `CMakePresets.json`, `cmake/host_tools.cmake`, `.gitattributes`, `.gitmodules`, `.vscode/` |
 | B-19, B-20 | `CMakeLists.txt` (`pico_enable_stdio_uart 0`, USB only with `APP_USB_STATUS`), `status_init()` |
-| B-21 … B-24 | `CMakeLists.txt` (`-g` in Release, `APP_WARNINGS`) |
+| B-21 … B-25 | `CMakeLists.txt` (`-g` in Release, target-wide C flags, per-file SDK exceptions) |
 | V-1 … V-7 | docs/VERIFICATION.md, `tools/` |

@@ -19,12 +19,10 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/pico_sdk_import.cmake)
 
 project(xiao_dual_uart_mag C CXX ASM)
 
-# B-24: the application is strict C11 (-std=c11, see APP_WARNINGS below).
-# The SDK's own sources use GNU extensions (e.g. "asm"), so the target as a
-# whole stays on gnu11 and -std=c11 is applied to the application sources.
+# B-24 (Rev 2.5): every C source in the image, SDK included, is strict C11.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
-set(CMAKE_C_EXTENSIONS ON)
+set(CMAKE_C_EXTENSIONS OFF)
 
 if(PICO_SDK_VERSION_STRING VERSION_LESS "2.0.0")
     message(FATAL_ERROR "Pico SDK >= 2.0.0 required (found ${PICO_SDK_VERSION_STRING})")
@@ -94,14 +92,30 @@ else()
     )
 endif()
 
-# B-22, B-23: strict warnings and stack checks on the application sources.
-# (The SDK's own sources are compiled with the SDK's flags.)
-set(APP_WARNINGS
-    -std=c11
-    -Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion
-    -fstack-usage -Wstack-usage=1024
+# B-22, B-23 (Rev 2.5): strict warnings and stack checks on every C source
+# compiled into the image, the SDK's included. (Assembly and the SDK's one
+# C++ file, pico_cxx_options/new_delete.cpp, are not C sources.)
+target_compile_options(firmware PRIVATE
+    $<$<COMPILE_LANGUAGE:C>:-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion>
+    $<$<COMPILE_LANGUAGE:C>:-fstack-usage -Wstack-usage=1024>
 )
-set_source_files_properties(${APP_SOURCES} PROPERTIES COMPILE_OPTIONS "${APP_WARNINGS}")
+
+# The application has no C++; make the SDK's C++ allocation overrides an
+# empty translation unit.
+target_compile_definitions(firmware PRIVATE PICO_CXX_DISABLE_ALLOCATION_OVERRIDES=1)
+
+# Per-file exceptions to B-22/B-24 (Rev 2.5). Each must be justified and
+# limited to one file. Review this list whenever the SDK pin changes.
+#  1. runtime_init.c uses the GNU keyword "asm" once (RP2350 DCP init).
+#     Mapping it to "__asm" keeps the file valid strict C11; no flag is relaxed.
+set_source_files_properties(
+    ${PICO_SDK_PATH}/src/rp2_common/pico_runtime_init/runtime_init.c
+    PROPERTIES COMPILE_DEFINITIONS "asm=__asm")
+#  2. stdio_usb.c (diag builds only) has one -Wsign-conversion warning in
+#     SDK 2.2.0 (line 224). It is still reported, but not fatal.
+set_source_files_properties(
+    ${PICO_SDK_PATH}/src/rp2_common/pico_stdio_usb/stdio_usb.c
+    PROPERTIES COMPILE_OPTIONS "-Wno-error=sign-conversion")
 
 # B-21: Release keeps debug information.
 target_compile_options(firmware PRIVATE $<$<CONFIG:Release>:-g>)

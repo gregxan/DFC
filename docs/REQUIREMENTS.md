@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.4**. The changes since Revision 2 are listed in sections 11 to 14.
+**Revision 2.5**. The changes since Revision 2 are listed in sections 11 to 15.
 
 ## 1. Scope
 
@@ -183,9 +183,12 @@ Firmware for a Seeed XIAO RP2350 that:
 - **B-19** Debug printing over UART shall be disabled (`pico_enable_stdio_uart(<target> 0)`), since GPIO0/1 are used by UART0.
 - **B-20** USB serial shall be disabled in production builds. If enabled for debugging, it uses the built-in Windows USB serial driver (shows up as a COM port), and its interrupt priority shall be below all UART-related interrupts.
 - **B-21** Release builds shall use `CMAKE_BUILD_TYPE=Release` with `-g`.
-- **B-22** Compiler warnings shall include `-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion`.
+- **B-22** Compiler warnings shall include `-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion`. B-22, B-23 and B-24 apply to every C source compiled into the image, including the Pico SDK's (B-25). *(Amended in Rev 2.5.)*
 - **B-23** Stack usage shall be checked with `-fstack-usage` and `-Wstack-usage=1024`.
 - **B-24** The C standard shall be C11 (`-std=c11`).
+- **B-25** Exceptions to B-22 … B-24 are permitted only for third-party (SDK) sources. Each exception shall apply to a single file, relax as little as possible, carry a written justification, and be listed in one place in the build definition. The list shall be reviewed whenever the SDK pin (B-9) changes. Exceptions in Rev 2.5: *(Added in Rev 2.5.)*
+  - `pico_runtime_init/runtime_init.c`: compiled with `asm=__asm` defined, because it uses the GNU keyword `asm` once. The file remains strict C11 and no warning is relaxed.
+  - `pico_stdio_usb/stdio_usb.c` (diagnostic USB builds only): `-Wsign-conversion` is reported but not treated as an error, because of one warning in SDK 2.2.0.
 
 ## 9. Verification
 
@@ -267,3 +270,10 @@ Alternatives considered (docs/DESIGN.md §6):
 - **Amended M-8.** Expected duration of transactions that carry a pulse.
 - **Amended M-9.** A sample measured after a RESET pulse is invalid.
 - **Amended V-6.** Added the run-time strategy-switch test.
+
+## 15. Revision 2.5 Changes
+
+- **Amended B-22.** B-22, B-23 and B-24 apply to every C source in the image, not only to application code.
+  - Measured against SDK 2.2.0: 46 of 47 SDK C files in the production build, and 70 of 72 in the diagnostic build, are already clean under all of the flags.
+  - Applying the flags everywhere puts SDK code under the `-Werror` gate and gives `-fstack-usage` data for SDK functions called from interrupt handlers.
+- **Added B-25.** Rules for exceptions, and the two current exceptions.
