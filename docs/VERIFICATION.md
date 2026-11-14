@@ -115,10 +115,13 @@ in `g_diag_max_cycles[]`:
 | `DIAG_T_ISR_TICK` | 1 kHz tick ISR | 5 µs |
 | `DIAG_T_CRITICAL` | longest critical section | 2 µs (EX-3) |
 | `DIAG_T_API_READ`, `_WRITE`, `_MAG` | API call minus payload copy | 2 µs (EX-7) |
-| `DIAG_T_LOOP` | main-loop iteration | 100 µs (EX-8) |
+| `DIAG_T_LOOP` | main-loop iteration, status reporter excluded | 100 µs (EX-8) |
+| `DIAG_T_STATUS` | status reporter (diag builds only) | information only |
 
 The `diag` builds print these in nanoseconds on the `TIM_NS` status line.
-The `release` build has no USB, so read them over SWD. In the VS Code debug
+The `STAT` line also shows `loop_max_us` (EX-8 evidence, reporter
+excluded), `status_max_us` and `tick_overrun`, which must be 0.
+The `release` build has no USB, so read them over SWD if you also want the production figures. In the VS Code debug
 session, add `g_diag_max_cycles` to *Watch*. With OpenOCD alone:
 
 ```bash

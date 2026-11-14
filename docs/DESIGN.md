@@ -245,6 +245,9 @@ finished. It then fills in `valid`, `seq` and `timestamp_us` and issues
   previous-tick time instead.
 - The first transaction after start-up or after an abort has no prior
   trigger. Its sample is published with `valid = false` (M-9).
+- Every invalid sample is still published, with a reason code (M-9,
+  Rev 2.11). `NO_PRIOR` takes priority over `NOT_READY`, which takes
+  priority over `AFTER_RESET`. `valid` is `reason == MAG_SAMPLE_OK`.
 - `mag_read_latest()` copies the 24-byte slot inside a critical section
   (M-13) and sets `stale` when the sample is more than 3 ms old (M-17).
 
@@ -344,7 +347,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | RAM | 2 × 8 KB RX + 2 × 4 KB TX rings (24 KB) + ~2 KB state. Total `.bss` is ~26 KB. Code (~17 KB) also runs from RAM. |
 | Clock | `clk_peri` = `clk_sys` = 150 MHz (SDK default). The UART divisor gives 921,659 baud, an error of +0.0064 % (U-2). `link_init()` checks the actual rate against `LINK_BAUD_TOLERANCE_PPM` (1000 ppm) and reports it in the status (R-3). |
 
-## 6. Deviations and interpretations (please review)
+## 6. Design decisions (all reviewed and written into the spec)
 
 1. **Magnetometer completion interrupt = I2C `STOP_DET`. Resolved:
    accepted and written into the spec as Rev 2.1 (EX-5, M-12; see
@@ -378,10 +381,12 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
    tick re-probes at 5 Hz using the same DMA channels. A successful
    re-probe is followed by a configuration transaction, then sampling.
    See §4, "Re-probe".
-6. **Missed alarm.** If the tick ISR is ever held off for a whole period
-   (only possible with a debugger and `DBGPAUSE` disabled), the schedule
-   skips forward on the same grid and counts each skipped tick as a missed
-   tick.
+6. **Missed alarm: resolved, written into the spec as Rev 2.11** (M-6a,
+   D-1, V-1). If the tick ISR is ever held off for a whole period, the
+   schedule skips forward on the same grid. Each skipped tick counts as a
+   **tick overrun** (`DIAG_TICK_OVERRUN`), separate from magnetometer
+   missed ticks. That's only possible with a debugger and `DBGPAUSE`
+   disabled, or a violation of EX-3/EX-4.
 7. **C standard and warnings: resolved, written into the spec as Rev 2.5**
    (B-22 amended, B-25 added; see [REQUIREMENTS.md](REQUIREMENTS.md) §15).
    Every C source in the image, the SDK's included, is compiled as
@@ -389,19 +394,30 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
    SDK exceptions are listed in `CMakeLists.txt`:
    - `runtime_init.c`: `asm=__asm`.
    - `stdio_usb.c`: `-Wsign-conversion` not fatal, diag builds only.
-8. **U-15a masking.** After any error, all three error interrupts of that
-   UART are masked, matching the 1 % budget in U-15b.
+8. **U-15a masking: resolved, clarified in the spec as Rev 2.11.** After
+   any error, all three error interrupts of that UART are masked until the
+   next tick, matching the 1 % budget in U-15b. Per-type counts are not
+   lost: the raw status latches each type while masked, and it is counted
+   when the tick re-enables the interrupts.
 9. **SET/RESET strategy: resolved, written into the spec as Rev 2.4**
    (M-4 replaced; M-8, M-9 and V-6 amended; see
    [REQUIREMENTS.md](REQUIREMENTS.md) §14). The strategy is selectable at
    run time (§4). The default is a single cycle at startup. The automatic
    mode (`Auto_SR_en`) was removed in Rev 2.8 (M-3a). See "Register
    settings" in §4.
-10. **Diagnostic builds.** In `diag` builds, `stdio_usb` runs `tud_task()`
-    inline when a status line is written. The loop time reported there
-    therefore includes USB work. EX-8 is shown on the `release` build by
-    reading `g_diag_max_cycles[DIAG_T_LOOP]` over SWD (VERIFICATION.md,
-    V-5).
+10. **Loop time in diagnostic builds: resolved, written into the spec as
+    Rev 2.11** (D-4, V-5). The main loop brackets `status_poll()` with
+    `diag_excluded_begin()`/`diag_excluded_end()`. Its time is subtracted
+    from the iteration time (`DIAG_T_LOOP`, `loop_max_us`) and recorded
+    separately (`DIAG_T_STATUS`, `status_max_us`). Interrupt time still
+    counts in the loop figure, as it should. EX-8 is visible in every diag
+    run; SWD readout on release remains valid.
+11. **Invalid samples are published, with a reason: resolved, written into
+    the spec as Rev 2.11** (M-9, M-10). `mag_sample_t.reason` is one of
+    `MAG_SAMPLE_OK`, `_NO_PRIOR`, `_AFTER_RESET`, `_NOT_READY`, and `valid`
+    is `reason == OK`. The field sits in existing padding, so the slot stays
+    24 bytes (checked by a `_Static_assert`). The reference loop counts
+    invalid samples by reason in `g_app_mag_invalid_by_reason[]`.
 
 ## 7. Requirement traceability
 
@@ -422,6 +438,8 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-8, U-8a, U-9 | `link_tick_isr()`, `rx_total_now()`, `link_read()`, `rx_overflow()` |
 | U-10 … U-14 (incl. U-10a) | `link_write()`, `tx_direct()`, `tx_reap()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
 | D-3a | `g_diag_tx_irq[]` |
+| D-4 (diag exclusion) | `diag_excluded_begin()`, `diag_excluded_end()`, `DIAG_T_STATUS` |
+| M-6a (overrun) | `tick_isr()`, `DIAG_TICK_OVERRUN` |
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
 | M-4b, D-1 (calibration, saturation) | `calibrate()`, `count_saturation()`, `blocking_measure()`, `mag_field()` |

@@ -27,14 +27,22 @@ extern volatile uint32_t g_mag_sr_mode;
  * 1..MAG_SR_INTERVAL_MAX are clamped when used. */
 extern volatile uint32_t g_mag_sr_interval;
 
+/* M-9, M-10 (Rev 2.11): why a sample is or is not valid. */
+typedef enum {
+    MAG_SAMPLE_OK = 0,          /* valid                                           */
+    MAG_SAMPLE_NO_PRIOR = 1,    /* first after start-up/abort: nothing was triggered */
+    MAG_SAMPLE_AFTER_RESET = 2, /* measured right after RESET: inverted polarity    */
+    MAG_SAMPLE_NOT_READY = 3,   /* read with Meas_M_Done clear: incomplete          */
+} mag_sample_reason_t;
+
 /* M-10. raw, tout and status are filled by one 9-byte DMA read of
  * registers 0x00..0x08 and must stay adjacent (checked in mag.c). */
 typedef struct {
     uint8_t raw[MMC_SAMPLE_BYTES];
     uint8_t tout;          /* register 0x07; not updated (TM_T unused)         */
     uint8_t status;        /* register 0x08 at read time (Meas_M_Done = bit 0) */
-    bool valid;            /* false after start/abort or a RESET pulse, or if
-                            * Meas_M_Done was clear (M-9)                      */
+    bool valid;            /* true exactly when reason == MAG_SAMPLE_OK (M-9)  */
+    uint8_t reason;        /* mag_sample_reason_t (Rev 2.11)                   */
     uint32_t seq;          /* index of the tick whose transaction triggered it   */
     uint64_t timestamp_us; /* us since boot when the trigger (TM_M) write completed
                             * (Rev 2.6); for M-9 invalid samples with no prior

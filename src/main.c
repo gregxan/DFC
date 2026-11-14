@@ -33,6 +33,7 @@ volatile bool g_app_mag_offset_valid;
 volatile uint32_t g_app_mag_gaps;    /* sequence discontinuities between valid samples */
 volatile uint32_t g_app_mag_valid;   /* valid samples consumed                         */
 volatile uint32_t g_app_mag_invalid; /* invalid (M-9) samples consumed                 */
+volatile uint32_t g_app_mag_invalid_by_reason[4]; /* indexed by mag_sample_reason_t */
 volatile uint32_t g_app_mag_stale;   /* iterations on which the latest sample was stale */
 volatile bool g_app_baud_ok;
 volatile uint32_t g_app_rx_pattern_errors[LINK_COUNT]; /* APP_MODE_PATTERN only */
@@ -109,6 +110,9 @@ static void mag_consume(void) {
 
     if (!r.s.valid) {
         g_app_mag_invalid++;
+        if (r.s.reason < 4u) {
+            g_app_mag_invalid_by_reason[r.s.reason]++;
+        }
         have_last = false; /* gap expected across an abort; counted by counters */
         return;
     }
@@ -165,7 +169,9 @@ int main(void) {
         mag_consume();
 
 #if APP_USB_STATUS
+        uint32_t ts = diag_excluded_begin(); /* D-4: not part of EX-8 */
         status_poll();
+        diag_excluded_end(ts);
 #endif
     }
 }

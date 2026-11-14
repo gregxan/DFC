@@ -96,6 +96,7 @@ static uint32_t s_cmd_len[PRE_COUNT];
 _Static_assert(offsetof(mag_sample_t, tout) == offsetof(mag_sample_t, raw) + MMC_SAMPLE_BYTES &&
                    offsetof(mag_sample_t, status) == offsetof(mag_sample_t, raw) + MMC_READ_BYTES - 1u,
                "mag_sample_t: raw, tout, status must be contiguous");
+_Static_assert(sizeof(mag_sample_t) == 24u, "reason must fit in existing padding");
 
 static uint s_dma_cmd;
 static uint s_dma_data;
@@ -364,7 +365,10 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
         if (!done) {
             diag_inc(DIAG_MAG_NOT_READY);
         }
-        s->valid = done && !s_trig_reset;
+        s->reason = !done           ? (uint8_t)MAG_SAMPLE_NOT_READY
+                    : s_trig_reset  ? (uint8_t)MAG_SAMPLE_AFTER_RESET
+                                    : (uint8_t)MAG_SAMPLE_OK;
+        s->valid = (s->reason == MAG_SAMPLE_OK);
         s->seq = s_trig_tick;
         s->timestamp_us = s_trig_time_us; /* M-10 (Rev 2.6) */
         calibrate(s, done);
@@ -374,6 +378,7 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     } else {
         /* M-9: no prior measurement. */
         s_cal_have_reset = false;
+        s->reason = (uint8_t)MAG_SAMPLE_NO_PRIOR;
         s->valid = false;
         s->seq = tick - 1u;
         s->timestamp_us = tick_time_us(tick) - TICK_PERIOD_US; /* no trigger: nominal */

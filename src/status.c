@@ -52,9 +52,10 @@ static int format_line(unsigned line) {
     switch (line) {
     case 0:
         return snprintf(s_buf, n, "STAT seq=%" PRIu32 " mode=%u t_ms=%" PRIu32 " baud0=%" PRIu32 " baud1=%" PRIu32
-                        " baud_ok=%u loop_max_us=%" PRIu32 "\r\n",
+                        " baud_ok=%u loop_max_us=%" PRIu32 " status_max_us=%" PRIu32 " tick_overrun=%" PRIu32 "\r\n",
                         s_seq, (unsigned)APP_MODE, (uint32_t)(time_us_64() / 1000u), g_diag_actual_baud[0], g_diag_actual_baud[1],
-                        (unsigned)g_app_baud_ok, diag_cycles_to_us(g_diag_max_cycles[DIAG_T_LOOP]));
+                        (unsigned)g_app_baud_ok, diag_cycles_to_us(g_diag_max_cycles[DIAG_T_LOOP]),
+                        diag_cycles_to_us(g_diag_max_cycles[DIAG_T_STATUS]), s_total[DIAG_TICK_OVERRUN]);
     case 1:
     case 2: {
         unsigned k = line - 1u;

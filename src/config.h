@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.10).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.11).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -54,7 +54,7 @@
 #define MAG_STALE_US 3000u
 #endif
 
-/* M-4 (Rev 2.10): SET/RESET strategy, selectable at run time through the
+/* M-4 (Rev 2.11): SET/RESET strategy, selectable at run time through the
  * global g_mag_sr_mode (see mag.h; currently changed only from a debugger).
  *   MAG_SR_INIT_ONLY (0) - one RESET -> SET cycle at start-up, then none. If
  *                          the mode is selected again at run time, one more
@@ -74,7 +74,7 @@
 #endif
 #define MAG_SR_INTERVAL_MAX 100u /* M-4: at least every 100 samples */
 
-/* D-1 (Rev 2.10): a valid sample counts as saturated when any axis is within
+/* D-1 (Rev 2.11): a valid sample counts as saturated when any axis is within
  * this many counts of either end of the 18-bit range (+/-8 G full scale;
  * fields above ~10 G can upset the sensor until the next SET). */
 #ifndef MAG_SAT_MARGIN

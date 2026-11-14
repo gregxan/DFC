@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.10**. The changes since Revision 2 are listed in sections 11 to 20.
+**Revision 2.11**. The changes since Revision 2 are listed in sections 11 to 21.
 
 ## 1. Scope
 
@@ -73,7 +73,7 @@ Firmware for a Seeed XIAO RP2350 that:
 ### 4.4 Line Errors
 
 - **U-15** Framing errors, break conditions, and hardware FIFO overruns shall be detected by the UART error interrupt and counted per UART. RX DMA shall continue on error (DMA-on-error disabled), and the affected bytes remain in the RX stream unmarked. No other action is taken.
-- **U-15a** After servicing an error interrupt, the handler shall mask that UART's error interrupts. The 1 ms timer handler shall re-enable them. Error counters are therefore lower bounds, capped at one count per error type per UART per millisecond.
+- **U-15a** After servicing an error interrupt, the handler shall mask all three of that UART's error interrupts (framing, break, overrun) together. The 1 ms timer handler shall re-enable them. Error counters are therefore lower bounds, capped at one count per error type per UART per millisecond. Masking all three loses no per-type counts compared with masking only the type that fired: the UART latches each type in its raw status while masked, and a type that occurred is counted once when the interrupts are re-enabled. *(Clarified in Rev 2.11.)*
 - **U-15b** Worst-case CPU load from error interrupts shall be at most 1% (2 UARTs × 1,000 per second × 5 µs).
 
 ### 4.5 Latency
@@ -118,7 +118,7 @@ Firmware for a Seeed XIAO RP2350 that:
 ### 5.2 Sampling
 
 - **M-6** A hardware timer shall start one magnetometer transaction every 1 ms (1,000 Hz). The timer shall run for the life of the application, even if the magnetometer fault flag is set, because U-8 and U-15a depend on it.
-- **M-6a** The tick period shall be 1,000 µs ± 20 µs, with no cumulative drift (each tick is scheduled from the previous target time, not from the current time).
+- **M-6a** The tick period shall be 1,000 µs ± 20 µs, with no cumulative drift (each tick is scheduled from the previous target time, not from the current time). If the next target is already in the past when the timer is re-armed, the schedule shall skip forward on the same grid. Each skipped tick is counted as a tick overrun (D-1), not as a magnetometer missed tick. *(Amended in Rev 2.11.)*
 - **M-7** Each transaction shall run entirely by DMA, using one channel to feed I2C command words and one to receive data. It consists of: *(Amended in Rev 2.8.)*
   - Reading 9 bytes from register 0x00: the 7 field bytes of the measurement triggered by the previous transaction, Tout (0x07, unused), and Status (0x08).
   - Optionally, a SET or RESET write to register 0x09 (M-4).
@@ -129,11 +129,15 @@ Firmware for a Seeed XIAO RP2350 that:
   The datasheet (MMC5983MA Rev A, p. 17) states that a data transfer "is terminated by a STOP condition or another START condition". Its example measurement sequence also chains read → START → write without a STOP. It also states that the sensor "initiate[s] a measurement" when it acknowledges the TM_M byte.
 - **M-8** Each transaction shall complete within 400 µs of its tick, or 450 µs for a transaction that includes a SET or RESET pulse (M-4). Expected durations are about 375 µs and 445 µs. The trigger write shall finish within 450 µs of the tick, leaving at least 50 µs between measurement completion (trigger + 0.5 ms) and the next read. Both figures are to be confirmed by measurement. *(Amended in Rev 2.4, Rev 2.8.)*
 - **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid. A measurement triggered immediately after a RESET pulse has inverted polarity, and its sample shall also be marked invalid. *(Amended in Rev 2.4.)* A sample whose Status register shows Meas_M_Done = 0 was read before the measurement finished. It shall be marked invalid and counted as "not ready" (D-1). The datasheet says this bit "should be checked before reading the output". *(Amended in Rev 2.8.)*
+  - Invalid samples shall still be published, so the main loop sees every event in order. *(Added in Rev 2.11.)*
+  - Each sample carries a reason code: `OK` (valid), `NO_PRIOR` (first after startup or an abort), `AFTER_RESET` (measured right after a RESET pulse), or `NOT_READY` (Meas_M_Done clear). If several reasons apply, the first in the order `NO_PRIOR`, `NOT_READY`, `AFTER_RESET` is reported.
+  - The valid flag is true exactly when the reason is `OK`.
+  - An application that needs the last valid value keeps its own copy.
 - **M-10** Each sample shall be stored as:
   - the 7 raw data bytes, plus the Status byte read with them (and the unused Tout byte), *(Status added in Rev 2.8)*
   - a 64-bit microsecond timestamp of when that measurement was triggered. This is the time its trigger (TM_M) write completed, captured at the start of the completion interrupt (M-12) of the transaction that carried the trigger. The expected lag behind the actual trigger is about 3 µs plus interrupt latency. A sample with no prior trigger (M-9) carries the nominal time of the previous tick. *(Amended in Rev 2.6.)*
   - a 32-bit sequence number: the index of the tick whose transaction triggered the measurement, so consecutive samples differ by 1,
-  - a valid flag.
+  - a valid flag and the reason code of M-9. *(Reason added in Rev 2.11.)*
 
   Conversion to 18-bit X/Y/Z values is performed by the main loop.
 
@@ -161,10 +165,11 @@ Firmware for a Seeed XIAO RP2350 that:
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
   - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9)*
+  - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). For TX, this covers the ring only. Bytes written directly to the FIFO under U-10a are not included. *(Amended in Rev 2.10.)*
 - **D-3a** Firmware shall count TX DMA completion interrupts per UART, for verification of U-13. This count is cumulative and is not cleared. *(Added in Rev 2.10.)*
-- **D-4** Firmware shall record the maximum main-loop iteration time in microseconds.
+- **D-4** Firmware shall record the maximum main-loop iteration time in microseconds. In diagnostic builds the status reporter's time is excluded from that figure, since production builds have no reporter, and is recorded as a separate maximum. *(Amended in Rev 2.11.)*
 - **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
   - aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16);
   - the I2C bus clear at startup and on completing an arbitration-loss or timeout abort (M-2, M-15, M-18);
@@ -231,12 +236,13 @@ Firmware for a Seeed XIAO RP2350 that:
   - zero TX rejects,
   - zero magnetometer sequence gaps,
   - zero I2C errors, missed ticks, and timeouts,
+  - zero tick overruns, *(added in Rev 2.11)*
   - zero not-ready magnetometer samples, in both SET/RESET modes, *(added in Rev 2.8)*
   - byte-exact match of all data sent and received on both UARTs.
 - **V-2** RX latency shall be measured with a logic analyzer: last stop bit on the RX line to a GPIO toggled when the main loop sees the byte. At least 100,000 measurements shall meet U-16.
 - **V-3** TX latency shall be measured from a GPIO toggled at the write call to the start bit on the TX line. At least 100,000 measurements shall meet U-17.
 - **V-4** Under continuous queueing for the full 10 minutes of V-1, captured at 20 MS/s or faster, the TX line shall show no gap longer than 25 µs. The number of gaps longer than 1 bit time shall be reported and shall be consistent with the number of TX DMA transfer boundaries (U-18).
-- **V-5** Maximum interrupt handler duration and critical-section duration shall be measured and shown to meet EX-3 and EX-4. API call time and main-loop iteration time shall be shown to meet EX-7 and EX-8.
+- **V-5** Maximum interrupt handler duration and critical-section duration shall be measured and shown to meet EX-3 and EX-4. API call time and main-loop iteration time shall be shown to meet EX-7 and EX-8. The loop-time figure from a diagnostic build (D-4, reporter excluded) is acceptable evidence for EX-8. *(Amended in Rev 2.11.)*
 - **V-5a** The magnetometer timestamp (M-10) shall be compared, on a logic analyzer, with the ACK of the trigger byte on SDA/SCL. The measured lag shall be reported. Expected: about 3 µs typical, and under 20 µs maximum with all subsystems active. *(Added in Rev 2.6.)*
 - **V-6** Fault injection:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
@@ -374,3 +380,11 @@ These changes cut TX CPU overhead.
 Together these remove the interrupt for non-overlapping writes. Bulk traffic still uses one transfer per chain.
 - **Amended D-3.** The TX high-water mark covers the ring only.
 - **Added D-3a.** TX interrupt counter.
+
+## 21. Revision 2.11 Changes
+
+These changes close the remaining design interpretations.
+- **Clarified U-15a.** All three error types are masked together, with no loss of per-type counts.
+- **Amended M-6a, D-1 and V-1.** A late tick is counted as a tick overrun, separate from magnetometer missed ticks, and V-1 requires zero.
+- **Amended D-4 and V-5.** In diagnostic builds the status reporter is excluded from the loop-time maximum and measured separately, so EX-8 can be verified in any diagnostic run.
+- **Amended M-9 and M-10.** Invalid samples are still published, now with a reason code.

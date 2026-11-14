@@ -2,7 +2,7 @@
 
 Each second the firmware emits seven lines:
 
-    STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=..
+    STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=.. status_max_us=.. tick_overrun=..
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
     L1 ...
     MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. bus_clear=.. valid=.. ...

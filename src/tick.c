@@ -35,7 +35,7 @@ static void __not_in_flash_func(tick_isr)(void) {
     while ((int32_t)(timer_hw->timerawl - (uint32_t)s_next_target) >= 0) {
         s_next_target += TICK_PERIOD_US;
         s_next_index++;
-        diag_inc(DIAG_MAG_MISSED_TICK);
+        diag_inc(DIAG_TICK_OVERRUN); /* D-1 (Rev 2.11) */
         timer_hw->alarm[s_alarm] = (uint32_t)s_next_target;
     }
 

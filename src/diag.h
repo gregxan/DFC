@@ -34,6 +34,8 @@ typedef enum {
     DIAG_MAG_NOT_READY, /* D-1 (Rev 2.8): samples read with Meas_M_Done clear */
     DIAG_MAG_OFFSET_CAL, /* D-1 (Rev 2.9): successful offset calibrations      */
     DIAG_MAG_SATURATED, /* D-1 (Rev 2.9): valid samples at/near full scale    */
+    DIAG_TICK_OVERRUN,  /* D-1 (Rev 2.11): 1 ms ticks skipped because the tick
+                         * ISR ran a whole period late (M-6a)              */
     DIAG_COUNT
 } diag_ctr_t;
 
@@ -51,7 +53,8 @@ typedef enum {
     DIAG_T_API_READ, /* link_read overhead, payload copy excluded (EX-7)    */
     DIAG_T_API_WRITE,
     DIAG_T_API_MAG,
-    DIAG_T_LOOP, /* main-loop iteration (D-4)                               */
+    DIAG_T_LOOP,   /* main-loop iteration excluding the status reporter (D-4) */
+    DIAG_T_STATUS, /* status reporter, diag builds only (D-4, Rev 2.11)       */
     DIAG_T_COUNT
 } diag_timing_t;
 
@@ -124,6 +127,12 @@ static inline void cs_exit(cs_t c) {
 
 /* D-4: call once at the top of every main-loop iteration. */
 void diag_loop_mark(void);
+
+/* D-4 (Rev 2.11): bracket diagnostic-only work (the USB status reporter).
+ * Its duration is recorded in DIAG_T_STATUS and excluded from the
+ * iteration time measured by diag_loop_mark(). */
+uint32_t diag_excluded_begin(void);
+void diag_excluded_end(uint32_t t0);
 
 /* Convert cycles to microseconds (rounded up) at the current clk_sys. */
 uint32_t diag_cycles_to_us(uint32_t cycles);

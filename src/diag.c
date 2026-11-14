@@ -11,6 +11,7 @@ uint32_t g_diag_actual_baud[2];
 
 static uint32_t s_loop_last;
 static bool s_loop_started;
+static uint32_t s_loop_excluded; /* cycles of excluded work this iteration */
 static uint32_t s_cycles_per_us;
 
 void diag_init(void) {
@@ -46,10 +47,21 @@ void diag_take_all(uint32_t out[DIAG_COUNT]) {
 void diag_loop_mark(void) {
     uint32_t now = diag_cycles();
     if (s_loop_started) {
-        diag_max(DIAG_T_LOOP, now - s_loop_last);
+        diag_max(DIAG_T_LOOP, now - s_loop_last - s_loop_excluded);
     }
     s_loop_started = true;
     s_loop_last = now;
+    s_loop_excluded = 0u;
+}
+
+uint32_t diag_excluded_begin(void) {
+    return diag_cycles();
+}
+
+void diag_excluded_end(uint32_t t0) {
+    uint32_t d = diag_cycles() - t0;
+    s_loop_excluded += d;
+    diag_max(DIAG_T_STATUS, d);
 }
 
 uint32_t diag_cycles_to_us(uint32_t cycles) {
