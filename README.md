@@ -138,13 +138,35 @@ have their internal pull-ups enabled.
    Menu names vary slightly between extension versions. If anything differs,
    the goal is simply to end up with the tools in
    `%USERPROFILE%\.pico-sdk`.
-4. **Open this repository's folder** (`C:\dev\dfc`) in VS Code.
-   - CMake Tools picks up `CMakePresets.json`.
-   - In the status bar, or with *CMake: Select Configure Preset*, choose
-     **release**.
-   - Run *CMake: Build* (F7).
+4. **Open this repository's folder** in VS Code: *File → Open Folder…* and
+   choose the folder that contains `CMakeLists.txt` and `CMakePresets.json`
+   (e.g. `C:\dev\dfc`).
+5. **Trust the folder.** When VS Code asks *"Do you trust the authors of the
+   files in this folder?"*, choose **Yes, I trust the authors**. In
+   *Restricted Mode* (shown in the title bar) the CMake Tools and Pico
+   extensions are disabled, and none of the commands below exist. If you
+   dismissed the prompt, use *Manage → Trust* from the Restricted Mode
+   banner, or run **Workspaces: Manage Workspace Trust** from the Command
+   Palette.
+6. **Select the preset and build.** CMake Tools reads `CMakePresets.json`.
+   Use either route:
+   - **Command Palette** (**Ctrl+Shift+P**): run **CMake: Select Configure
+     Preset** and pick **Release (production)**. Then run **CMake: Build**,
+     or press **F7**.
+   - **CMake side panel:** click the **CMake** icon (a triangle) in the left
+     Activity Bar. Under **Project Status → Configure**, click the preset
+     line ("No configure preset selected") and pick **Release
+     (production)**. Then click the **Build** button in the same panel.
 
-   The output is `build\release\firmware.uf2`.
+   Recent CMake Tools versions show these controls in the side panel rather
+   than the status bar. The first configure takes a minute or two. The
+   output is `build\release\firmware.uf2`.
+
+   If the CMake commands don't appear:
+   - check that **CMake Tools** (`ms-vscode.cmake-tools`) is installed and
+     enabled;
+   - check that the folder is trusted;
+   - check that you opened the top folder (the one with `CMakeLists.txt`).
 
 ### Command line (PowerShell or cmd)
 
