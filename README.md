@@ -106,10 +106,16 @@ have their internal pull-ups enabled.
       ```bash
       Get-ChildItem $env:USERPROFILE\.pico-sdk\cmake, $env:USERPROFILE\.pico-sdk\ninja
       ```
-      Add `...\.pico-sdk\cmake\<version>\bin` and
-      `...\.pico-sdk\ninja\<version>` to your user `PATH`: Start → "Edit
-      environment variables for your account" → `Path` → New. Restart VS
-      Code and any terminals, then check:
+      Add the folders that **contain the `.exe` files**, not their parent
+      `cmake` and `ninja` folders. For example:
+      - `C:\Users\<you>\.pico-sdk\cmake\v3.31.5\bin` (contains `cmake.exe`)
+      - `C:\Users\<you>\.pico-sdk\ninja\v1.12.1` (contains `ninja.exe`;
+        there is no `bin` subfolder)
+
+      Use the version folder names the listing showed. To add them: Start →
+      "Edit environment variables for your account" → `Path` → Edit → New.
+      Then open a **new** terminal (existing ones keep the old `PATH`),
+      fully restart VS Code, and check:
       ```bash
       cmake --version
       ```
