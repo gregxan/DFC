@@ -256,6 +256,16 @@ static bool __not_in_flash_func(controller_hung)(void) {
     return !(hw->enable & I2C_IC_ENABLE_ABORT_BITS) && (hw->status & I2C_IC_STATUS_MST_ACTIVITY_BITS);
 }
 
+/* Abort both magnetometer DMA channels without waiting (M-15, M-16).
+ * RP2350-E5: a channel's EN bit must be cleared before CHAN_ABORT, or the
+ * channel may re-trigger; start_dma() sets EN again. Clearing EN while BUSY
+ * pauses the channel, and the abort then completes it. */
+static inline void __not_in_flash_func(mag_dma_abort)(void) {
+    hw_clear_bits(&dma_hw->ch[s_dma_cmd].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    hw_clear_bits(&dma_hw->ch[s_dma_data].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    dma_hw->abort = s_dma_mask;
+}
+
 /* Arm the data channel (if any data is expected), then the command
  * channel. Tick ISR only, I2C IRQ masked, hardware idle. */
 static void __not_in_flash_func(start_dma)(mag_txn_t txn, const uint32_t *cmd, uint32_t n_cmd, uint8_t *dst,
@@ -272,6 +282,9 @@ static void __not_in_flash_func(start_dma)(mag_txn_t txn, const uint32_t *cmd, u
 
     s_txn = txn;
     s_state = MAG_BUSY;
+    /* RP2350-E5: EN was cleared by the last abort, if any. */
+    hw_set_bits(&dma_hw->ch[s_dma_data].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    hw_set_bits(&dma_hw->ch[s_dma_cmd].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
     if (n_data != 0u) {
         dma_hw->ch[s_dma_data].write_addr = (uint32_t)(uintptr_t)dst;
         dma_hw->ch[s_dma_data].al1_transfer_count_trig = n_data;
@@ -311,7 +324,7 @@ static void __not_in_flash_func(config_start)(uint32_t tick) {
 
 /* M-16: abort without waiting. */
 static void __not_in_flash_func(issue_abort)(void) {
-    dma_hw->abort = s_dma_mask;
+    mag_dma_abort();
     hw_set_bits(&i2c_regs()->enable, I2C_IC_ENABLE_ABORT_BITS);
 }
 
@@ -422,7 +435,7 @@ static void __not_in_flash_func(i2c_isr)(void) {
         /* Stop both channels first (no wait). The register reads below give
          * any in-flight DMA write time to retire into the still-flushed TX
          * FIFO before the flush is released. */
-        dma_hw->abort = s_dma_mask;
+        mag_dma_abort();
         uint32_t src = hw->tx_abrt_source;
         (void)hw->clr_tx_abrt;       /* releases the TX FIFO flush     */
         (void)hw->clr_stop_det;      /* the abort's STOP is not completion */
@@ -450,7 +463,7 @@ static void __not_in_flash_func(i2c_isr)(void) {
             bool cmd_done = (dma_hw->ch[s_dma_cmd].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) == 0u;
             if (!(data_done && cmd_done)) {
                 /* Unexpected STOP mid-transaction. */
-                dma_hw->abort = s_dma_mask;
+                mag_dma_abort();
                 diag_inc(s_txn == TXN_PROBE ? DIAG_MAG_PRODUCT_ID_FAULT : DIAG_MAG_I2C_ERROR);
                 s_trig_ok = false;
                 s_state = MAG_ABORTED;

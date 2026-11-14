@@ -33,6 +33,12 @@ static void __not_in_flash_func(tick_isr)(void) {
      * already in the past (only possible if this ISR was held off for a
      * whole period, e.g. by a debugger), skip forward on the same grid. */
     while ((int32_t)(timer_hw->timerawl - (uint32_t)s_next_target) >= 0) {
+        /* The alarm may or may not have fired for that past target (it was
+         * armed at, or just before, the matching time). Disarm it and drop
+         * any pending interrupt so the skipped tick cannot run late as an
+         * extra tick (datasheet: ALARM fires on equality; ARMED disarms). */
+        timer_hw->armed = s_alarm_bit;
+        timer_hw->intr = s_alarm_bit;
         s_next_target += TICK_PERIOD_US;
         s_next_index++;
         diag_inc(DIAG_TICK_OVERRUN); /* D-1 (Rev 2.11) */

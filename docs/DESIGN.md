@@ -459,3 +459,56 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | B-19, B-20 | `CMakeLists.txt` (`pico_enable_stdio_uart 0`, USB only with `APP_USB_STATUS`), `status_init()` |
 | B-21 … B-25 | `CMakeLists.txt` (`-g` in Release, target-wide C flags, per-file SDK exceptions) |
 | V-1 … V-7 | docs/VERIFICATION.md, `tools/` |
+
+## 8. RP2350 datasheet cross-check
+
+The implementation was checked against the RP2350 register documentation,
+as carried in the Pico SDK 2.2.0 generated headers and `RP2350.svd`, plus the
+errata the SDK cites. The full datasheet PDF was not available, so its
+errata chapter and peripheral prose sections remain to be checked
+(see "Open" below).
+
+**Fixed as a result**
+
+- **RP2350-E5 (DMA abort).** The datasheet requires an aborted channel's EN
+  bit to be cleared before `CHAN_ABORT`, or the channel may re-trigger.
+  `mag_dma_abort()` now clears EN on both magnetometer channels before
+  aborting, and `start_dma()` sets it again. The UART channels are never
+  aborted.
+- **Timer alarm race.** An alarm armed at, or just before, its matching time
+  might fire after the tick has already skipped past it. The skip-ahead
+  path in `tick_isr()` now disarms the alarm (`ARMED`) and clears its
+  pending interrupt before re-arming.
+
+**Confirmed**
+
+| Design assumption | Register documentation |
+|---|---|
+| Lazy TX interrupt (U-13): completion is latched while the interrupt is disabled | `INTR`: raw status "ignores any masking"; writing `INTS0` clears it |
+| RX byte is in RAM before the position advances (U-5) | `WRITE_ADDR` "updates automatically each time a write completes" |
+| Endless RX DMA, ring sizes (U-4, U-7) | `TRANS_COUNT.MODE = 0xF`: endless, no interrupts; ring 2–32768 B |
+| No restart before an abort completes (M-16) | `CHAN_ABORT` must read all-zero before restart (`hw_idle()`) |
+| Direct FIFO write (U-10a) | `UARTFR.TXFE`: transmit FIFO empty (32 free) |
+| Break inserts one 0 byte (U-15) | `UARTDR.BE`: "only one 0 character is loaded into the FIFO" |
+| Error interrupts latch while masked (U-15a) | `UARTRIS` raw state; `UARTIMSC` only masks |
+| M-7 command list | `IC_DATA_CMD` RESTART/STOP semantics; no STOP with an empty FIFO stalls the bus (`controller_hung()`) |
+| Abort (M-15, M-16) | `IC_ENABLE.ABORT`: STOP, flush, then TX_ABRT; settable only while enabled |
+| Abort clear ordering | TX_ABRT flushes TX and RX FIFOs until `IC_CLR_TX_ABRT` is read |
+| Target address reuse | `IC_TAR` writable only while disabled; left at 0x30 by the SDK's blocking calls |
+| DMA thresholds | `IC_DMA_TDLR` (≤ 8 entries) and `IC_DMA_RDLR` (≥ 1 entry) |
+| Tick (M-6, M-6a) | `ALARMx` fires on equality with `TIMELR`; `DBGPAUSE` resets to 7 |
+| Priorities (EX-5) | `__NVIC_PRIO_BITS = 4`: 0x00/0x40/0x80/0xC0 are distinct |
+| PIO handover of SCL (M-18) | `gpio_set_function` sets IE, clears OD and pad isolation (`ISO`) |
+| RP2350-E2 (SIO writes above +0x180 alias spinlocks) | Not affected: only `gpio_togl` (+0x28) is written |
+
+**Open (needs the datasheet PDF)**
+
+- Which UART DMA request drives the DREQ: single (per byte) or burst (FIFO
+  level). This decides U-16. V-2 measures it, and a low RX FIFO level is the
+  mitigation if it's burst.
+- The full errata list (e.g. RP2350-E9 pad leakage with pull-downs; this
+  design uses only pull-ups and outputs), and which silicon revision the
+  XIAO carries.
+- That PIO can read SCL while the pin's function is I2C (the bus clear's
+  `wait`).
+
