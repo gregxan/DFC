@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "hardware/dma.h"
+#include "hardware/structs/dma_debug.h"
 #include "hardware/gpio.h"
 #include "hardware/i2c.h"
 #include "hardware/irq.h"
@@ -282,6 +283,14 @@ static void __not_in_flash_func(start_dma)(mag_txn_t txn, const uint32_t *cmd, u
 
     s_txn = txn;
     s_state = MAG_BUSY;
+    /* M-7a (Rev 2.12): resynchronise both channels' DREQ credit counters.
+     * An abort flushes the I2C FIFOs, and the drain above reads the RX FIFO
+     * with the CPU; either leaves a counter that no longer matches its FIFO
+     * (datasheet 12.6.4.2), which would let the data channel read an empty
+     * RX FIFO or starve the command channel. Writing DBG_CTDREQ clears the
+     * counter and restarts the handshake. Both channels are idle here. */
+    dma_debug_hw->ch[s_dma_data].dbg_ctdreq = 0u;
+    dma_debug_hw->ch[s_dma_cmd].dbg_ctdreq = 0u;
     /* RP2350-E5: EN was cleared by the last abort, if any. */
     hw_set_bits(&dma_hw->ch[s_dma_data].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
     hw_set_bits(&dma_hw->ch[s_dma_cmd].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);

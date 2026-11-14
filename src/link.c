@@ -19,8 +19,6 @@ _Static_assert(LINK_RX_RING_BITS >= 8 && LINK_RX_RING_BITS <= 15,
 _Static_assert(LINK_TX_RING_BITS >= 6 && LINK_TX_RING_BITS <= 15,
                "TX ring must be 64 B .. 32 KB (DMA ring mode limit)");
 
-#define LINK_UART_FIFO_DEPTH 32u /* PL011 TX FIFO entries */
-
 #define UART_ERR_BITS (UART_UARTIMSC_FEIM_BITS | UART_UARTIMSC_BEIM_BITS | UART_UARTIMSC_OEIM_BITS)
 
 /* U-7: rings aligned to their size, as DMA ring mode requires. */
@@ -138,24 +136,22 @@ size_t __not_in_flash_func(link_read)(link_id_t id, uint8_t *dst, size_t max) {
 
 /* ---------------------------------------------------------------- TX --- */
 /*
- * U-10a, U-13 (Rev 2.10): two efficiency measures on top of the ring + DMA design.
+ * U-13 (Rev 2.10, 2.12): lazy completion interrupt.
  *
- * (B) Direct FIFO write. When TX is completely idle (no transfer in flight,
- *     ring empty), link_write() writes the first bytes straight into the
- *     32-entry UART FIFO: no copy, no DMA set-up, no interrupt, and the
- *     lowest start-bit latency. Anything that does not fit goes through the
- *     ring and DMA, after those bytes, so order is preserved.
+ * The CPU never touches the UART TX FIFO: it is paced by the TX DMA
+ * channel's DREQ credit counter, and the datasheet (12.6.4.2) forbids
+ * accessing a FIFO the DMA services. (A direct-FIFO fast path was removed
+ * in Rev 2.12 for this reason.)
  *
- * (A) Lazy completion interrupt. A transfer always covers everything queued
- *     when it starts, so its completion interrupt is only needed if more
- *     data is queued while it runs. The channel's interrupt is therefore
- *     disabled when a transfer starts and enabled by link_write() only when
- *     it queues data behind a running transfer. The DMA latches completion
- *     in its raw status whether or not the interrupt is enabled, so enabling
- *     it after the transfer has finished fires at once. A finished transfer
- *     that no interrupt retired is retired ("reaped") by the next
- *     link_write() or link_tx_free(), which also starts any data queued
- *     behind it.
+ * A transfer always covers everything queued when it starts, so its
+ * completion interrupt is only needed if more data is queued while it runs.
+ * The channel's interrupt is therefore disabled when a transfer starts and
+ * enabled by link_write() only when it queues data behind a running
+ * transfer. The DMA latches completion in its raw status whether or not the
+ * interrupt is enabled, so enabling it after the transfer has finished
+ * fires at once. A finished transfer that no interrupt retired is retired
+ * ("reaped") by the next link_write() or link_tx_free(), which also starts
+ * any data queued behind it.
  *
  * tx_busy means "a transfer was started and has not been retired yet".
  */
@@ -205,24 +201,6 @@ size_t __not_in_flash_func(link_tx_free)(link_id_t id) {
     return TX_SIZE - (l->tx_head - l->tx_tail);
 }
 
-/* (B) Write up to the FIFO's free space directly. Returns bytes written. */
-static inline uint32_t __not_in_flash_func(tx_direct)(link_t *l, const uint8_t *src, uint32_t n) {
-    uart_hw_t *hw = hw_of(l);
-    uint32_t k = 0;
-    if (hw->fr & UART_UARTFR_TXFE_BITS) {
-        /* FIFO empty: all LINK_UART_FIFO_DEPTH entries are free. */
-        uint32_t m = n < LINK_UART_FIFO_DEPTH ? n : LINK_UART_FIFO_DEPTH;
-        for (; k < m; k++) {
-            hw->dr = src[k];
-        }
-    } else {
-        while (k < n && !(hw->fr & UART_UARTFR_TXFF_BITS)) {
-            hw->dr = src[k++];
-        }
-    }
-    return k;
-}
-
 bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t len) {
     uint32_t t0 = diag_cycles();
     link_t *l = &s_links[id];
@@ -236,8 +214,7 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
 
     uint32_t head = l->tx_head;
     uint32_t used = head - l->tx_tail;
-    /* U-11: decided on the whole message before anything is sent, so a
-     * rejected write never leaves part of itself on the line. */
+    /* U-11: the whole message or nothing. */
     if (len > TX_SIZE - used) {
         diag_inc(ctr(id, DIAG_L0_TX_REJECT));
         diag_max(DIAG_T_API_WRITE, diag_cycles() - t0);
@@ -246,19 +223,6 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
 
     uint32_t n = (uint32_t)len;
     uint32_t tc = diag_cycles();
-
-    /* (B) TX idle: no transfer in flight and nothing queued. Only the main
-     * loop produces, and no interrupt can start a transfer now, so no
-     * critical section is needed. */
-    if (!l->tx_busy && used == 0u) {
-        uint32_t k = tx_direct(l, src, n);
-        src += k;
-        n -= k;
-        if (n == 0u) {
-            diag_max(DIAG_T_API_WRITE, tc - t0); /* FIFO writes count as payload copy */
-            return true;
-        }
-    }
 
     uint32_t idx = head & TX_MASK;
     uint32_t first = TX_SIZE - idx;

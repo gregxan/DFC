@@ -71,7 +71,7 @@ Durations are recorded with the DWT cycle counter into `g_diag_max_cycles[]`
 - The RX high-water mark is taken at every read, before the copy. Between
   reads the fill level only grows, so the maximum is always observed (D-3).
 
-### TX (U-10 … U-14, U-18; Rev 2.10)
+### TX (U-10 … U-14, U-18; Rev 2.10, 2.12)
 
 - **Ring and DMA, as before.** A 4 KB ring is aligned to its size. The TX
   DMA uses **read-address ring wrapping**, so one transfer can cross the
@@ -88,16 +88,10 @@ Durations are recorded with the DWT cycle counter into `g_diag_max_cycles[]`
      `tx_tail`, and starts any data queued behind it.
   2. **Reject** the whole message if it doesn't fit in the ring (U-11).
      Nothing has been sent at this point.
-  3. **Direct FIFO write (U-10a).** If no transfer is outstanding and the
-     ring is empty, the leading bytes go straight into `UARTDR`:
-     - if `TXFE` is set (FIFO empty), up to 32 bytes are written without
-       further checks;
-     - otherwise bytes are written while `TXFF` is clear.
-
-     If everything fits, the write is done, with no copy, DMA or interrupt.
-  4. **The rest** is copied into the ring, then `__dmb()` and `tx_head` is
-     published.
-  5. **Critical section:** reap again. If the DMA is idle, start a transfer
+  3. **Copy** the message into the ring, then `__dmb()` and publish
+     `tx_head`. The CPU never writes the UART FIFO itself (EX-9; the
+     direct-write fast path U-10a was withdrawn in Rev 2.12).
+  4. **Critical section:** reap again. If the DMA is idle, start a transfer
      of everything queued, with the completion interrupt **disabled**.
      Otherwise **enable** the channel's completion interrupt, so the ISR
      chains the next transfer (U-13). If the transfer already finished, the
@@ -120,7 +114,8 @@ Durations are recorded with the DWT cycle counter into `g_diag_max_cycles[]`
   interleaved between every step of `link_write()`. Every run kept byte
   order with no loss, and the queue drained with no further API calls. The
   check found, and led to the fix of, a stall: a reap that didn't start
-  data queued behind the retired transfer.
+  data queued behind the retired transfer. The model was re-run after the
+  direct-write path was removed (Rev 2.12).
 
 ### Line errors (U-15 … U-15b)
 
@@ -436,7 +431,8 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-1, U-2, R-3 | `link_setup()`; actual baud in `g_diag_actual_baud[]` |
 | U-3 … U-7 | `link_setup()` RX DMA; `LINK_RX_RING_BITS` |
 | U-8, U-8a, U-9 | `link_tick_isr()`, `rx_total_now()`, `link_read()`, `rx_overflow()` |
-| U-10 … U-14 (incl. U-10a) | `link_write()`, `tx_direct()`, `tx_reap()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
+| U-10 … U-14 | `link_write()`, `tx_reap()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
+| M-7a, EX-9 | `start_dma()` (`dma_debug_hw->ch[].dbg_ctdreq`) |
 | D-3a | `g_diag_tx_irq[]` |
 | D-4 (diag exclusion) | `diag_excluded_begin()`, `diag_excluded_end()`, `DIAG_T_STATUS` |
 | M-6a (overrun) | `tick_isr()`, `DIAG_TICK_OVERRUN` |
@@ -462,11 +458,10 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 
 ## 8. RP2350 datasheet cross-check
 
-The implementation was checked against the RP2350 register documentation,
-as carried in the Pico SDK 2.2.0 generated headers and `RP2350.svd`, plus the
-errata the SDK cites. The full datasheet PDF was not available, so its
-errata chapter and peripheral prose sections remain to be checked
-(see "Open" below).
+The implementation was checked first against the register documentation
+in the Pico SDK 2.2.0 headers and `RP2350.svd`, then against the full RP2350
+datasheet (1 October 2026 edition): the DMA, UART, I2C, timer and GPIO
+chapters, and Appendix D (errata).
 
 **Fixed as a result**
 
@@ -488,7 +483,6 @@ errata chapter and peripheral prose sections remain to be checked
 | RX byte is in RAM before the position advances (U-5) | `WRITE_ADDR` "updates automatically each time a write completes" |
 | Endless RX DMA, ring sizes (U-4, U-7) | `TRANS_COUNT.MODE = 0xF`: endless, no interrupts; ring 2–32768 B |
 | No restart before an abort completes (M-16) | `CHAN_ABORT` must read all-zero before restart (`hw_idle()`) |
-| Direct FIFO write (U-10a) | `UARTFR.TXFE`: transmit FIFO empty (32 free) |
 | Break inserts one 0 byte (U-15) | `UARTDR.BE`: "only one 0 character is loaded into the FIFO" |
 | Error interrupts latch while masked (U-15a) | `UARTRIS` raw state; `UARTIMSC` only masks |
 | M-7 command list | `IC_DATA_CMD` RESTART/STOP semantics; no STOP with an empty FIFO stalls the bus (`controller_hung()`) |
@@ -501,14 +495,39 @@ errata chapter and peripheral prose sections remain to be checked
 | PIO handover of SCL (M-18) | `gpio_set_function` sets IE, clears OD and pad isolation (`ISO`) |
 | RP2350-E2 (SIO writes above +0x180 alias spinlocks) | Not affected: only `gpio_togl` (+0x28) is written |
 
-**Open (needs the datasheet PDF)**
+- **DREQ credit counters (datasheet §12.6.4.2, Rev 2.12).** The DMA keeps a
+  per-channel count of how many accesses it believes the peripheral FIFO
+  can take, and the CPU "must not access a FIFO currently being serviced by
+  the DMA". Two consequences:
+  - The UART direct-FIFO write (U-10a) was **removed**. It would have let
+    the next TX DMA transfer overfill the FIFO.
+  - `start_dma()` now writes `DBG_CTDREQ` on both magnetometer channels
+    before every transaction (M-7a). After an I2C abort the controller
+    flushes its FIFOs, and the RX drain reads the FIFO with the CPU, so the
+    counters no longer matched. That could corrupt the first sample after
+    an abort, or stall the command channel.
 
-- Which UART DMA request drives the DREQ: single (per byte) or burst (FIFO
-  level). This decides U-16. V-2 measures it, and a low RX FIFO level is the
-  mitigation if it's burst.
-- The full errata list (e.g. RP2350-E9 pad leakage with pull-downs; this
-  design uses only pull-ups and outputs), and which silicon revision the
-  XIAO carries.
-- That PIO can read SCL while the pin's function is I2C (the bus clear's
-  `wait`).
+**Errata (Appendix D, all 31 items)**
 
+| Erratum | Applies | Status |
+|---|---|---|
+| E5 DMA abort / CHAIN_TO | Yes | Fixed: EN cleared before abort (`mag_dma_abort()`), set again in `start_dma()` |
+| E8 CHAIN_TO with zero-length transfers | No | No chaining, and no zero-length triggers |
+| E9 GPIO pad leakage | No | A2 silicon only, and only pins relying on pull-downs; all inputs here use pull-ups |
+| E27 bus-priority miswiring | No | `BUS_PRIORITY` left at its default |
+| E12 USB status synchronisation | Diag builds | Satisfied: `clk_sys` 150 MHz is more than 10% above `clk_usb` 48 MHz |
+| E2 SIO spinlock aliasing | No | Only `gpio_togl` is written; the SDK applies its workaround |
+| E4, E6, E7, E29, E31 | No | Hazard3 (RISC-V) only |
+| Bootrom, OTP, XIP, ACCESSCTRL, RCP, E1 | No | Unused, or not affected by a copy-to-RAM Arm build |
+
+**Previously open, now closed**
+
+- **PIO reads SCL while its function is I2C.** Confirmed: "the input is
+  always connected, so the PIOs can always see the state of all pins".
+- **UART RX DMA request.** The single-character request is asserted when
+  the RX FIFO "contains at least one character". With the credit scheme the
+  DMA keeps "as many transfers in-flight as the peripheral has capacity
+  for", so each byte should move on arrival. This supports U-16. V-2 still
+  confirms it, because the datasheet doesn't spell out the request wiring.
+- **Silicon revision.** E9 is fixed from A3 onwards. Nothing else here
+  depends on the revision.

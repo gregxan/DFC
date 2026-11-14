@@ -1,5 +1,5 @@
-"""Randomised model of the TX path in src/link.c (U-10a direct FIFO write,
-U-13 lazy completion interrupt). Interleaves DMA progress, UART draining and
+"""Randomised model of the TX path in src/link.c (U-13 lazy completion
+interrupt; Rev 2.12). Interleaves DMA progress, UART draining and
 the ISR between every step of link_write(), and checks byte order, no loss,
 and that the queue drains with no further API calls.
 
@@ -47,17 +47,6 @@ def run(seed):
         used=st['head']-st['tail']
         if len(msg)>SIZE-used: return False
         n=list(msg)
-        if not st['busy'] and used==0:
-            # direct FIFO writes, interleaved with UART draining (DMA idle)
-            empty=(len(fifo)==0); k=0
-            if empty:
-                m=min(len(n),FIFO)
-                while k<m: fifo.append(n[k]); k+=1
-            else:
-                while k<len(n) and len(fifo)<FIFO:
-                    fifo.append(n[k]); k+=1; background()
-            n=n[k:]
-            if not n: return True
         background()
         for b in n: ring[st['head']%SIZE]=b; st['head']+=1
         background()

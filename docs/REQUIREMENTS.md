@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.11**. The changes since Revision 2 are listed in sections 11 to 21.
+**Revision 2.12**. The changes since Revision 2 are listed in sections 11 to 22.
 
 ## 1. Scope
 
@@ -39,6 +39,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **EX-6** Interrupt handlers and queue access functions shall execute from RAM, not flash (satisfied by B-18).
 - **EX-7** Each RX read, TX write, and read-latest call shall take at most 2 µs plus payload copy time.
 - **EX-8** The maximum main-loop iteration time (D-4) shall be at most 100 µs. This gives a worst-case in-application RX latency of about 120 µs.
+- **EX-9** The CPU shall not read or write a peripheral FIFO that a DMA channel is paced against, unless that channel's DREQ credit counter is resynchronised (DBG_CTDREQ) before its next transfer. The RP2350 datasheet (§12.6.4.2) warns that such access "causes the channel and peripheral to become desynchronised, and can cause corruption or loss of data". *(Added in Rev 2.12.)*
 
 ## 4. UART Requirements
 
@@ -60,8 +61,8 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 4.3 Transmit
 
-- **U-10** The TX write function shall be non-blocking. It copies bytes into a per-UART TX ring buffer and returns immediately, except as allowed by U-10a. *(Amended in Rev 2.10.)*
-- **U-10a** When TX is completely idle (no DMA transfer outstanding and the ring empty), the write function shall write the leading bytes of the message directly into the UART TX FIFO, up to its free space (32 entries when the FIFO is empty). The rest goes through the ring and DMA (U-12), after those bytes, so order is preserved. The U-11 accept/reject decision is made on the whole message before any byte is written. *(Added in Rev 2.10.)*
+- **U-10** The TX write function shall be non-blocking. It copies bytes into a per-UART TX ring buffer and returns immediately. *(U-10a exception withdrawn in Rev 2.12.)*
+- **U-10a** *(Withdrawn in Rev 2.12.)* Writing directly into the UART TX FIFO would desynchronise the TX DMA channel's DREQ credit counter (EX-9), and could make the next DMA transfer overfill the FIFO and lose bytes. The lazy completion interrupt (U-13) already removes the interrupt for non-overlapping writes.
 - **U-11** If the TX ring lacks space for the entire write, the write shall be rejected in full, the per-UART TX overflow counter incremented, and an error returned. No partial message is queued.
 - **U-12** If TX DMA is idle when data is queued in the ring, the write function shall start DMA transmission before returning. A DMA transfer that has finished but has not yet been retired by an interrupt counts as idle: the write function retires it and starts the next. *(Amended in Rev 2.10.)*
 - **U-13** While the TX queue holds data, the UART TX FIFO shall be kept non-empty, within the gap limits of U-18. When a TX DMA transfer completes and the queue still holds data, the TX DMA completion handler shall start the next transfer. *(Amended in Rev 2.10.)*
@@ -127,6 +128,7 @@ Firmware for a Seeed XIAO RP2350 that:
   The segments are joined by repeated STARTs, with a single STOP at the end:
   `START W(0x00) · RESTART R×9 · [RESTART W(0x09, SET|RESET)] · RESTART W(0x09, TM_M) · STOP`.
   The datasheet (MMC5983MA Rev A, p. 17) states that a data transfer "is terminated by a STOP condition or another START condition". Its example measurement sequence also chains read → START → write without a STOP. It also states that the sensor "initiate[s] a measurement" when it acknowledges the TM_M byte.
+- **M-7a** Before starting each magnetometer transaction (sample, probe or configuration), firmware shall resynchronise the DREQ credit counters of both magnetometer DMA channels (DBG_CTDREQ). An abort flushes the I2C TX and RX FIFOs, and draining leftover RX data reads a DMA-serviced FIFO. Either leaves a counter that no longer matches its FIFO (EX-9), which could let the data channel read an empty RX FIFO (corrupting a sample) or starve the command channel (a stall). *(Added in Rev 2.12.)*
 - **M-8** Each transaction shall complete within 400 µs of its tick, or 450 µs for a transaction that includes a SET or RESET pulse (M-4). Expected durations are about 375 µs and 445 µs. The trigger write shall finish within 450 µs of the tick, leaving at least 50 µs between measurement completion (trigger + 0.5 ms) and the next read. Both figures are to be confirmed by measurement. *(Amended in Rev 2.4, Rev 2.8.)*
 - **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid. A measurement triggered immediately after a RESET pulse has inverted polarity, and its sample shall also be marked invalid. *(Amended in Rev 2.4.)* A sample whose Status register shows Meas_M_Done = 0 was read before the measurement finished. It shall be marked invalid and counted as "not ready" (D-1). The datasheet says this bit "should be checked before reading the output". *(Amended in Rev 2.8.)*
   - Invalid samples shall still be published, so the main loop sees every event in order. *(Added in Rev 2.11.)*
@@ -167,7 +169,7 @@ Firmware for a Seeed XIAO RP2350 that:
   - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9)*
   - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
-- **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). For TX, this covers the ring only. Bytes written directly to the FIFO under U-10a are not included. *(Amended in Rev 2.10.)*
+- **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). *(Rev 2.10 note on direct FIFO writes withdrawn with U-10a in Rev 2.12.)*
 - **D-3a** Firmware shall count TX DMA completion interrupts per UART, for verification of U-13. This count is cumulative and is not cleared. *(Added in Rev 2.10.)*
 - **D-4** Firmware shall record the maximum main-loop iteration time in microseconds. In diagnostic builds the status reporter's time is excluded from that figure, since production builds have no reporter, and is recorded as a separate maximum. *(Amended in Rev 2.11.)*
 - **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
@@ -388,3 +390,14 @@ These changes close the remaining design interpretations.
 - **Amended M-6a, D-1 and V-1.** A late tick is counted as a tick overrun, separate from magnetometer missed ticks, and V-1 requires zero.
 - **Amended D-4 and V-5.** In diagnostic builds the status reporter is excluded from the loop-time maximum and measured separately, so EX-8 can be verified in any diagnostic run.
 - **Amended M-9 and M-10.** Invalid samples are still published, now with a reason code.
+
+## 22. Revision 2.12 Changes
+
+These changes follow the RP2350 datasheet review (datasheet dated 1 October 2026).
+- **Added EX-9.** No CPU access to a FIFO that a DMA channel is paced against, without resynchronising the channel's DREQ credit counter (datasheet §12.6.4.2).
+- **Withdrew U-10a** (direct TX FIFO write) under EX-9. The lazy completion interrupt (U-13) keeps the interrupt saving.
+- **Added M-7a.** Resynchronise both magnetometer DMA channels' DREQ counters before every transaction. This prevents corrupted samples or stalls after I2C aborts.
+- **Implementation fixes** from the same review, with no requirement change:
+  - RP2350-E5: clear EN before aborting a DMA channel.
+  - Disarm the tick alarm before re-arming when skipping ahead.
+- **Errata checked** (Appendix D, all 31 items). Only E5 and, in diagnostic builds, E12 apply. E12 is satisfied by `clk_sys` (150 MHz) being more than 10% faster than `clk_usb` (48 MHz).

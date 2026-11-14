@@ -266,15 +266,14 @@ illustration). Point each board axis at magnetic north in turn and record
 which sensor axis, and which sign, responds. Document the mapping for
 the main-loop application.
 
-## TX interrupt economy (U-10a, U-13, D-3a; Rev 2.10)
+## TX interrupt economy (U-13, D-3a; Rev 2.10, 2.12)
 
 Use the `diag` build, echo mode. Read the `tx_irq=` field on the `L0` and
 `L1` status lines.
 
 1. **Isolated bytes.** Run `latency_stimulus.py`, one byte per ~1 ms.
-   - `tx_irq` should not increase: every echo is a direct FIFO write.
-   - On the analyzer, the TX_WRITE → start-bit latency (V-3) should be at
-     or below the previous DMA-based figure.
+   - `tx_irq` should not increase. Each echo runs as its own DMA transfer,
+     which the next write retires without an interrupt.
 2. **Saturated echo.** Run `soak_test.py --mode echo`.
    - `tx_irq` should stay far below the byte rate (≪ 92,000/s per UART).
    - Record the rate. Soak results must be unchanged (byte-exact, no
@@ -282,7 +281,18 @@ Use the `diag` build, echo mode. Read the `tx_irq=` field on the `L0` and
 3. **Bulk.** Run `diag-pattern` with `soak_test.py --mode pattern`.
    - `tx_irq` rises by roughly one per transfer chain.
    - V-4 gaps are unchanged.
-4. **Messages longer than the FIFO.** On an idle line, send a single
-   100-byte write, for example from a debug build. The first 32 bytes go
-   out directly, the rest via DMA, with no gap at the hand-over beyond
-   U-18 and bytes in order.
+
+## Magnetometer after aborts (M-7a, Rev 2.12)
+
+This checks that the DREQ counter resynchronisation keeps samples intact
+after I2C aborts.
+
+1. With the sensor still, note `x/y/z` on the `MAGS` line.
+2. Run the V-6 disconnect test, and then the SDA-short test, 20 times each.
+3. After each reconnect or release:
+   - the first **valid** sample's `x/y/z` must match the noted values to
+     within noise. Byte-shifted data would be off by orders of magnitude;
+   - its Status byte (`r.s.status`, or the 9th byte on the analyzer) must be
+     `0x01`;
+   - the `MAG` line must show `timeout` not climbing once the bus is
+     healthy. A climbing count would mean a starved command channel.
