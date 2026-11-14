@@ -33,8 +33,42 @@ macro(_pick_path var candidate)
     endif()
 endmacro()
 
+# Newest match of a glob pattern (natural version order), or "" if none.
+function(_newest_match out)
+    file(GLOB _cands LIST_DIRECTORIES true ${ARGN})
+    if(_cands)
+        list(SORT _cands COMPARE NATURAL ORDER DESCENDING)
+        list(GET _cands 0 _first)
+        set(${out} "${_first}" PARENT_SCOPE)
+    else()
+        set(${out} "" PARENT_SCOPE)
+    endif()
+endfunction()
+
 _pick_path(PICO_TOOLCHAIN_PATH "${_pico_home}/toolchain/${PINNED_TOOLCHAIN_VERSION}")
+if(NOT DEFINED PICO_TOOLCHAIN_PATH)
+    # Any toolchain version the extension installed (newest first).
+    _newest_match(_tc "${_pico_home}/toolchain/*")
+    _pick_path(PICO_TOOLCHAIN_PATH "${_tc}")
+endif()
+
+# picotool: the directory holding picotoolConfig.cmake. The extension's
+# folder layout and version naming vary between releases, so search for the
+# config file under .pico-sdk/picotool rather than assume one path. The SDK
+# accepts any picotool 2.x >= 2.1.1 and stops with a clear error otherwise.
 _pick_path(picotool_DIR "${_pico_home}/picotool/${PINNED_PICOTOOL_VERSION}/picotool")
+if(NOT DEFINED picotool_DIR)
+    _newest_match(_ptc
+        "${_pico_home}/picotool/*/picotool/picotoolConfig.cmake"
+        "${_pico_home}/picotool/*/picotoolConfig.cmake"
+        "${_pico_home}/picotool/*/*/picotoolConfig.cmake"
+        "${_pico_home}/picotool/*/picotool/picotool-config.cmake"
+        "${_pico_home}/picotool/*/picotool-config.cmake")
+    if(_ptc)
+        get_filename_component(_ptd "${_ptc}" DIRECTORY)
+        _pick_path(picotool_DIR "${_ptd}")
+    endif()
+endif()
 
 # The extension ships pioasm in its "tools" bundle, which provides a CMake
 # config file that sets pioasm_DIR.
@@ -49,12 +83,20 @@ if(NOT DEFINED pioasm_DIR AND NOT DEFINED ENV{pioasm_DIR})
 endif()
 _pick_path(pioasm_DIR "")
 
+# Report what was found, so a failed lookup is obvious in the configure log.
+foreach(_t PICO_TOOLCHAIN_PATH picotool_DIR pioasm_DIR)
+    if(DEFINED ${_t})
+        message(STATUS "host_tools: ${_t} = ${${_t}}")
+    endif()
+endforeach()
+
 if(CMAKE_HOST_WIN32)
     foreach(_t picotool_DIR pioasm_DIR)
         if(NOT DEFINED ${_t})
-            message(WARNING "${_t} is not set and the VS Code extension's copy was not found. "
-                            "Set ${_t} to the prebuilt Windows tool (see README.md, Manual setup); "
-                            "otherwise the SDK will try to build it with a host compiler (B-4).")
+            message(WARNING "${_t} is not set and no copy was found under ${_pico_home}. "
+                            "Set ${_t} to the folder containing the prebuilt Windows tool's "
+                            "CMake config file (see README.md, Manual setup); otherwise the SDK "
+                            "will try to build it with a host compiler and fail on Windows (B-4).")
         endif()
     endforeach()
 endif()
