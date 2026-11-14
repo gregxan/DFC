@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "hardware/dma.h"
+#include "hardware/structs/dma_debug.h"
 #include "hardware/gpio.h"
 #include "hardware/irq.h"
 #include "hardware/uart.h"
@@ -18,6 +19,8 @@ _Static_assert(LINK_RX_RING_BITS >= 8 && LINK_RX_RING_BITS <= 15,
                "RX ring must be 256 B .. 32 KB (DMA ring mode limit, and > 1 ms of data for U-8)");
 _Static_assert(LINK_TX_RING_BITS >= 6 && LINK_TX_RING_BITS <= 15,
                "TX ring must be 64 B .. 32 KB (DMA ring mode limit)");
+
+#define LINK_UART_FIFO_DEPTH 32u /* PL011 FIFO entries */
 
 #define UART_ERR_BITS (UART_UARTIMSC_FEIM_BITS | UART_UARTIMSC_BEIM_BITS | UART_UARTIMSC_OEIM_BITS)
 
@@ -247,7 +250,11 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     tx_reap(l);
     if (!l->tx_busy) {
         tx_start(l);
-    } else {
+    } else if (l->tx_tail + l->tx_inflight != l->tx_head) {
+        /* The running transfer does not cover everything queued, so its
+         * completion must chain the next one. If it already covers this
+         * data (it was started after the head update above, by the reap or
+         * by the ISR), no interrupt is needed. */
         hw_set_bits(&dma_hw->inte0, tx_bit(l));
     }
     cs_exit(cs);
@@ -335,6 +342,13 @@ static bool link_setup(link_id_t id, uart_inst_t *uart, uint tx_pin, uint rx_pin
     l->tx_pin = tx_pin;
     l->rx_pin = rx_pin;
 
+    /* HW-6a first: with no pin selected, a peripheral input reads 0 (the
+     * datasheet's GPIO muxing ORs the selecting pins), which the UART would
+     * take as a start bit or break the moment its receiver is enabled. So
+     * give the RX pin its pull-up and function before the UART is enabled. */
+    gpio_pull_up(rx_pin);
+    gpio_set_function(rx_pin, UART_FUNCSEL_NUM(uart, rx_pin));
+
     /* U-1, U-2 */
     uint actual = uart_init(uart, LINK_BAUD);
     uart_set_format(uart, 8, 1, UART_PARITY_NONE);
@@ -347,9 +361,8 @@ static bool link_setup(link_id_t id, uart_inst_t *uart, uint tx_pin, uint rx_pin
     hw_clear_bits(&hw->dmacr, UART_UARTDMACR_DMAONERR_BITS);
     hw_set_bits(&hw->dmacr, UART_UARTDMACR_TXDMAE_BITS | UART_UARTDMACR_RXDMAE_BITS);
 
+    /* TX pin only once the transmitter is enabled and idling high. */
     gpio_set_function(tx_pin, UART_FUNCSEL_NUM(uart, tx_pin));
-    gpio_set_function(rx_pin, UART_FUNCSEL_NUM(uart, rx_pin));
-    gpio_pull_up(rx_pin); /* HW-6a */
 
     /* RX DMA: UART DR -> ring, endless (U-3, U-4). */
     l->rx_ch = (uint)dma_claim_unused_channel(true);
@@ -360,7 +373,16 @@ static bool link_setup(link_id_t id, uart_inst_t *uart, uint tx_pin, uint rx_pin
     channel_config_set_ring(&c, true, LINK_RX_RING_BITS);
     channel_config_set_dreq(&c, uart_get_dreq_num(uart, false));
     channel_config_set_high_priority(&c, true);
-    dma_channel_configure(l->rx_ch, &c, rx_ring, &hw->dr, dma_encode_endless_transfer_count(), true);
+    dma_channel_configure(l->rx_ch, &c, rx_ring, &hw->dr, dma_encode_endless_transfer_count(), false);
+    /* Start from a clean stream: discard anything received while the UART
+     * was being set up (bounded by the FIFO depth). The CPU has now read a
+     * FIFO this channel is paced against, so resynchronise its DREQ counter
+     * before the first transfer (EX-9). */
+    for (unsigned k = 0; k < LINK_UART_FIFO_DEPTH && !(hw->fr & UART_UARTFR_RXFE_BITS); k++) {
+        (void)hw->dr;
+    }
+    dma_debug_hw->ch[l->rx_ch].dbg_ctdreq = 0u;
+    dma_channel_start(l->rx_ch);
     l->rx_sampled_pos = 0u;
     l->rx_written_total = 0u;
     l->rx_read_total = 0u;

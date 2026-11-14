@@ -123,7 +123,7 @@ static int format_line(unsigned line) {
         return snprintf(s_buf, n, "EPOCH last_us=%" PRIu32 " max_us=%" PRIu32 " avg_us=%" PRIu32
                         " overrun=%" PRIu32 " start_max_us=%" PRIu32 " count=%" PRIu32 "\r\n",
                         us(g_prof[PROF_EPOCH].last), us(g_prof[PROF_EPOCH].max), us(prof_avg(PROF_EPOCH)),
-                        s_total[DIAG_EPOCH_OVERRUN], g_epoch_start_max_us, g_prof[PROF_EPOCH].count);
+                        s_total[DIAG_EPOCH_OVERRUN], g_epoch_start_max_us, (uint32_t)g_prof[PROF_EPOCH].count);
     case 8: { /* D-6: sections, as last/max/avg in us */
         int len = snprintf(s_buf, n, "PROF");
         for (unsigned i = 1; i < PROF_COUNT && len > 0 && (unsigned)len < n; i++) {

@@ -47,9 +47,17 @@ endfunction()
 
 _pick_path(PICO_TOOLCHAIN_PATH "${_pico_home}/toolchain/${PINNED_TOOLCHAIN_VERSION}")
 if(NOT DEFINED PICO_TOOLCHAIN_PATH)
-    # Any toolchain version the extension installed (newest first).
-    _newest_match(_tc "${_pico_home}/toolchain/*")
-    _pick_path(PICO_TOOLCHAIN_PATH "${_tc}")
+    # Another Arm toolchain version the extension installed (newest first).
+    # Arm GNU folders start with a digit (e.g. 14_2_Rel1); the extension's
+    # RISC-V toolchains start with a letter and must not be picked up.
+    _newest_match(_tc "${_pico_home}/toolchain/[0-9]*")
+    if(_tc)
+        get_filename_component(_tcn "${_tc}" NAME)
+        message(WARNING "Pinned Arm toolchain ${PINNED_TOOLCHAIN_VERSION} not found under "
+                        "${_pico_home}/toolchain; using ${_tcn} instead (B-10 pins "
+                        "${PINNED_TOOLCHAIN_VERSION}).")
+        _pick_path(PICO_TOOLCHAIN_PATH "${_tc}")
+    endif()
 endif()
 
 # picotool: the directory holding picotoolConfig.cmake. The extension's

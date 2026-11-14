@@ -10,7 +10,8 @@
  *   app_poll() once. Recorded per epoch (D-4):
  *     - work time of app_poll() (PROF_EPOCH: last / max / average),
  *     - start latency from the tick (g_epoch_start_max_us),
- *     - epochs whose work ran past the next tick (DIAG_EPOCH_OVERRUN).
+ *     - epochs that started late because the previous one ran past its
+ *       tick, plus epochs skipped entirely (DIAG_EPOCH_OVERRUN).
  *   With APP_TEST_PINS, D8 (TEST_PIN_LINK0_RX_SEEN) is high while
  *   app_poll() runs, for logic-analyzer profiling.
  *
@@ -68,13 +69,22 @@ static void __attribute__((noreturn)) run_epochs(void) {
 #endif
             /* __wfi(); */ /* optional: sleep until the next interrupt */
         }
-        epoch = now;
+        /* EX-8, D-1: epochs that were never run. More than one tick passed
+         * since the last epoch began: app_poll() overran by more than a
+         * whole period, or the tick itself skipped ahead (M-6a). */
+        uint32_t skipped = now - epoch - 1u;
+        if (skipped != 0u) {
+            g_diag_ctr[DIAG_EPOCH_OVERRUN] = g_diag_ctr[DIAG_EPOCH_OVERRUN] + skipped;
+        }
 
-        /* Start latency: time since the tick that began this epoch. */
-        uint32_t late_us = (uint32_t)(time_us_64() - tick_time_us(now - 1u));
+        /* Start latency: time since the first tick after the previous
+         * epoch began, i.e. when this epoch should have started. That tick
+         * has index `epoch` (the count before it fired). */
+        uint32_t late_us = (uint32_t)(time_us_64() - tick_time_us(epoch));
         if (late_us > g_epoch_start_max_us) {
             g_epoch_start_max_us = late_us;
         }
+        epoch = now;
 
         EPOCH_PIN_HIGH();
         PROF_BEGIN(PROF_EPOCH);
@@ -82,7 +92,9 @@ static void __attribute__((noreturn)) run_epochs(void) {
         PROF_END(PROF_EPOCH);
         EPOCH_PIN_LOW();
 
-        /* EX-8: the work must end before the next tick. */
+        /* EX-8: the work must end before the next tick. If it did not, the
+         * next epoch starts late; count it. (Further whole epochs lost are
+         * counted as skipped, above.) */
         if (tick_count() != epoch) {
             diag_inc(DIAG_EPOCH_OVERRUN);
         }

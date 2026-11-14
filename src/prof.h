@@ -32,7 +32,7 @@ typedef struct {
     uint32_t last;  /* cycles, most recent run */
     uint32_t max;   /* cycles, worst case since boot */
     uint64_t sum;   /* cycles, for the average */
-    uint32_t count; /* runs */
+    uint64_t count; /* runs (64-bit: a 32-bit count wraps in 49 days at 1 kHz) */
 } prof_t;
 
 extern prof_t g_prof[PROF_COUNT];

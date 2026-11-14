@@ -35,7 +35,7 @@ uint32_t diag_take(diag_ctr_t c) {
 }
 
 void diag_take_all(uint32_t out[DIAG_COUNT]) {
-    /* 15 load/store pairs: well under 1 us at 150 MHz. */
+    /* DIAG_COUNT (about 20) load/store pairs: well under 1 us at 150 MHz. */
     cs_t cs = cs_enter();
     for (unsigned i = 0; i < DIAG_COUNT; i++) {
         out[i] = g_diag_ctr[i];

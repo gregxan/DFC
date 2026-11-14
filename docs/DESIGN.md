@@ -116,12 +116,17 @@ Durations are recorded with the DWT cycle counter into `g_diag_max_cycles[]`
   3. **Copy** the message into the ring, then `__dmb()` and publish
      `tx_head`. The CPU never writes the UART FIFO itself (EX-9; the
      direct-write fast path U-10a was withdrawn in Rev 2.12).
-  4. **Critical section:** reap again. If the DMA is idle, start a transfer
-     of everything queued, with the completion interrupt **disabled**.
-     Otherwise **enable** the channel's completion interrupt, so the ISR
-     chains the next transfer (U-13). If the transfer already finished, the
-     latched status makes the interrupt fire as soon as the critical section
-     ends. It can't be missed.
+  4. **Critical section:** reap again. Then:
+     - if the DMA is idle, start a transfer of everything queued, with the
+       completion interrupt **disabled**;
+     - if a transfer is running and doesn't cover everything queued
+       (`tx_tail + tx_inflight != tx_head`), **enable** its completion
+       interrupt, so the ISR chains the next transfer (U-13). If that
+       transfer already finished, the latched status makes the interrupt
+       fire as soon as the critical section ends. It can't be missed;
+     - if the running transfer already covers the new data (the reap or the
+       ISR started it after the head update), do nothing: no interrupt is
+       needed.
 - **`tx_dma_isr()`** retires the transfer and starts the next one, which
   disables the interrupt again. It runs only when data was queued behind a
   running transfer, so non-overlapping writes produce **no interrupts**.
@@ -135,7 +140,7 @@ Durations are recorded with the DWT cycle counter into `g_diag_max_cycles[]`
   still queued in hardware. The ≤ 25 µs boundary limit of U-18 is a worst
   case that takes no credit for this FIFO.
 - **Model check.** The algorithm was checked with a randomised model:
-  3000 runs, ~1.45 M bytes, with DMA progress, UART draining and the ISR
+  3000 runs, ~1.4 M bytes, with DMA progress, UART draining and the ISR
   interleaved between every step of `link_write()`. Every run kept byte
   order with no loss, and the queue drained with no further API calls. The
   check found, and led to the fix of, a stall: a reap that didn't start
@@ -284,8 +289,10 @@ IRQ only; global interrupts stay on.
   abort caused only by the firmware's own timeout is counted only as a
   timeout (M-15, Rev 2.3). The state becomes `ABORTED` and the slot
   is not published (M-15).
-- **Tick while BUSY** counts a missed tick and a timeout. It then writes
-  `DMA_ABORT` and sets `IC_ENABLE.ABORT`, without waiting (M-16).
+- **Tick while BUSY** counts a missed tick and a timeout, and writes
+  `DMA_ABORT` without waiting (M-16). It sets `IC_ENABLE.ABORT` only if
+  the controller is active or has commands queued; with an idle controller
+  it goes straight to `ABORTED` (Rev 2.15).
 - **Tick while ABORTING/ABORTED** starts a new transaction only if both
   channels, the I2C controller (`MST_ACTIVITY`, `TFE`, `ABORT` bit) and
   the bus clear are idle. Otherwise it counts a missed tick. If the DMA
@@ -316,7 +323,8 @@ START 0x30W 0x2F  RESTART 0x30R b0  STOP                        (~100 us)
   The next tick then sends:
 
   ```
-  START 0x30W 0x0A BW  RESTART 0x30W 0x0B 0x00  RESTART 0x30W 0x09 RESET  RESTART 0x30W 0x09 TM_M  STOP
+  START 0x30W 0x0A BW  RESTART 0x30W 0x0B 0x00  RESTART 0x30W 0x0C 0x00
+        RESTART 0x30W 0x09 RESET  RESTART 0x30W 0x09 TM_M  STOP
   ```
 
   The completion of that transaction clears the fault flag, counts a
@@ -450,13 +458,13 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | EX-8, D-4, D-6 | `prof.[ch]`, `PROF_EPOCH`, `g_epoch_start_max_us`, `DIAG_EPOCH_OVERRUN`, `DIAG_T_LOOP` |
 | B-11a | `CMakeLists.txt` `PICO_FLASH_SIZE_BYTES` |
 | HW-4, HW-5 | `config.h`; `mag_init()` pins, pull-ups, address 0x30 |
+| HW-5a | Hardware only (SPI_CS, CAP and VDD capacitors); README wiring notes |
 | HW-7, HW-8 | C + Pico SDK; core 1 never launched |
 | EX-1, EX-2 | `main.c`; every API in `link.c` / `mag.c` / `diag.c` returns without waiting |
 | EX-3 | `cs_enter()` / `cs_exit()` in `diag.h`; max recorded as `DIAG_T_CRITICAL` |
 | EX-4, EX-5 | §2; `irq_set_priority` calls in `link.c`, `mag.c`, `tick.c`, `status.c` |
 | EX-6, B-18 | `pico_set_binary_type(firmware copy_to_ram)`, `__not_in_flash_func` |
 | EX-7 | `DIAG_T_API_READ/WRITE/MAG` (copy time excluded) |
-| EX-8, D-4 | `diag_loop_mark()`, `DIAG_T_LOOP` |
 | U-1, U-2, R-3 | `link_setup()`; actual baud in `g_diag_actual_baud[]` |
 | U-3 … U-7 | `link_setup()` RX DMA; `LINK_RX_RING_BITS` |
 | U-8, U-8a, U-9 | `link_tick_isr()`, `rx_total_now()`, `link_read()`, `rx_overflow()` |
@@ -522,7 +530,7 @@ chapters, and Appendix D (errata).
 | Tick (M-6, M-6a) | `ALARMx` fires on equality with `TIMELR`; `DBGPAUSE` resets to 7 |
 | Priorities (EX-5) | `__NVIC_PRIO_BITS = 4`: 0x00/0x40/0x80/0xC0 are distinct |
 | PIO handover of SCL (M-18) | `gpio_set_function` sets IE, clears OD and pad isolation (`ISO`) |
-| RP2350-E2 (SIO writes above +0x180 alias spinlocks) | Not affected: only `gpio_togl` (+0x28) is written |
+| RP2350-E2 (SIO writes above +0x180 alias spinlocks) | Not affected: only `gpio_set`, `gpio_clr` and `gpio_togl` are written, all below +0x180 |
 
 - **DREQ credit counters (datasheet §12.6.4.2, Rev 2.12).** The DMA keeps a
   per-channel count of how many accesses it believes the peripheral FIFO
@@ -545,7 +553,7 @@ chapters, and Appendix D (errata).
 | E9 GPIO pad leakage | No | A2 silicon only, and only pins relying on pull-downs; all inputs here use pull-ups |
 | E27 bus-priority miswiring | No | `BUS_PRIORITY` left at its default |
 | E12 USB status synchronisation | Diag builds | Satisfied: `clk_sys` 150 MHz is more than 10% above `clk_usb` 48 MHz |
-| E2 SIO spinlock aliasing | No | Only `gpio_togl` is written; the SDK applies its workaround |
+| E2 SIO spinlock aliasing | No | Only `gpio_set`/`gpio_clr`/`gpio_togl` (below +0x180) are written; the SDK applies its workaround |
 | E4, E6, E7, E29, E31 | No | Hazard3 (RISC-V) only |
 | Bootrom, OTP, XIP, ACCESSCTRL, RCP, E1 | No | Unused, or not affected by a copy-to-RAM Arm build |
 
@@ -560,3 +568,22 @@ chapters, and Appendix D (errata).
   confirms it, because the datasheet doesn't spell out the request wiring.
 - **Silicon revision.** E9 is fixed from A3 onwards. Nothing else here
   depends on the revision.
+
+## 9. Independent review of Rev 2.14 (Rev 2.15)
+
+A second reviewer read the code against the datasheet and SDK sources. It
+found no definite bug. The outcomes:
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | A controller active during a PIO bus clear blocked both `hw_idle()` and `controller_hung()`: a permanent magnetometer stall | **Fixed.** `hw_idle()` polls `bus_clear_done()` first, independent of the controller (M-16) |
+| 2 | `IC_ENABLE.ABORT` set on an idle controller might never clear, leaving `MAG_ABORTING` with no exit | **Fixed.** `issue_abort()` requests the controller abort only when it is active or has commands queued; otherwise the state goes straight to `MAG_ABORTED`. Bench check added |
+| 3 | UART receiver enabled before the RX pin was selected, so it saw a low input and could deliver a spurious first byte | **Fixed.** RX pull-up and function are set first; the FIFO is drained and the RX channel's DREQ counter reset before the DMA starts (U-4a) |
+| 4 | A sensor that power-cycles at run time is never reconfigured | **Open decision** (D-5); the code matches M-2a |
+| 5 | Toolchain fallback could pick a RISC-V toolchain | **Fixed.** Only folders starting with a digit are considered, and a warning names the version used |
+| 6 | One unnecessary TX interrupt when a transfer finished during the copy | **Fixed, and extended.** The model then exposed a second path (ISR between the head update and the final critical section). The interrupt is now enabled only if the running transfer doesn't cover everything queued |
+| 7 | `tx_model.py` differed from the C code | **Fixed.** The model mirrors the C functions, including `link_tx_free()`, asserts no stale completion latch, and asserts the interrupt only fires with data queued |
+| 8 | Epoch accounting after a skipped tick | **Fixed.** Skipped epochs are counted; start latency is measured from the tick that should have started the epoch |
+| 9 | Flash-size comment said the C macro stays 4 MB | **Not a defect.** The SDK passes the CMake value to C as `-DPICO_FLASH_SIZE_BYTES="2 * 1024 * 1024"` (visible in `compile_commands.json`) |
+| 10 | Stale comments and spec wording | **Fixed**, including Internal Control 3 now being written explicitly (M-3) |
+

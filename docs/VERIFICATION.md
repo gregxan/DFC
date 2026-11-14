@@ -410,3 +410,21 @@ the soak on one port.
    - the pulse period is 1000 µs (± tick jitter);
    - the pulse width matches `EPOCH` `last_us`;
    - the longest pulse is < 1000 µs.
+
+## Review follow-ups (Rev 2.15)
+
+1. **Abort on an idle controller (M-16).** The firmware no longer sets
+   `IC_ENABLE.ABORT` when the controller is idle, because the datasheet
+   doesn't say whether the bit clears in that case. To learn what the
+   hardware does (for the record, not required for operation):
+   1. In a debug session with the magnetometer idle (`MAG fault=1`, between
+      probes), set `IC_ENABLE` bit 1 from the debugger.
+   2. Read it back. Record whether it clears, and whether `TX_ABRT` is
+      raised.
+2. **Clean RX start (U-4a).** With a USB-UART adapter connected and idle,
+   reset the board 20 times. After each boot the host must receive nothing
+   in echo mode, and `L0`/`L1` must show no `framing` or `break` counts.
+   In pattern mode, `pattern_err` must stay 0 from the first report.
+3. **Bus clear with an active controller (M-16).** During the V-6 SDA-short
+   test, `missed_tick` must stop rising within 4 ms of release every time;
+   a stall would show as `missed_tick` rising ~1000/s indefinitely.

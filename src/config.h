@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.14).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.15).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H

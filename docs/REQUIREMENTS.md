@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.14**. The changes since Revision 2 are listed in sections 11 to 24.
+**Revision 2.15**. The changes since Revision 2 are listed in sections 11 to 25.
 
 ## 1. Scope
 
@@ -42,8 +42,8 @@ Firmware for a Seeed XIAO RP2350 that:
 - **EX-8** The main loop shall keep real-time performance: its worst-case execution shall be less than 1 ms (D-4). *(Replaced in Rev 2.14.)*
   - **User application:** the work of one epoch, from the epoch start until `app_poll()` returns, shall be < 1 ms, so the next epoch never starts late. Epochs that do run late are counted (D-1).
   - **Test applications:** one main-loop pass shall be < 1 ms.
-- **EX-10** The user application shall run on 1 ms epochs aligned to the tick grid (M-6). After each tick, the main loop calls `app_poll()` once. It consumes the data that arrived during the previous epoch: UART bytes received up to the tick (made available by DMA within U-16), and the newest magnetometer sample, published during the previous epoch (M-8). The test applications (`echo`, `pattern`) run `app_poll()` on every main-loop pass instead, so the latency tests (V-2, V-3) can measure how quickly a byte is noticed. *(Added in Rev 2.14.)*
 - **EX-9** The CPU shall not read or write a peripheral FIFO that a DMA channel is paced against, unless that channel's DREQ credit counter is resynchronised (DBG_CTDREQ) before its next transfer. The RP2350 datasheet (§12.6.4.2) warns that such access "causes the channel and peripheral to become desynchronised, and can cause corruption or loss of data". *(Added in Rev 2.12.)*
+- **EX-10** The user application shall run on 1 ms epochs aligned to the tick grid (M-6). After each tick, the main loop calls `app_poll()` once. It consumes the data that arrived during the previous epoch: UART bytes received up to the tick (made available by DMA within U-16), and the newest magnetometer sample, published during the previous epoch (M-8). The test applications (`echo`, `pattern`) run `app_poll()` on every main-loop pass instead, so the latency tests (V-2, V-3) can measure how quickly a byte is noticed. *(Added in Rev 2.14.)*
 
 ## 4. UART Requirements
 
@@ -56,6 +56,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **U-3** Received bytes shall be transferred by DMA directly into a RAM ring buffer, with no CPU involvement per byte.
 - **U-4** RX DMA shall run continuously for the life of the application without stopping or needing CPU restarts (e.g. using RP2350 endless transfer mode).
+- **U-4a** The RX stream shall start clean. Each RX pin shall have its pull-up and UART function selected before that UART's receiver is enabled, and anything received during set-up shall be discarded before the RX DMA starts, with the channel's DREQ counter resynchronised (EX-9). No byte shall appear in the stream that was not on the line. *(Added in Rev 2.15.)*
 - **U-5** No interrupt shall be in the RX data path. A byte is available to the main loop as soon as DMA has written it, as indicated by the DMA write position.
 - **U-6** The RX read function shall be non-blocking. It returns the bytes currently available (possibly zero) and returns immediately.
 - **U-7** RX ring size shall be a compile-time parameter, a power of two, aligned as DMA ring mode requires. Default: 8 KB per UART (about 89 ms of saturated traffic).
@@ -67,7 +68,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **U-10** The TX write function shall be non-blocking. It copies bytes into a per-UART TX ring buffer and returns immediately. *(U-10a exception withdrawn in Rev 2.12.)*
 - **U-10a** *(Withdrawn in Rev 2.12.)* Writing directly into the UART TX FIFO would desynchronise the TX DMA channel's DREQ credit counter (EX-9), and could make the next DMA transfer overfill the FIFO and lose bytes. The lazy completion interrupt (U-13) already removes the interrupt for non-overlapping writes.
-- **U-11** If the TX ring lacks space for the entire write, the write shall be rejected in full, the per-UART TX overflow counter incremented, and an error returned. No partial message is queued.
+- **U-11** If the TX ring lacks space for the entire write, the write shall be rejected in full, the per-UART TX reject counter (D-1) incremented, and an error returned. No partial message is queued.
 - **U-12** If TX DMA is idle when data is queued in the ring, the write function shall start DMA transmission before returning. A DMA transfer that has finished but has not yet been retired by an interrupt counts as idle: the write function retires it and starts the next. *(Amended in Rev 2.10.)*
 - **U-13** While the TX queue holds data, the UART TX FIFO shall be kept non-empty, within the gap limits of U-18. When a TX DMA transfer completes and the queue still holds data, the TX DMA completion handler shall start the next transfer. *(Amended in Rev 2.10.)*
   - Each transfer covers everything queued when it starts, so the completion interrupt is needed only when data is queued behind a running transfer.
@@ -157,7 +158,7 @@ Firmware for a Seeed XIAO RP2350 that:
 ### 5.4 Errors
 
 - **M-15** On I2C abort (e.g. NACK), the I2C abort handler shall stop both magnetometer DMA channels, clear the abort condition, and increment the I2C error counter if the controller reports any bus-detected cause (e.g. NACK, arbitration loss). An abort whose only cause is the firmware's own timeout abort (M-16) is counted only as a timeout, not as an I2C error. An unexpected STOP that ends a transaction before both DMA channels have finished is also an I2C error. If the abort was caused by arbitration loss or by a timeout abort (M-16), the handler shall also start a bus clear (M-18) as part of completing the abort. The slot shall not be published, and sampling continues on the next tick. *(Amended in Rev 2.2, Rev 2.3.)*
-- **M-16** If a transaction is still in progress when the next tick fires, the timer handler shall skip that tick and increment the missed-tick counter. If no abort is already pending, it shall also initiate an abort of both DMA channels and the I2C transfer, without waiting for completion, and increment the timeout counter. A later tick shall start a new transaction only once the channels, the I2C controller, and any bus clear in progress (M-18) are idle. *(Amended in Rev 2.2.)*
+- **M-16** If a transaction is still in progress when the next tick fires, the timer handler shall skip that tick and increment the missed-tick counter. If no abort is already pending, it shall also initiate an abort of both DMA channels and the I2C transfer, without waiting for completion, and increment the timeout counter. The I2C controller's abort shall be requested only if the controller is active or has commands queued; if it is idle, stopping the DMA channels is sufficient. A later tick shall start a new transaction only once the channels, the I2C controller, and any bus clear in progress (M-18) are idle. Completing a bus clear shall not depend on the state of the I2C controller. *(Amended in Rev 2.2, Rev 2.15.)*
 - **M-16a** Valid samples shall resume within 4 ms of the tick on which a single hung transaction started. With a persistent bus fault, the abort shall repeat with no effect on UART traffic.
 - **M-17** The read-latest function shall report the sample as stale if its timestamp is more than 3 ms old.
 - **M-18** An I2C bus clear shall consist of nine open-drain SCL clocks, so a slave left mid-byte releases SDA. *(Added in Rev 2.2.)*
@@ -171,7 +172,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
   - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9)*
-  - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*, epoch overruns (EX-8) *(added in Rev 2.14)*
+  - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*, epoch overruns (EX-8): user epochs that started late because the previous epoch's work ran past its tick, plus epochs skipped entirely *(added in Rev 2.14; skipped epochs included in Rev 2.15)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). *(Rev 2.10 note on direct FIFO writes withdrawn with U-10a in Rev 2.12.)*
 - **D-3a** Firmware shall count TX DMA completion interrupts per UART, for verification of U-13. This count is cumulative and is not cleared. *(Added in Rev 2.10.)*
@@ -180,7 +181,6 @@ Firmware for a Seeed XIAO RP2350 that:
   - **Test applications:** the maximum main-loop pass time.
 
   In diagnostic builds the status reporter's time is excluded, since production builds have no reporter, and is recorded as a separate maximum.
-- **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
 - **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
   - aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16);
   - the I2C bus clear at startup and on completing an arbitration-loss or timeout abort (M-2, M-15, M-18);
@@ -188,6 +188,7 @@ Firmware for a Seeed XIAO RP2350 that:
   - resynchronising the RX read position after overflow (U-9).
 
   Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
+- **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
 
 ## 7. Resources
 
@@ -217,7 +218,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 8.3 Windows Path and File Handling
 
-- **B-12** The project shall build from a path with no spaces. Documentation shall recommend a short root, e.g. `C:\dev\<project>`, to avoid the Windows 260-character path limit.
+- **B-12** The project shall build from a path with no spaces. Documentation shall recommend a short root, e.g. `C:\<project>`, to avoid the Windows 260-character path limit.
 - **B-13** Git shall be configured with `core.longpaths true`. A checked-in .gitattributes shall normalize text files to LF.
 - **B-14** All `#include` filenames shall match the case of the files on disk exactly, so the project stays portable to case-sensitive hosts.
 
@@ -282,7 +283,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
   Rationale: neither magnetometer DMA channel finishes at the end of the transaction.
   - The command DMA finishes within a few µs, as soon as all command words fit in the I2C TX FIFO.
-  - The data DMA finishes at about 230 µs, when the 7th byte arrives, before the trigger write is on the bus.
+  - The data DMA finishes when the last read byte arrives, before the trigger write is on the bus. (This was about 230 µs with the 7-byte read of Rev 2.1. The read is 9 bytes since Rev 2.8; see M-8 for current timings.)
 
   The alternatives were rejected:
   - Publishing on data-DMA completion would publish before the transaction completes.
@@ -337,7 +338,7 @@ Alternatives considered (docs/DESIGN.md §6):
 ## 16. Revision 2.6 Changes
 
 - **Amended M-10.** The timestamp is the time the trigger write completed, not the scheduled time of the tick.
-  - The sensor starts measuring when the trigger is written. That happens ~330 µs after the tick, or ~400 µs with a SET/RESET pulse. The tick time was therefore off by a fixed ~0.3–0.4 ms.
+  - The sensor starts measuring when the trigger is written. That happened ~330 µs after the tick, or ~400 µs with a SET/RESET pulse, at Rev 2.6. (Since Rev 2.8 the figures are ~375 µs and ~445 µs; see M-8.) The tick time was therefore off by a fixed ~0.3–0.4 ms.
   - The time is captured in the existing completion interrupt. The cost is one timer read per sample, about 0.01% of the CPU.
   - Timestamps are no longer exactly on the 1 ms grid. `seq` still identifies the tick.
 - **Clarified M-10.** The sequence number is defined as the index of the triggering tick.
@@ -433,3 +434,23 @@ These changes follow a check against the Seeed XIAO RP2350 product page.
 - **Added D-6.** Section profiling.
 - **Amended HW-9.** D8 marks epoch work in the user application.
 - **Amended V-5.** Evidence sources.
+
+## 25. Revision 2.15 Changes
+
+These changes follow an independent code review of Rev 2.14.
+- **Amended M-16.**
+  - The I2C controller's abort is requested only when the controller is active or has commands queued. The datasheet doesn't say whether `IC_ENABLE.ABORT` clears on an idle controller; if it didn't, the magnetometer could never restart.
+  - Completing a bus clear no longer depends on the controller's state. A controller that became active during a bus clear could otherwise stall the magnetometer permanently.
+- **Added U-4a.** The RX pin is configured before the receiver is enabled, and the RX stream starts clean. Previously the receiver was briefly enabled with no pin selected, which reads as a low line and could insert a spurious first byte.
+- **Amended D-1.** The epoch-overrun counter also counts epochs skipped entirely.
+- **Wording.**
+  - U-11: "TX reject counter".
+  - B-12: example path.
+  - §11 and §16: superseded timing figures annotated.
+  - EX-9/EX-10 and D-5/D-6 put in order.
+- **Implementation only, no requirement change:**
+  - the TX completion interrupt is enabled only when the running transfer doesn't already cover everything queued (U-13 "exactly");
+  - Internal Control 3 is now written explicitly (M-3);
+  - the toolchain fallback ignores non-Arm toolchains and warns (B-10);
+  - the profiler's run count is 64-bit.
+- **Open decision, not changed.** A sensor that power-cycles at run time returns at its defaults and is not reconfigured (M-2a sets the fault flag only at startup). Whether repeated not-ready or NACK samples should enter the fault state is a D-5 question.

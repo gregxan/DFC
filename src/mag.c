@@ -64,7 +64,8 @@ static uint32_t s_probe_wait;         /* ticks spent in MAG_FAULT since last pro
 static volatile bool s_config_pending;/* probe matched: configure on next tick     */
 static uint8_t s_probe_id;            /* product-ID byte received by DMA           */
 static uint32_t s_probe_cmd[2];
-static uint32_t s_cfg_cmd[8];
+#define CFG_CMD_LEN 10u
+static uint32_t s_cfg_cmd[CFG_CMD_LEN];
 
 static volatile uint32_t s_cur_slot;
 static volatile uint32_t s_cur_tick;
@@ -216,6 +217,15 @@ static bool __not_in_flash_func(bus_clear_done)(void) {
 
 /* Both DMA channels and the I2C controller idle (M-16). Non-blocking. */
 static bool __not_in_flash_func(hw_idle)(void) {
+#if MAG_BUS_CLEAR
+    /* First, and regardless of the controller's state: finishing a bus
+     * clear (handing SCL back to I2C) must never wait on the controller,
+     * or a controller that is active during a bus clear would block both
+     * this and controller_hung() for good. */
+    if (!bus_clear_done()) {
+        return false;
+    }
+#endif
     if (dma_hw->abort & s_dma_mask) {
         return false;
     }
@@ -230,11 +240,6 @@ static bool __not_in_flash_func(hw_idle)(void) {
     if ((status & I2C_IC_STATUS_MST_ACTIVITY_BITS) || !(status & I2C_IC_STATUS_TFE_BITS)) {
         return false;
     }
-#if MAG_BUS_CLEAR
-    if (!bus_clear_done()) {
-        return false;
-    }
-#endif
     return true;
 }
 
@@ -328,13 +333,27 @@ static void __not_in_flash_func(config_start)(uint32_t tick) {
     }
     s_mode_applied = mode;
     s_cur_tick = tick;
-    start_dma(TXN_CONFIG, s_cfg_cmd, 8u, NULL, 0u);
+    start_dma(TXN_CONFIG, s_cfg_cmd, CFG_CMD_LEN, NULL, 0u);
 }
 
-/* M-16: abort without waiting. */
-static void __not_in_flash_func(issue_abort)(void) {
+/* M-16: abort without waiting. Returns true if a controller abort was
+ * requested (a TX_ABRT interrupt will follow), false if only the DMA
+ * channels needed stopping.
+ *
+ * IC_ENABLE.ABORT is set only when the master is active or has commands
+ * queued. The datasheet says the bit clears itself "after the abort
+ * operation" and cannot be cleared by software; it does not say what
+ * happens on an idle master. If it stayed set there with no TX_ABRT, the
+ * state machine could never leave MAG_ABORTING. */
+static bool __not_in_flash_func(issue_abort)(void) {
     mag_dma_abort();
-    hw_set_bits(&i2c_regs()->enable, I2C_IC_ENABLE_ABORT_BITS);
+    i2c_hw_t *hw = i2c_regs();
+    uint32_t status = hw->status;
+    if ((status & I2C_IC_STATUS_MST_ACTIVITY_BITS) || !(status & I2C_IC_STATUS_TFE_BITS)) {
+        hw_set_bits(&hw->enable, I2C_IC_ENABLE_ABORT_BITS);
+        return true;
+    }
+    return false;
 }
 
 /* M-4b (Rev 2.9): datasheet p. 18, "Using SET and RESET to remove bridge
@@ -535,9 +554,10 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
             diag_inc(DIAG_MAG_MISSED_TICK);
         }
         diag_inc(DIAG_MAG_TIMEOUT);
-        issue_abort();
         s_trig_ok = false;
-        s_state = MAG_ABORTING;
+        /* Controller idle (e.g. the command channel never delivered): the
+         * DMA abort is all that is needed; no TX_ABRT will come. */
+        s_state = issue_abort() ? MAG_ABORTING : MAG_ABORTED;
         break;
     case MAG_ABORTING:
     case MAG_ABORTED:
@@ -557,8 +577,7 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
             }
             if (controller_hung()) {
                 diag_inc(DIAG_MAG_TIMEOUT);
-                issue_abort();
-                s_state = MAG_ABORTING;
+                s_state = issue_abort() ? MAG_ABORTING : MAG_ABORTED;
             }
         }
         break;
@@ -702,6 +721,7 @@ bool mag_init(void) {
     /* M-3: 800 Hz bandwidth; continuous mode off. */
     ok = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
     ok = ok && reg_write(MMC_REG_CTRL2, 0u);
+    ok = ok && reg_write(MMC_REG_CTRL3, 0u);
 
     /* M-4 (Rev 2.4): one RESET -> SET cycle at start-up, in every mode,
      * ending in SET so measurements have normal polarity. */
@@ -737,10 +757,12 @@ bool mag_init(void) {
     s_cfg_cmd[1] = MMC_CTRL1_BW_800HZ;
     s_cfg_cmd[2] = CMD_RESTART | MMC_REG_CTRL2;
     s_cfg_cmd[3] = 0u;
-    s_cfg_cmd[4] = CMD_RESTART | MMC_REG_CTRL0;
-    s_cfg_cmd[5] = MMC_CTRL0_RESET;
-    s_cfg_cmd[6] = CMD_RESTART | MMC_REG_CTRL0; /* Rev 2.9: measure after the */
-    s_cfg_cmd[7] = CMD_STOP | MMC_CTRL0_TM_M;   /* RESET for the calibration  */
+    s_cfg_cmd[4] = CMD_RESTART | MMC_REG_CTRL3; /* M-3: Internal Control 3 = 0 */
+    s_cfg_cmd[5] = 0u;
+    s_cfg_cmd[6] = CMD_RESTART | MMC_REG_CTRL0;
+    s_cfg_cmd[7] = MMC_CTRL0_RESET;
+    s_cfg_cmd[8] = CMD_RESTART | MMC_REG_CTRL0; /* Rev 2.9: measure after the */
+    s_cfg_cmd[9] = CMD_STOP | MMC_CTRL0_TM_M;   /* RESET for the calibration  */
     for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
         s_cmd_len[pre] = (uint32_t)build_cmds(s_cmd[pre], pre);
     }

@@ -2,7 +2,8 @@
  * MMC5983MA sampled at 1 kHz over I2C1 entirely by DMA (section 5).
  *
  * Each 1 ms tick starts one transaction:
- *   START  W(0x00)  RESTART R x7  RESTART W(0x09, ctrl0 | TM_M)  STOP
+ *   START  W(0x00)  RESTART R x9  [RESTART W(0x09, SET|RESET)]
+ *          RESTART W(0x09, TM_M)  STOP
  * i.e. read the measurement triggered by the previous transaction, then
  * trigger the next one. The I2C STOP_DET interrupt marks completion and
  * publishes the sample; TX_ABRT is the abort path (M-15).
@@ -61,10 +62,11 @@ typedef struct {
     bool offset_valid; /* false until the first successful calibration */
 } mag_reading_t;
 
-/* Blocking start-up (before the main loop): probe the product ID (M-2) and
- * configure the sensor (M-3). On failure the fault flag is set, the
- * product-ID-fault counter is set to 1, and no transactions are attempted;
- * the tick keeps running for the UARTs (M-6). Returns false on fault. */
+/* Blocking start-up (before the main loop): bus clear, software reset,
+ * product-ID and OTP check (M-2), configuration (M-3) and the first offset
+ * calibration (M-4b). On failure the fault flag is set and a product-ID
+ * fault is counted; the tick then re-probes at 5 Hz (M-2a) and keeps
+ * running for the UARTs (M-6). Returns false on fault. */
 bool mag_init(void);
 
 bool mag_fault(void);
