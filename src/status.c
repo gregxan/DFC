@@ -72,9 +72,10 @@ static int format_line(unsigned line) {
                         s_total[DIAG_MAG_TIMEOUT], s_total[DIAG_MAG_PRODUCT_ID_FAULT], s_total[DIAG_MAG_BUS_CLEAR],
                         g_app_mag_valid, g_app_mag_invalid, g_app_mag_gaps, g_app_mag_stale);
     case 4:
-        return snprintf(s_buf, n, "MAGS sr_mode=%" PRIu32 " sr_interval=%" PRIu32 " x=%" PRId32 " y=%" PRId32
-                        " z=%" PRId32 "\r\n",
-                        g_mag_sr_mode, g_mag_sr_interval, g_app_mag_xyz[0], g_app_mag_xyz[1], g_app_mag_xyz[2]);
+        return snprintf(s_buf, n, "MAGS sr_mode=%" PRIu32 " sr_interval=%" PRIu32 " recovered=%" PRIu32
+                        " x=%" PRId32 " y=%" PRId32 " z=%" PRId32 "\r\n",
+                        g_mag_sr_mode, g_mag_sr_interval, s_total[DIAG_MAG_RECOVERED], g_app_mag_xyz[0],
+                        g_app_mag_xyz[1], g_app_mag_xyz[2]);
     default:
         return snprintf(s_buf, n, "TIM_NS isr_uart0=%" PRIu32 " isr_uart1=%" PRIu32 " isr_txdma=%" PRIu32
                         " isr_i2c=%" PRIu32 " isr_tick=%" PRIu32 " crit=%" PRIu32 " api_read=%" PRIu32

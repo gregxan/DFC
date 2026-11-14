@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.6).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.7).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -73,6 +73,12 @@
 #define MAG_SR_INTERVAL_DEFAULT 50u
 #endif
 #define MAG_SR_INTERVAL_MAX 100u /* M-4: at least every 100 samples */
+
+/* M-2 (Rev 2.7): while the magnetometer fault flag is set, re-probe the
+ * product ID every this many ticks (200 = 5 Hz). */
+#ifndef MAG_REPROBE_PERIOD_TICKS
+#define MAG_REPROBE_PERIOD_TICKS 200u
+#endif
 
 /* I2C bus clear (D-5, M-2, M-15, M-16, Rev 2.2): nine SCL clocks so a
  * sensor left mid-byte releases SDA.

@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.6**. The changes since Revision 2 are listed in sections 11 to 16.
+**Revision 2.7**. The changes since Revision 2 are listed in sections 11 to 17.
 
 ## 1. Scope
 
@@ -79,7 +79,12 @@ Firmware for a Seeed XIAO RP2350 that:
 ### 5.1 Configuration
 
 - **M-1** I2C1 shall run at 400 kHz.
-- **M-2** At startup, firmware shall first perform one I2C bus clear (M-18), then read the Product ID register (0x2F) and expect 0x30. On mismatch or no response, set the magnetometer fault flag and continue running the UARTs. The startup bus clear may block, since it runs before the main loop. *(Amended in Rev 2.2.)*
+- **M-2** At startup, firmware shall first perform one I2C bus clear (M-18), then read the Product ID register (0x2F) and expect 0x30. On mismatch or no response, set the magnetometer fault flag and continue running the UARTs. The startup bus clear and probe may block, since they run before the main loop. *(Amended in Rev 2.2, Rev 2.7.)*
+  - **M-2a** While the fault flag is set, the timer handler shall re-probe the Product ID every 200 ms (5 Hz), using the magnetometer DMA channels without blocking. *(Added in Rev 2.7.)*
+    - On a match, the next tick shall configure the sensor (M-3, Internal Control 2 = 0, and a RESET whose SET follows in the first sample transaction, M-4). It shall then clear the fault flag and resume sampling. The first sample is invalid (M-9).
+    - A failed probe or configuration returns to re-probing.
+    - Probe and configuration transactions are not counted as missed ticks. A failed probe is counted as a product-ID fault, not as an I2C error.
+    - The fault flag is set only by the startup check. Losing the sensor during sampling is handled by M-15/M-16 as before.
 - **M-3** Bandwidth shall be set to BW = 11 (800 Hz) to permit a 1 kHz measurement rate.
 - **M-4** The sensor shall be conditioned with SET/RESET pulses. At startup, firmware shall perform one RESET → SET cycle, ending in SET so measurements have normal polarity. The ongoing strategy shall be selectable at run time through a global variable, `g_mag_sr_mode`. It is currently changed only from the debugger. *(Replaced in Rev 2.4.)*
   - **Single cycle** (`MAG_SR_INIT_ONLY`, the initial value): no further pulses. Selecting this mode again at run time performs one more RESET → SET cycle: a RESET in one transaction, then a SET in the next.
@@ -129,13 +134,14 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
-  - magnetometer: I2C errors, missed ticks, timeouts, product ID fault, bus clears (startup and post-abort) *(bus clears added in Rev 2.2)*
+  - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached).
 - **D-4** Firmware shall record the maximum main-loop iteration time in microseconds.
 - **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
   - aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16);
   - the I2C bus clear at startup and on completing an arbitration-loss or timeout abort (M-2, M-15, M-18);
+  - re-probing and re-configuring the magnetometer at 5 Hz while its fault flag is set (M-2a, Rev 2.7);
   - resynchronising the RX read position after overflow (U-9).
 
   Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
@@ -208,6 +214,7 @@ Firmware for a Seeed XIAO RP2350 that:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
   - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
   - Changing `g_mag_sr_mode` and `g_mag_sr_interval` from the debugger, while data flows, switches strategy within 1 ms. Each strategy produces the expected pulse pattern on the bus, and there are no UART errors or magnetometer sequence gaps. The only invalid sample is the one after each RESET. *(Added in Rev 2.4.)*
+  - Powering up with the magnetometer disconnected sets the fault flag, and the product-ID fault count rises by about 5 per second. Connecting the sensor clears the fault flag within 250 ms, after which valid samples flow. There are no UART errors throughout. *(Added in Rev 2.7.)*
   - Resetting the MCU (e.g. from the debugger) while magnetometer transactions are running, repeated at least 100 times, never leaves the magnetometer fault flag set after boot. *(Added in Rev 2.2.)*
   - Holding one UART's RX line low, or leaving it disconnected, causes no data loss on the other UART and no magnetometer sequence gaps.
   - Deliberately stalling the main loop produces RX overflow counts and high-water marks consistent with the queue size.
@@ -287,3 +294,10 @@ Alternatives considered (docs/DESIGN.md §6):
   - Timestamps are no longer exactly on the 1 ms grid. `seq` still identifies the tick.
 - **Clarified M-10.** The sequence number is defined as the index of the triggering tick.
 - **Added V-5a.** Measure the timestamp lag.
+
+## 17. Revision 2.7 Changes
+
+- **Amended M-2, added M-2a.** While the magnetometer fault flag is set, the product ID is re-probed by DMA at 5 Hz. On success the sensor is configured and sampling resumes. This supports a sensor that powers up late or is connected after boot.
+- **Amended D-1.** "Product ID fault" now counts failed product-ID checks (startup and re-probe). Added a recoveries counter.
+- **Amended D-5.** The re-probe is classified as normal operation.
+- **Amended V-6.** Added the late-connection test.

@@ -39,7 +39,7 @@ volatile uint32_t g_mag_sr_mode = MAG_SR_MODE_DEFAULT;
 volatile uint32_t g_mag_sr_interval = MAG_SR_INTERVAL_DEFAULT;
 
 typedef enum {
-    MAG_FAULT,    /* M-2 failed: no transactions                       */
+    MAG_FAULT,    /* product ID not confirmed: re-probe at 5 Hz (M-2)   */
     MAG_IDLE,     /* ready to start on the next tick                    */
     MAG_BUSY,     /* transaction in flight                              */
     MAG_ABORTING, /* tick requested an abort (M-16), TX_ABRT not seen   */
@@ -51,7 +51,18 @@ static mag_sample_t s_slots[2];
 static volatile uint32_t s_latest = SLOT_NONE;
 
 static volatile mag_state_t s_state = MAG_FAULT;
-static bool s_fault = true;
+static volatile bool s_fault = true;
+
+/* Kind of the transaction in flight (or last aborted). */
+typedef enum { TXN_SAMPLE, TXN_PROBE, TXN_CONFIG } mag_txn_t;
+static volatile mag_txn_t s_txn = TXN_SAMPLE;
+
+/* M-2 (Rev 2.7) run-time re-probe. */
+static uint32_t s_probe_wait;         /* ticks spent in MAG_FAULT since last probe */
+static volatile bool s_config_pending;/* probe matched: configure on next tick     */
+static uint8_t s_probe_id;            /* product-ID byte received by DMA           */
+static uint32_t s_probe_cmd[2];
+static uint32_t s_cfg_cmd[2][6];      /* [Auto_SR_en off/on]                       */
 
 static volatile uint32_t s_cur_slot;
 static volatile uint32_t s_cur_tick;
@@ -230,8 +241,10 @@ static bool __not_in_flash_func(controller_hung)(void) {
     return !(hw->enable & I2C_IC_ENABLE_ABORT_BITS) && (hw->status & I2C_IC_STATUS_MST_ACTIVITY_BITS);
 }
 
-/* Start one DMA transaction (M-7). Tick ISR only, I2C IRQ masked. */
-static void __not_in_flash_func(mag_start)(uint32_t tick) {
+/* Arm the data channel (if any data is expected), then the command
+ * channel. Tick ISR only, I2C IRQ masked, hardware idle. */
+static void __not_in_flash_func(start_dma)(mag_txn_t txn, const uint32_t *cmd, uint32_t n_cmd, uint8_t *dst,
+                                           uint32_t n_data) {
     i2c_hw_t *hw = i2c_regs();
 
     /* Discard anything left in the RX FIFO by an aborted transfer
@@ -242,6 +255,18 @@ static void __not_in_flash_func(mag_start)(uint32_t tick) {
     (void)hw->clr_tx_abrt;
     (void)hw->clr_stop_det;
 
+    s_txn = txn;
+    s_state = MAG_BUSY;
+    if (n_data != 0u) {
+        dma_hw->ch[s_dma_data].write_addr = (uint32_t)(uintptr_t)dst;
+        dma_hw->ch[s_dma_data].al1_transfer_count_trig = n_data;
+    }
+    dma_hw->ch[s_dma_cmd].read_addr = (uint32_t)(uintptr_t)cmd;
+    dma_hw->ch[s_dma_cmd].al1_transfer_count_trig = n_cmd;
+}
+
+/* Start one sample transaction (M-7). Tick ISR only, I2C IRQ masked. */
+static void __not_in_flash_func(mag_start)(uint32_t tick) {
     uint32_t persist;
     unsigned pre = sr_select(&persist);
     unsigned p = persist ? 1u : 0u;
@@ -250,13 +275,24 @@ static void __not_in_flash_func(mag_start)(uint32_t tick) {
     s_cur_slot = slot;
     s_cur_tick = tick;
     s_cur_pre = pre;
-    s_state = MAG_BUSY;
+    start_dma(TXN_SAMPLE, s_cmd[p][pre], s_cmd_len[p][pre], s_slots[slot].raw, MMC_SAMPLE_BYTES);
+}
 
-    /* Data channel first so it is ready for the first received byte. */
-    dma_hw->ch[s_dma_data].write_addr = (uint32_t)(uintptr_t)s_slots[slot].raw;
-    dma_hw->ch[s_dma_data].al1_transfer_count_trig = MMC_SAMPLE_BYTES;
-    dma_hw->ch[s_dma_cmd].read_addr = (uint32_t)(uintptr_t)s_cmd[p][pre];
-    dma_hw->ch[s_dma_cmd].al1_transfer_count_trig = s_cmd_len[p][pre];
+/* M-2 (Rev 2.7): read the product ID (non-blocking). */
+static void __not_in_flash_func(probe_start)(void) {
+    s_probe_id = 0u;
+    start_dma(TXN_PROBE, s_probe_cmd, 2u, &s_probe_id, 1u);
+}
+
+/* M-2, M-3, M-4 (Rev 2.7): configure after a successful re-probe. Ends
+ * with RESET; the first sample transaction then carries the SET. */
+static void __not_in_flash_func(config_start)(void) {
+    uint32_t mode = g_mag_sr_mode;
+    if (mode > MAG_SR_PULSE) {
+        mode = s_mode_applied;
+    }
+    s_mode_applied = mode;
+    start_dma(TXN_CONFIG, s_cfg_cmd[mode == MAG_SR_AUTO ? 1 : 0], 6u, NULL, 0u);
 }
 
 /* M-16: abort without waiting. */
@@ -329,7 +365,8 @@ static void __not_in_flash_func(i2c_isr)(void) {
          * (NACK, arbitration loss, ...). An abort whose only cause is our
          * own timeout abort (M-16) was already counted as a timeout. */
         if (src & ABRT_REASON_BITS & ~I2C_IC_TX_ABRT_SOURCE_ABRT_USER_ABRT_BITS) {
-            diag_inc(DIAG_MAG_I2C_ERROR);
+            /* Rev 2.7: a failed re-probe is a failed product-ID check. */
+            diag_inc(s_txn == TXN_PROBE ? DIAG_MAG_PRODUCT_ID_FAULT : DIAG_MAG_I2C_ERROR);
         }
         s_trig_ok = false;
         if (s_state == MAG_BUSY || s_state == MAG_ABORTING) {
@@ -345,14 +382,32 @@ static void __not_in_flash_func(i2c_isr)(void) {
         if (s_state == MAG_BUSY) {
             bool data_done = (dma_hw->ch[s_dma_data].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) == 0u;
             bool cmd_done = (dma_hw->ch[s_dma_cmd].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) == 0u;
-            if (data_done && cmd_done) {
-                publish(now_us);
-            } else {
+            if (!(data_done && cmd_done)) {
                 /* Unexpected STOP mid-transaction. */
                 dma_hw->abort = s_dma_mask;
-                diag_inc(DIAG_MAG_I2C_ERROR);
+                diag_inc(s_txn == TXN_PROBE ? DIAG_MAG_PRODUCT_ID_FAULT : DIAG_MAG_I2C_ERROR);
                 s_trig_ok = false;
                 s_state = MAG_ABORTED;
+            } else if (s_txn == TXN_SAMPLE) {
+                publish(now_us);
+            } else if (s_txn == TXN_PROBE) {
+                if (s_probe_id == MMC_PRODUCT_ID) {
+                    s_config_pending = true; /* configure on the next tick */
+                    s_state = MAG_IDLE;
+                } else {
+                    diag_inc(DIAG_MAG_PRODUCT_ID_FAULT);
+                    s_probe_wait = 0u;
+                    s_state = MAG_FAULT;
+                }
+            } else { /* TXN_CONFIG */
+                s_trig_ok = false;   /* M-9: first sample invalid       */
+                s_trig_reset = false;
+                s_cycle_step = 2u;   /* config ended with RESET: SET next */
+                s_since_pulse = 0u;
+                s_pulse_now = false;
+                s_fault = false;
+                diag_inc(DIAG_MAG_RECOVERED);
+                s_state = MAG_IDLE;
             }
         }
     }
@@ -362,16 +417,28 @@ static void __not_in_flash_func(i2c_isr)(void) {
 /* M-6, M-16. Called from the tick ISR (lower priority than the I2C ISR,
  * which is masked here so the state cannot change underneath). */
 void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
-    if (s_state == MAG_FAULT) {
-        return;
-    }
     i2c_irq_mask();
+    bool sampling = (s_txn == TXN_SAMPLE);
     switch (s_state) {
+    case MAG_FAULT:
+        /* M-2 (Rev 2.7): re-probe at 5 Hz while faulted. */
+        if (++s_probe_wait >= MAG_REPROBE_PERIOD_TICKS && hw_idle()) {
+            s_probe_wait = 0u;
+            probe_start();
+        }
+        break;
     case MAG_IDLE:
-        mag_start(tick);
+        if (s_config_pending) {
+            s_config_pending = false;
+            config_start();
+        } else {
+            mag_start(tick);
+        }
         break;
     case MAG_BUSY:
-        diag_inc(DIAG_MAG_MISSED_TICK);
+        if (sampling) {
+            diag_inc(DIAG_MAG_MISSED_TICK);
+        }
         diag_inc(DIAG_MAG_TIMEOUT);
         issue_abort();
         s_trig_ok = false;
@@ -381,9 +448,18 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
     case MAG_ABORTED:
         if (hw_idle()) {
             s_trig_ok = false;
-            mag_start(tick); /* M-9: this sample will be invalid */
+            if (sampling) {
+                mag_start(tick); /* M-9: this sample will be invalid */
+            } else {
+                /* A probe or configuration failed: back to re-probing. */
+                s_config_pending = false;
+                s_probe_wait = 0u;
+                s_state = MAG_FAULT;
+            }
         } else {
-            diag_inc(DIAG_MAG_MISSED_TICK);
+            if (sampling) {
+                diag_inc(DIAG_MAG_MISSED_TICK);
+            }
             if (controller_hung()) {
                 diag_inc(DIAG_MAG_TIMEOUT);
                 issue_abort();
@@ -391,7 +467,6 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
             }
         }
         break;
-    case MAG_FAULT:
     default:
         break;
     }
@@ -512,10 +587,20 @@ bool mag_init(void) {
     ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)(persist | MMC_CTRL0_SET));
     sleep_ms(1);
     if (!ok) {
-        g_diag_ctr[DIAG_MAG_PRODUCT_ID_FAULT] = 1u;
-        s_fault = true;
-        s_state = MAG_FAULT;
-        return false;
+        /* M-2 (Rev 2.7): fault, but set up everything so the tick can
+         * re-probe at 5 Hz. */
+        diag_inc(DIAG_MAG_PRODUCT_ID_FAULT);
+    }
+    s_probe_cmd[0] = MMC_REG_PRODUCT_ID;                 /* START + W(0x2F)  */
+    s_probe_cmd[1] = CMD_RESTART | CMD_READ | CMD_STOP;  /* RESTART R x1 STOP */
+    for (unsigned a = 0; a < 2u; a++) {
+        uint32_t pers = a ? MMC_CTRL0_AUTO_SR_EN : 0u;
+        s_cfg_cmd[a][0] = MMC_REG_CTRL1;
+        s_cfg_cmd[a][1] = MMC_CTRL1_BW_800HZ;
+        s_cfg_cmd[a][2] = CMD_RESTART | MMC_REG_CTRL2;
+        s_cfg_cmd[a][3] = 0u;
+        s_cfg_cmd[a][4] = CMD_RESTART | MMC_REG_CTRL0;
+        s_cfg_cmd[a][5] = CMD_STOP | pers | MMC_CTRL0_RESET;
     }
     for (unsigned a = 0; a < 2u; a++) {
         for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
@@ -577,7 +662,10 @@ bool mag_init(void) {
     irq_set_enabled(MAG_I2C_IRQ, true);
 
     s_trig_ok = false; /* M-9: the first transaction's data is invalid */
-    s_fault = false;
-    s_state = MAG_IDLE;
-    return true;
+    s_txn = TXN_SAMPLE;
+    s_config_pending = false;
+    s_probe_wait = 0u;
+    s_fault = !ok;
+    s_state = ok ? MAG_IDLE : MAG_FAULT;
+    return ok;
 }

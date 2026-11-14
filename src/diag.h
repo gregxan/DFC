@@ -30,6 +30,7 @@ typedef enum {
     DIAG_MAG_TIMEOUT,
     DIAG_MAG_PRODUCT_ID_FAULT,
     DIAG_MAG_BUS_CLEAR, /* D-1 (Rev 2.2): bus clears, start-up and post-abort */
+    DIAG_MAG_RECOVERED, /* D-1 (Rev 2.7): re-probes that cleared the fault flag */
     DIAG_COUNT
 } diag_ctr_t;
 

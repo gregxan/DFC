@@ -203,6 +203,37 @@ IRQ only; global interrupts stay on.
 - **Persistent bus fault.** The tick only ever writes a few registers, so
   UART traffic is unaffected (M-16a).
 
+### Re-probe (M-2a, Rev 2.7)
+
+If the blocking startup probe fails, `mag_init()` still sets up the DMA
+channels, the PIO and the interrupt. The magnetometer enters `MAG_FAULT`.
+Every `MAG_REPROBE_PERIOD_TICKS` (200) ticks, the tick starts a DMA probe
+once the hardware is idle:
+
+```
+START 0x30W 0x2F  RESTART 0x30R b0  STOP                        (~100 us)
+```
+
+- **On a product-ID match:** the STOP-detect ISR sets `s_config_pending`.
+  The next tick then sends:
+
+  ```
+  START 0x30W 0x0A BW  RESTART 0x30W 0x0B 0x00  RESTART 0x30W 0x09 (ctrl0|RESET)  STOP
+  ```
+
+  The completion of that transaction clears the fault flag, counts a
+  recovery, and sets the SET/RESET cycle step to "SET pending". The first
+  sample transaction therefore carries the SET. Its sample is invalid
+  (M-9), and normal samples follow.
+- **NACK, mismatch, abort or timeout:** the firmware returns to
+  `MAG_FAULT`. A failed probe counts as a product-ID fault. Neither probes
+  nor configurations count as missed ticks. A configuration failure, or a
+  timeout of either kind, uses the normal I2C-error and timeout counters.
+- **Recovery time:** the fault flag clears within 200 ms of the sensor
+  becoming reachable, plus two ticks.
+- **Unplugging during sampling** does not set the fault flag. It produces
+  I2C errors at 1 kHz (M-15), as before.
+
 ### Bus clear (M-18, Rev 2.2; `MAG_BUS_CLEAR`, default on)
 
 If a read is cut off while the MMC5983MA is sending a 0 bit, the sensor
@@ -261,9 +292,12 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
    arbitration-loss and timeout aborts, as described in §4.
    `MAG_BUS_CLEAR=0` removes both. With it removed, M-16a and V-6 resume
    are not guaranteed.
-5. **Startup product-ID failure.** The fault flag is set and the
-   product-ID-fault counter is set to 1. No magnetometer transactions are
-   attempted. The tick still runs (M-6).
+5. **Magnetometer absent at boot: resolved, written into the spec as Rev 2.7**
+   (M-2 amended, M-2a added, D-1, D-5 and V-6 amended; see
+   [REQUIREMENTS.md](REQUIREMENTS.md) §17). The fault flag is set, and the
+   tick re-probes at 5 Hz using the same DMA channels. A successful
+   re-probe is followed by a configuration transaction, then sampling.
+   See §4, "Re-probe".
 6. **Missed alarm.** If the tick ISR is ever held off for a whole period
    (only possible with a debugger and `DBGPAUSE` disabled), the schedule
    skips forward on the same grid and counts each skipped tick as a missed
@@ -308,6 +342,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-10 … U-14 | `link_write()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
+| M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()`, `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-6, M-6a | `tick.c` |
 | M-7, M-8 | `mag_start()`, `build_cmds()` |
