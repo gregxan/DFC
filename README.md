@@ -16,7 +16,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 |---|---|
 | [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.12), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
-| [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7 |
+| [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7, including a board-only loopback self-test |
 
 ## Repository layout
 

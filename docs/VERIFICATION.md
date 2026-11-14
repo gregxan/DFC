@@ -34,6 +34,93 @@ analyzer. An adapter that runs faster than the XIAO's 921,659 baud makes an
 echo test pile up data in the XIAO's TX queue. `soak_test.py --rate`
 (default 0.99) paces the host below line rate to avoid that.
 
+## Loopback self-test (board only, no external equipment)
+
+This is a first check of the UART path (both RX and TX DMA, the RX overflow
+logic, the lazy TX interrupt) and of the magnetometer fault handling, before
+any USB-UART adapters, logic analyzer or magnetometer are available. It
+uses the **diag-pattern** build: each UART transmits a continuous 8-bit
+counting sequence at full rate and checks that what it receives is the same
+sequence. The echo build does nothing here, because nothing starts the
+traffic.
+
+### Wiring
+
+Use **jumper wires**. Don't bridge neighbouring pads: on the XIAO, D6 and
+D7 are on opposite edges (bottom of each row), and the pad next to D6 is
+D5 (I2C SCL).
+
+Preferred, crossed: each direction passes through both UARTs.
+
+| From | To |
+|---|---|
+| D6 (UART0 TX, GPIO0) | D11 (UART1 RX, GPIO21, back pad) |
+| D12 (UART1 TX, GPIO20, back pad) | D7 (UART0 RX, GPIO1) |
+
+Alternative, each UART looped to itself: D6 → D7 and D12 → D11. With no
+access to the back pads yet, wire just D6 → D7. UART1 then receives
+nothing, which is a valid "disconnected RX" test of its own (HW-6a).
+
+Leave the magnetometer unconnected (or connect it; see "Expected values").
+
+### Run
+
+1. Build the **diag-pattern** preset ("Release + USB status, TX pattern
+   mode").
+2. Hold **B**, tap **R**, release **B**, and copy
+   `build\diag-pattern\firmware.uf2` to the `RP2350` drive.
+3. Find the board's COM port (Device Manager → Ports), then run:
+   ```bash
+   py C:\dev\dfc\tools\fwstatus.py COM7 --log loopback.log
+   ```
+4. Leave it running for at least 10 minutes. Counters are cumulative since
+   boot, so compare a report from the first minute with the last one.
+
+### Expected values
+
+| Status field | Expected | What it shows |
+|---|---|---|
+| `L0` / `L1` `pattern_err` | **0** (on each UART that has a wire into its RX) | received data matched the transmitted sequence, byte for byte, at line rate |
+| `rx_overflow`, `tx_reject` | **0** | the main loop keeps up; TX never had to reject a write |
+| `framing`, `break`, `overrun` | **0** | clean line |
+| `rx_hwm` | small (tens of bytes) | little RX data waits between main-loop reads |
+| `tx_hwm` | close to 4096 | the pattern keeps the TX queue full, as designed |
+| `tx_irq` | rising roughly 20–30 per second per UART | one completion interrupt per chained DMA transfer (U-13), not one per byte |
+| `STAT loop_max_us` | **≤ 100** | EX-8 |
+| `STAT tick_overrun` | **0** | M-6a |
+| `TIM_NS` `isr_*` | **≤ 5000** | EX-4 (nanoseconds) |
+| `TIM_NS` `crit` | **≤ 2000** | EX-3 |
+| `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 2000** | EX-7 (copy time excluded) |
+| `MAG` without a sensor | `fault=1`; `pid_fault` rising ~5/s; `i2c_error`, `timeout` and `missed_tick` not rising; `MAGS recovered=0` | the 5 Hz re-probe (M-2a), with **no effect on any UART counter** |
+| `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s; `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
+
+A UART with nothing wired to its RX shows all zero counters and
+`pattern_err=0`, because it receives nothing (the pull-up holds the line
+idle).
+
+### Optional fault checks (same wiring)
+
+- **Break and line errors.** Unplug the jumper from one RX pin and briefly
+  connect that **RX** pin to GND with a separate wire. Don't connect a TX
+  pin to GND. Reconnect the jumper. On that UART:
+  - `break` and/or `framing` rise, by at most one per millisecond (U-15a);
+  - `pattern_err` rises by a small number (the injected 0 byte and the
+    re-sync), then stays constant;
+  - the other UART's counters are unaffected.
+- **Open RX line.** Unplug one RX jumper and leave it open for a minute. No
+  counts rise on that UART (HW-6a pull-up).
+
+### What loopback doesn't cover
+
+- **Baud-rate mismatch** against a real adapter (V-1): both ends share one
+  clock here.
+- **Latency and gaps** (V-2 to V-4): these need a logic analyzer on the
+  test pins.
+- **Host-side byte checking:** `pattern_err` is the firmware's own check.
+  The soak test with USB-UART adapters (V-1) adds an independent check from
+  the PC.
+- **Magnetometer data quality.**
+
 ## V-1 Soak (10 min, saturated full duplex)
 
 Run it twice: once in echo mode and once in pattern mode. Pattern mode is the
