@@ -224,9 +224,9 @@ Then sampling is normal, with `CAL offset_valid=1 offset_cal=1`.
 1. **Repeatability.** Keep the sensor still, in mode 0. Re-select mode 0
    from the debugger 10 times (write 0 after briefly writing 1).
    - Each re-select adds 1 to `offset_cal`.
-   - `ox/oy/oz` should agree within about ±3 counts. The datasheet gives
-     ±1 mG SET/RESET repeatability, which is ~16 counts at 16384
-     counts/G, so ±3 counts is a tight target. Record what you get.
+   - `ox/oy/oz` should agree within ±16 counts. That is the datasheet's
+     ±1 mG SET/RESET repeatability at 16384 counts/G. Record the actual
+     spread.
 2. **Offset removal.** Rotate the sensor 180° about Z and compare X and Y
    before and after. With the offset subtracted, they should be equal and
    opposite to within noise.
