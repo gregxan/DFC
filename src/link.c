@@ -19,6 +19,8 @@ _Static_assert(LINK_RX_RING_BITS >= 8 && LINK_RX_RING_BITS <= 15,
 _Static_assert(LINK_TX_RING_BITS >= 6 && LINK_TX_RING_BITS <= 15,
                "TX ring must be 64 B .. 32 KB (DMA ring mode limit)");
 
+#define LINK_UART_FIFO_DEPTH 32u /* PL011 TX FIFO entries */
+
 #define UART_ERR_BITS (UART_UARTIMSC_FEIM_BITS | UART_UARTIMSC_BEIM_BITS | UART_UARTIMSC_OEIM_BITS)
 
 /* U-7: rings aligned to their size, as DMA ring mode requires. */
@@ -135,10 +137,52 @@ size_t __not_in_flash_func(link_read)(link_id_t id, uint8_t *dst, size_t max) {
 }
 
 /* ---------------------------------------------------------------- TX --- */
+/*
+ * U-10a, U-13 (Rev 2.10): two efficiency measures on top of the ring + DMA design.
+ *
+ * (B) Direct FIFO write. When TX is completely idle (no transfer in flight,
+ *     ring empty), link_write() writes the first bytes straight into the
+ *     32-entry UART FIFO: no copy, no DMA set-up, no interrupt, and the
+ *     lowest start-bit latency. Anything that does not fit goes through the
+ *     ring and DMA, after those bytes, so order is preserved.
+ *
+ * (A) Lazy completion interrupt. A transfer always covers everything queued
+ *     when it starts, so its completion interrupt is only needed if more
+ *     data is queued while it runs. The channel's interrupt is therefore
+ *     disabled when a transfer starts and enabled by link_write() only when
+ *     it queues data behind a running transfer. The DMA latches completion
+ *     in its raw status whether or not the interrupt is enabled, so enabling
+ *     it after the transfer has finished fires at once. A finished transfer
+ *     that no interrupt retired is retired ("reaped") by the next
+ *     link_write() or link_tx_free(), which also starts any data queued
+ *     behind it.
+ *
+ * tx_busy means "a transfer was started and has not been retired yet".
+ */
 
-/* Start a transfer of everything queued. Caller is the TX completion ISR,
- * or the main loop with interrupts disabled. */
+static inline uint32_t tx_bit(const link_t *l) {
+    return 1u << l->tx_ch;
+}
+
+static inline void tx_start(link_t *l);
+
+/* Retire a finished transfer that no interrupt retired, and start the next
+ * one if data is waiting behind it (otherwise that data would wait for the
+ * next successful write). Interrupts disabled. */
+static inline void __not_in_flash_func(tx_reap)(link_t *l) {
+    if (l->tx_busy && !(dma_hw->ch[l->tx_ch].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS)) {
+        dma_hw->ints0 = tx_bit(l); /* drop the latched completion */
+        l->tx_tail = l->tx_tail + l->tx_inflight;
+        l->tx_busy = false;
+        tx_start(l); /* disables the interrupt; starts queued data, if any */
+    }
+}
+
+/* Start a transfer of everything queued, with its completion interrupt
+ * disabled (A). Caller is the ISR, or the main loop with interrupts
+ * disabled, and no transfer is in flight. */
 static inline void __not_in_flash_func(tx_start)(link_t *l) {
+    hw_clear_bits(&dma_hw->inte0, tx_bit(l));
     uint32_t tail = l->tx_tail;
     uint32_t n = l->tx_head - tail;
     if (n == 0u) {
@@ -154,8 +198,29 @@ static inline void __not_in_flash_func(tx_start)(link_t *l) {
 }
 
 size_t __not_in_flash_func(link_tx_free)(link_id_t id) {
-    const link_t *l = &s_links[id];
+    link_t *l = &s_links[id];
+    cs_t cs = cs_enter();
+    tx_reap(l);
+    cs_exit(cs);
     return TX_SIZE - (l->tx_head - l->tx_tail);
+}
+
+/* (B) Write up to the FIFO's free space directly. Returns bytes written. */
+static inline uint32_t __not_in_flash_func(tx_direct)(link_t *l, const uint8_t *src, uint32_t n) {
+    uart_hw_t *hw = hw_of(l);
+    uint32_t k = 0;
+    if (hw->fr & UART_UARTFR_TXFE_BITS) {
+        /* FIFO empty: all LINK_UART_FIFO_DEPTH entries are free. */
+        uint32_t m = n < LINK_UART_FIFO_DEPTH ? n : LINK_UART_FIFO_DEPTH;
+        for (; k < m; k++) {
+            hw->dr = src[k];
+        }
+    } else {
+        while (k < n && !(hw->fr & UART_UARTFR_TXFF_BITS)) {
+            hw->dr = src[k++];
+        }
+    }
+    return k;
 }
 
 bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t len) {
@@ -165,22 +230,41 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
         return true;
     }
 
+    cs_t cs = cs_enter();
+    tx_reap(l);
+    cs_exit(cs);
+
     uint32_t head = l->tx_head;
-    /* tx_tail only grows, so a stale read underestimates free space. */
     uint32_t used = head - l->tx_tail;
+    /* U-11: decided on the whole message before anything is sent, so a
+     * rejected write never leaves part of itself on the line. */
     if (len > TX_SIZE - used) {
-        diag_inc(ctr(id, DIAG_L0_TX_REJECT)); /* U-11 */
+        diag_inc(ctr(id, DIAG_L0_TX_REJECT));
         diag_max(DIAG_T_API_WRITE, diag_cycles() - t0);
         return false;
     }
 
     uint32_t n = (uint32_t)len;
+    uint32_t tc = diag_cycles();
+
+    /* (B) TX idle: no transfer in flight and nothing queued. Only the main
+     * loop produces, and no interrupt can start a transfer now, so no
+     * critical section is needed. */
+    if (!l->tx_busy && used == 0u) {
+        uint32_t k = tx_direct(l, src, n);
+        src += k;
+        n -= k;
+        if (n == 0u) {
+            diag_max(DIAG_T_API_WRITE, tc - t0); /* FIFO writes count as payload copy */
+            return true;
+        }
+    }
+
     uint32_t idx = head & TX_MASK;
     uint32_t first = TX_SIZE - idx;
     if (first > n) {
         first = n;
     }
-    uint32_t tc = diag_cycles();
     memcpy(&l->tx_ring[idx], src, first);
     if (n > first) {
         memcpy(&l->tx_ring[0], src + first, n - first);
@@ -191,12 +275,16 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     l->tx_head = head + n;
     diag_hwm(&g_diag_tx_hwm[id], used + n);
 
-    /* U-12. If the completion ISR ran after our head update it has already
-     * picked up the data; if it found nothing it cleared tx_busy, and we
-     * start the transfer here. */
-    cs_t cs = cs_enter();
+    /* U-12, U-13. Either the DMA is idle (reap it and start a transfer of
+     * everything queued), or it is still running: enable its completion
+     * interrupt so the ISR chains the next transfer (A). If it finished in
+     * the meantime the latched status makes the interrupt fire at once. */
+    cs = cs_enter();
+    tx_reap(l);
     if (!l->tx_busy) {
         tx_start(l);
+    } else {
+        hw_set_bits(&dma_hw->inte0, tx_bit(l));
     }
     cs_exit(cs);
 
@@ -204,16 +292,21 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     return true;
 }
 
-/* U-13, EX-4: TX DMA completion for both links (DMA_IRQ_0). */
+/* U-13, EX-4: TX DMA completion for both links (DMA_IRQ_0). Only fires
+ * when data was queued behind a running transfer (A). */
 static void __not_in_flash_func(tx_dma_isr)(void) {
     uint32_t t0 = diag_cycles();
     uint32_t ints = dma_hw->ints0;
     for (unsigned i = 0; i < LINK_COUNT; i++) {
         link_t *l = &s_links[i];
-        uint32_t bit = 1u << l->tx_ch;
+        uint32_t bit = tx_bit(l);
         if (ints & bit) {
             dma_hw->ints0 = bit;
-            l->tx_tail = l->tx_tail + l->tx_inflight;
+            g_diag_tx_irq[i] = g_diag_tx_irq[i] + 1u;
+            if (l->tx_busy) {
+                l->tx_tail = l->tx_tail + l->tx_inflight;
+                l->tx_busy = false;
+            }
             tx_start(l);
         }
     }
@@ -318,7 +411,8 @@ static bool link_setup(link_id_t id, uart_inst_t *uart, uint tx_pin, uint rx_pin
     channel_config_set_dreq(&c, uart_get_dreq_num(uart, true));
     channel_config_set_high_priority(&c, true);
     dma_channel_configure(l->tx_ch, &c, &hw->dr, tx_ring, 0, false);
-    dma_irqn_set_channel_enabled(LINK_TX_DMA_IRQ_INDEX, l->tx_ch, true);
+    /* (A) The completion interrupt is enabled only on demand (link_write). */
+    dma_irqn_set_channel_enabled(LINK_TX_DMA_IRQ_INDEX, l->tx_ch, false);
 
     /* U-15: framing, break and overrun interrupts only. RX and RX-timeout
      * interrupts stay off: nothing interrupt-driven is in the data path. */

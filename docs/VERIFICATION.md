@@ -262,3 +262,24 @@ The datasheet defines +X, +Y and +Z after a SET (p. 9, marking
 illustration). Point each board axis at magnetic north in turn and record
 which sensor axis, and which sign, responds. Document the mapping for
 the main-loop application.
+
+## TX interrupt economy (U-10a, U-13, D-3a; Rev 2.10)
+
+Use the `diag` build, echo mode. Read the `tx_irq=` field on the `L0` and
+`L1` status lines.
+
+1. **Isolated bytes.** Run `latency_stimulus.py`, one byte per ~1 ms.
+   - `tx_irq` should not increase: every echo is a direct FIFO write.
+   - On the analyzer, the TX_WRITE → start-bit latency (V-3) should be at
+     or below the previous DMA-based figure.
+2. **Saturated echo.** Run `soak_test.py --mode echo`.
+   - `tx_irq` should stay far below the byte rate (≪ 92,000/s per UART).
+   - Record the rate. Soak results must be unchanged (byte-exact, no
+     rejects).
+3. **Bulk.** Run `diag-pattern` with `soak_test.py --mode pattern`.
+   - `tx_irq` rises by roughly one per transfer chain.
+   - V-4 gaps are unchanged.
+4. **Messages longer than the FIFO.** On an idle line, send a single
+   100-byte write, for example from a debug build. The first 32 bytes go
+   out directly, the rest via DMA, with no gap at the hand-over beyond
+   U-18 and bytes in order.

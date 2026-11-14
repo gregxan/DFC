@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.9**. The changes since Revision 2 are listed in sections 11 to 19.
+**Revision 2.10**. The changes since Revision 2 are listed in sections 11 to 20.
 
 ## 1. Scope
 
@@ -60,10 +60,14 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 4.3 Transmit
 
-- **U-10** The TX write function shall be non-blocking. It copies bytes into a per-UART TX ring buffer and returns immediately.
+- **U-10** The TX write function shall be non-blocking. It copies bytes into a per-UART TX ring buffer and returns immediately, except as allowed by U-10a. *(Amended in Rev 2.10.)*
+- **U-10a** When TX is completely idle (no DMA transfer outstanding and the ring empty), the write function shall write the leading bytes of the message directly into the UART TX FIFO, up to its free space (32 entries when the FIFO is empty). The rest goes through the ring and DMA (U-12), after those bytes, so order is preserved. The U-11 accept/reject decision is made on the whole message before any byte is written. *(Added in Rev 2.10.)*
 - **U-11** If the TX ring lacks space for the entire write, the write shall be rejected in full, the per-UART TX overflow counter incremented, and an error returned. No partial message is queued.
-- **U-12** If TX DMA is idle when data is queued, the write function shall start DMA transmission before returning.
-- **U-13** While the TX queue holds data, the UART TX FIFO shall be kept non-empty, within the gap limits of U-18. When a TX DMA transfer completes and the queue still holds data, the TX DMA completion handler shall start the next transfer.
+- **U-12** If TX DMA is idle when data is queued in the ring, the write function shall start DMA transmission before returning. A DMA transfer that has finished but has not yet been retired by an interrupt counts as idle: the write function retires it and starts the next. *(Amended in Rev 2.10.)*
+- **U-13** While the TX queue holds data, the UART TX FIFO shall be kept non-empty, within the gap limits of U-18. When a TX DMA transfer completes and the queue still holds data, the TX DMA completion handler shall start the next transfer. *(Amended in Rev 2.10.)*
+  - Each transfer covers everything queued when it starts, so the completion interrupt is needed only when data is queued behind a running transfer.
+  - The completion interrupt shall be enabled exactly when that happens, and disabled when a transfer starts.
+  - A finished transfer that no interrupt retired shall be retired, and any data queued behind it started, by the next write or free-space query.
 - **U-14** TX ring size shall be a compile-time parameter. Default: 4 KB per UART.
 
 ### 4.4 Line Errors
@@ -158,7 +162,8 @@ Firmware for a Seeed XIAO RP2350 that:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
   - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
-- **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached).
+- **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). For TX, this covers the ring only. Bytes written directly to the FIFO under U-10a are not included. *(Amended in Rev 2.10.)*
+- **D-3a** Firmware shall count TX DMA completion interrupts per UART, for verification of U-13. This count is cumulative and is not cleared. *(Added in Rev 2.10.)*
 - **D-4** Firmware shall record the maximum main-loop iteration time in microseconds.
 - **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
   - aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16);
@@ -358,3 +363,14 @@ These changes follow the second datasheet review.
 - **Amended D-1.** Added the offset-calibration and saturated-sample counters.
 - **Amended V-6.** Added the calibration and saturation tests.
 - **Bench checks.** Section 9 procedures in VERIFICATION.md were added for SET effectiveness at a pulse interval of 1, supply current at 1 kHz, and axis orientation.
+
+## 20. Revision 2.10 Changes
+
+These changes cut TX CPU overhead.
+- **Before.** Each write started a DMA transfer whose completion raised an interrupt. With byte-at-a-time traffic on two saturated UARTs, that was up to ~184,000 interrupts per second, about 11% of the CPU.
+- **Added U-10a; amended U-10 and U-12.** On an idle line, writes go directly into the 32-entry hardware FIFO, with no copy, no DMA set-up, no interrupt, and the lowest start-bit latency.
+- **Amended U-13.** The completion interrupt is enabled only when data is queued behind a running transfer.
+
+Together these remove the interrupt for non-overlapping writes. Bulk traffic still uses one transfer per chain.
+- **Amended D-3.** The TX high-water mark covers the ring only.
+- **Added D-3a.** TX interrupt counter.

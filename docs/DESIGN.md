@@ -71,25 +71,56 @@ Durations are recorded with the DWT cycle counter into `g_diag_max_cycles[]`
 - The RX high-water mark is taken at every read, before the copy. Between
   reads the fill level only grows, so the maximum is always observed (D-3).
 
-### TX (U-10 … U-14, U-18)
+### TX (U-10 … U-14, U-18; Rev 2.10)
 
-- A 4 KB ring is aligned to its size. The TX DMA uses **read-address ring
-  wrapping**, so one transfer can cross the end of the ring. Every transfer
-  sends *everything* queued at the moment it starts.
-- `tx_head` (written only by the main loop) and `tx_tail` (advanced only
-  by the completion ISR) are free-running 32-bit byte counts.
-- `link_write()` checks free space, `TX_SIZE - (head - tail)`. If the
-  message doesn't fit, the whole write is rejected and counted (U-11).
-  Otherwise it copies, issues `__dmb()`, publishes `head`, and starts the DMA
-  inside a critical section of about 10 instructions if `tx_busy` is clear
-  (U-12). The ISR and the writer can't both start a transfer, and neither
-  can miss queued data. The ISR either sees the new head, or it clears
-  `tx_busy` first and the writer sees that.
-- The completion ISR fires when the last byte has been written into the
-  32-entry UART FIFO, not when it has left the wire. The next transfer
-  therefore normally starts while about 32 bytes (~350 µs) are still
-  queued in hardware. The ≤ 25 µs boundary limit of U-18 is a worst case
-  that takes no credit for this FIFO.
+- **Ring and DMA, as before.** A 4 KB ring is aligned to its size. The TX
+  DMA uses **read-address ring wrapping**, so one transfer can cross the
+  end of the ring. Every transfer sends *everything* queued at the moment it
+  starts.
+- **Pointers.** `tx_head` is advanced only by the main loop. `tx_tail` is
+  advanced when a transfer is retired, by the ISR or by a reap. Both are
+  free-running 32-bit byte counts. `tx_busy` means "a transfer was started
+  and has not been retired".
+- **`link_write()`** does the following:
+  1. **Reap** (critical section, a few instructions). If `tx_busy` is set
+     but the channel's BUSY bit is clear, the transfer finished without an
+     interrupt. The function acknowledges the latched status, advances
+     `tx_tail`, and starts any data queued behind it.
+  2. **Reject** the whole message if it doesn't fit in the ring (U-11).
+     Nothing has been sent at this point.
+  3. **Direct FIFO write (U-10a).** If no transfer is outstanding and the
+     ring is empty, the leading bytes go straight into `UARTDR`:
+     - if `TXFE` is set (FIFO empty), up to 32 bytes are written without
+       further checks;
+     - otherwise bytes are written while `TXFF` is clear.
+
+     If everything fits, the write is done, with no copy, DMA or interrupt.
+  4. **The rest** is copied into the ring, then `__dmb()` and `tx_head` is
+     published.
+  5. **Critical section:** reap again. If the DMA is idle, start a transfer
+     of everything queued, with the completion interrupt **disabled**.
+     Otherwise **enable** the channel's completion interrupt, so the ISR
+     chains the next transfer (U-13). If the transfer already finished, the
+     latched status makes the interrupt fire as soon as the critical section
+     ends. It can't be missed.
+- **`tx_dma_isr()`** retires the transfer and starts the next one, which
+  disables the interrupt again. It runs only when data was queued behind a
+  running transfer, so non-overlapping writes produce **no interrupts**.
+  `g_diag_tx_irq[]` counts the interrupts that do fire (D-3a, on the `L0`
+  and `L1` status lines).
+- **`link_tx_free()`** also reaps, so free space is never under-reported
+  for long.
+- **Gaps.** The completion ISR fires when the last byte has been written
+  into the 32-entry UART FIFO, not when it has left the wire. The next
+  transfer therefore normally starts while about 32 bytes (~350 µs) are
+  still queued in hardware. The ≤ 25 µs boundary limit of U-18 is a worst
+  case that takes no credit for this FIFO.
+- **Model check.** The algorithm was checked with a randomised model:
+  3000 runs, ~1.45 M bytes, with DMA progress, UART draining and the ISR
+  interleaved between every step of `link_write()`. Every run kept byte
+  order with no loss, and the queue drained with no further API calls. The
+  check found, and led to the fix of, a stall: a reap that didn't start
+  data queued behind the retired transfer.
 
 ### Line errors (U-15 … U-15b)
 
@@ -389,7 +420,8 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-1, U-2, R-3 | `link_setup()`; actual baud in `g_diag_actual_baud[]` |
 | U-3 … U-7 | `link_setup()` RX DMA; `LINK_RX_RING_BITS` |
 | U-8, U-8a, U-9 | `link_tick_isr()`, `rx_total_now()`, `link_read()`, `rx_overflow()` |
-| U-10 … U-14 | `link_write()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
+| U-10 … U-14 (incl. U-10a) | `link_write()`, `tx_direct()`, `tx_reap()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
+| D-3a | `g_diag_tx_irq[]` |
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
 | M-4b, D-1 (calibration, saturation) | `calibrate()`, `count_saturation()`, `blocking_measure()`, `mag_field()` |

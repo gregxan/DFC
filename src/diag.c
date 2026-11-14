@@ -6,6 +6,7 @@ volatile uint32_t g_diag_ctr[DIAG_COUNT];
 volatile uint32_t g_diag_max_cycles[DIAG_T_COUNT];
 volatile uint32_t g_diag_rx_hwm[2];
 volatile uint32_t g_diag_tx_hwm[2];
+volatile uint32_t g_diag_tx_irq[2];
 uint32_t g_diag_actual_baud[2];
 
 static uint32_t s_loop_last;

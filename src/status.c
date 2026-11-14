@@ -61,10 +61,10 @@ static int format_line(unsigned line) {
         unsigned b = DIAG_LINK_STRIDE * k;
         return snprintf(s_buf, n, "L%u rx_overflow=%" PRIu32 " tx_reject=%" PRIu32 " framing=%" PRIu32
                         " break=%" PRIu32 " overrun=%" PRIu32 " rx_hwm=%" PRIu32 " tx_hwm=%" PRIu32
-                        " pattern_err=%" PRIu32 "\r\n",
+                        " pattern_err=%" PRIu32 " tx_irq=%" PRIu32 "\r\n",
                         k, s_total[b + DIAG_L0_RX_OVERFLOW], s_total[b + DIAG_L0_TX_REJECT],
                         s_total[b + DIAG_L0_FRAMING], s_total[b + DIAG_L0_BREAK], s_total[b + DIAG_L0_OVERRUN],
-                        g_diag_rx_hwm[k], g_diag_tx_hwm[k], g_app_rx_pattern_errors[k]);
+                        g_diag_rx_hwm[k], g_diag_tx_hwm[k], g_app_rx_pattern_errors[k], g_diag_tx_irq[k]);
     }
     case 3:
         return snprintf(s_buf, n, "MAG fault=%u i2c_error=%" PRIu32 " missed_tick=%" PRIu32 " timeout=%" PRIu32

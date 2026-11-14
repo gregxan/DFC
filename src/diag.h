@@ -59,6 +59,7 @@ extern volatile uint32_t g_diag_ctr[DIAG_COUNT];
 extern volatile uint32_t g_diag_max_cycles[DIAG_T_COUNT];
 extern volatile uint32_t g_diag_rx_hwm[2]; /* D-3, bytes */
 extern volatile uint32_t g_diag_tx_hwm[2];
+extern volatile uint32_t g_diag_tx_irq[2]; /* TX DMA completion interrupts (Rev 2.10), cumulative */
 extern uint32_t g_diag_actual_baud[2];
 
 void diag_init(void);
