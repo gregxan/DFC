@@ -13,6 +13,7 @@
  * The handlers below are stubs to be filled in: for now each UART's data is
  * echoed onto the other UART.
  */
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -27,19 +28,32 @@ static uint8_t s_link1_buf[512];
 
 void app_init(void) {}
 
+/* ---- Magnetometer state, shared by all handlers -------------------- */
+/* Filled by mag_handler(), which runs first in app_poll(), so the link
+ * handlers always see this epoch's values. File scope: visible to every
+ * handler in this file, not exported. */
+static mag_reading_t s_mag;  /* latest reading this epoch (may be invalid or stale) */
+static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G, offset removed */
+static bool s_mag_new;       /* true if this epoch brought a new valid sample */
+
 /* ---- Magnetometer: most recent sample ------------------------------- */
 static void mag_handler(void) {
+    static bool have_last;
     static uint32_t last_seq;
-    mag_reading_t r;
-    if (mag_read_latest(&r) && r.s.valid && !r.stale) {
-        if (r.s.seq != last_seq + 1u) {
+
+    s_mag_new = false;
+    if (mag_read_latest(&s_mag) && s_mag.s.valid && !s_mag.stale) {
+        if (have_last && s_mag.s.seq == last_seq) {
+            return; /* same sample as last epoch: nothing new */
+        }
+        if (have_last && s_mag.s.seq != last_seq + 1u) {
             /* gap: samples were missed (abort / fault) */
         }
-        last_seq = r.s.seq;
-        int32_t xyz[3];
-        mag_field(&r, xyz); /* signed counts, 16384/G, offset removed */
-        (void)xyz;
-        /* TODO: use xyz[], r.s.timestamp_us */
+        have_last = true;
+        last_seq = s_mag.s.seq;
+        mag_field(&s_mag, s_mag_xyz);
+        s_mag_new = true;
+        /* TODO: use s_mag_xyz[], s_mag.s.timestamp_us */
     }
 }
 
@@ -63,6 +77,13 @@ static void link0_handler(void) {
         (void)link_write(LINK_1, s_link0_buf, n);
         avail -= n;
     }
+
+    /* TODO: once per epoch, send the magnetometer values if this epoch
+     * brought a new sample (s_mag / s_mag_xyz are filled by mag_handler()):
+     *   if (s_mag_new) {
+     *       encode s_mag_xyz[] and s_mag.s.timestamp_us into a message;
+     *       link_write(<link>, msg, len);
+     *   } */
 }
 
 /* ---- LINK_1 (UART1) receive handler: echo to LINK_0 (UART0) ---------- */
