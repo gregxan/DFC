@@ -13,6 +13,11 @@ static uint32_t s_alarm_bit;
 static uint64_t s_t0;          /* time of tick 0                     */
 static uint64_t s_next_target; /* time of the tick now being awaited */
 static uint32_t s_next_index;
+static volatile uint32_t s_tick_count; /* EX-10: ticks that have occurred */
+
+uint32_t __not_in_flash_func(tick_count)(void) {
+    return s_tick_count;
+}
 
 uint64_t __not_in_flash_func(tick_time_us)(uint32_t idx) {
     return s_t0 + (uint64_t)idx * TICK_PERIOD_US;
@@ -44,6 +49,8 @@ static void __not_in_flash_func(tick_isr)(void) {
         diag_inc(DIAG_TICK_OVERRUN); /* D-1 (Rev 2.11) */
         timer_hw->alarm[s_alarm] = (uint32_t)s_next_target;
     }
+
+    s_tick_count = s_next_index; /* after any skip-ahead */
 
     link_tick_isr();  /* U-8, U-15a */
     mag_tick_isr(idx); /* M-6, M-16 */

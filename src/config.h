@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.13).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.14).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -164,8 +164,10 @@
 #endif
 
 /* HW-9 (Rev 2.13): test GPIOs for logic-analyzer measurements (V-2, V-3),
- * toggled by the reference main loop. Off by default; the CMake option
- * APP_TEST_PINS turns them on (the diag and diag-pattern presets do).
+ * toggled by the test application (app_test.c). In the user application,
+ * D8 instead goes high for the duration of each epoch's app_poll().
+ * Off by default; the CMake option APP_TEST_PINS turns them on (the diag
+ * and diag-pattern presets do).
  * They sit on the SPI0 pads, keeping all three analog inputs (D0..D2)
  * free. If the application needs SPI0, move them to free back pads. */
 #ifndef APP_TEST_PINS
@@ -176,11 +178,13 @@
 #define TEST_PIN_LINK1_RX_SEEN 3u  /* D10 */
 #define TEST_PIN_LINK1_TX_WRITE 5u /* D3  */
 
-/* Reference application behaviour (see main.c). */
+/* Application selection (app.h; Rev 2.14). Set by the CMake option
+ * APP_MODE: user (production, app_user.c), echo or pattern (app_test.c). */
 #define APP_MODE_ECHO 0
 #define APP_MODE_PATTERN 1
+#define APP_MODE_USER 2
 #ifndef APP_MODE
-#define APP_MODE APP_MODE_ECHO
+#define APP_MODE APP_MODE_USER
 #endif
 
 /* Periodic status lines over USB CDC (B-20). Off in production builds. */

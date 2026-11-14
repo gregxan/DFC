@@ -16,15 +16,21 @@
     },
     {
       "name": "release",
-      "displayName": "Release (production)",
+      "displayName": "Release (production, user application)",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "OFF" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "OFF", "APP_MODE": "user" }
+    },
+    {
+      "name": "release-echo",
+      "displayName": "Release, echo test application (timing via SWD)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "OFF", "APP_MODE": "echo", "APP_TEST_PINS": "ON" }
     },
     {
       "name": "diag",
       "displayName": "Release + USB status (verification)",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_TEST_PINS": "ON" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_MODE": "echo", "APP_TEST_PINS": "ON" }
     },
     {
       "name": "diag-pattern",
@@ -33,16 +39,24 @@
       "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_MODE": "pattern", "APP_TEST_PINS": "ON" }
     },
     {
+      "name": "diag-user",
+      "displayName": "Release + USB status, user application (epoch profiling)",
+      "inherits": "base",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Release", "APP_USB_STATUS": "ON", "APP_MODE": "user", "APP_TEST_PINS": "ON" }
+    },
+    {
       "name": "debug",
       "displayName": "Debug (-O0, for stepping only)",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "APP_USB_STATUS": "OFF" }
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug", "APP_USB_STATUS": "OFF", "APP_MODE": "user" }
     }
   ],
   "buildPresets": [
     { "name": "release", "configurePreset": "release" },
+    { "name": "release-echo", "configurePreset": "release-echo" },
     { "name": "diag", "configurePreset": "diag" },
     { "name": "diag-pattern", "configurePreset": "diag-pattern" },
+    { "name": "diag-user", "configurePreset": "diag-user" },
     { "name": "debug", "configurePreset": "debug" }
   ]
 }

@@ -36,6 +36,8 @@ typedef enum {
     DIAG_MAG_SATURATED, /* D-1 (Rev 2.9): valid samples at/near full scale    */
     DIAG_TICK_OVERRUN,  /* D-1 (Rev 2.11): 1 ms ticks skipped because the tick
                          * ISR ran a whole period late (M-6a)              */
+    DIAG_EPOCH_OVERRUN, /* D-1 (Rev 2.14): user epochs whose app_poll() ran
+                         * past the next tick (EX-8)                       */
     DIAG_COUNT
 } diag_ctr_t;
 

@@ -1,177 +1,124 @@
 /*
- * Reference application: a single bare-metal main loop on core 0 (EX-1,
- * HW-8). It consumes magnetometer samples and, per APP_MODE:
+ * Initialisation and the single bare-metal main loop on core 0 (EX-1,
+ * HW-8). The application itself lives in app_user.c or app_test.c (app.h),
+ * selected by the CMake option APP_MODE.
  *
- *   APP_MODE_ECHO     every byte received on a UART is sent back out of the
- *                     same UART (V-1 soak, V-2/V-3 latency).
- *   APP_MODE_PATTERN  each UART transmits a continuous 8-bit counting
- *                     pattern, keeping its TX queue non-empty (V-1, V-4),
- *                     and checks that received data is the same pattern.
+ * User application (APP_MODE=user): 1 ms epochs (EX-10, Rev 2.14).
+ *   The loop waits for the next 1 ms tick with interrupts enabled; DMA and
+ *   the interrupt handlers keep receiving UART data and publishing
+ *   magnetometer samples meanwhile (EX-2). Just after each tick it runs
+ *   app_poll() once. Recorded per epoch (D-4):
+ *     - work time of app_poll() (PROF_EPOCH: last / max / average),
+ *     - start latency from the tick (g_epoch_start_max_us),
+ *     - epochs whose work ran past the next tick (DIAG_EPOCH_OVERRUN).
+ *   With APP_TEST_PINS, D8 (TEST_PIN_LINK0_RX_SEEN) is high while
+ *   app_poll() runs, for logic-analyzer profiling.
  *
- * Test GPIOs (APP_TEST_PINS):
- *   RX_SEEN  toggles when link_read() returns data      (V-2)
- *   TX_WRITE toggles immediately before link_write()    (V-3)
+ * Test applications (echo / pattern): app_poll() runs on every pass, as
+ * fast as possible; the pass time is recorded as DIAG_T_LOOP (D-4).
  */
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "hardware/gpio.h"
 #include "hardware/structs/sio.h"
+#include "hardware/sync.h"
 #include "pico/stdlib.h"
 
+#include "app.h"
 #include "config.h"
 #include "diag.h"
 #include "link.h"
 #include "mag.h"
+#include "prof.h"
 #include "status.h"
 #include "tick.h"
 
-/* Observable from a debugger (and reported by status.c). */
-volatile int32_t g_app_mag_xyz[3];       /* field, offset removed when calibrated */
-volatile int32_t g_app_mag_offset[3];    /* latest calibrated offset (M-4b)       */
-volatile bool g_app_mag_offset_valid;
-volatile uint32_t g_app_mag_gaps;    /* sequence discontinuities between valid samples */
-volatile uint32_t g_app_mag_valid;   /* valid samples consumed                         */
-volatile uint32_t g_app_mag_invalid; /* invalid (M-9) samples consumed                 */
-volatile uint32_t g_app_mag_invalid_by_reason[4]; /* indexed by mag_sample_reason_t */
-volatile uint32_t g_app_mag_stale;   /* iterations on which the latest sample was stale */
-volatile bool g_app_baud_ok;
-volatile uint32_t g_app_rx_pattern_errors[LINK_COUNT]; /* APP_MODE_PATTERN only */
+volatile bool g_app_baud_ok; /* U-2 result of link_init(); reported by status.c */
+
+#if APP_MODE == APP_MODE_USER
+
+volatile uint32_t g_epoch_start_max_us; /* worst epoch start latency after its tick */
 
 #if APP_TEST_PINS
-static const uint32_t k_rx_seen_mask[LINK_COUNT] = {1u << TEST_PIN_LINK0_RX_SEEN, 1u << TEST_PIN_LINK1_RX_SEEN};
-static const uint32_t k_tx_write_mask[LINK_COUNT] = {1u << TEST_PIN_LINK0_TX_WRITE, 1u << TEST_PIN_LINK1_TX_WRITE};
-
-static void test_pins_init(void) {
-    const uint pins[] = {TEST_PIN_LINK0_RX_SEEN, TEST_PIN_LINK0_TX_WRITE, TEST_PIN_LINK1_RX_SEEN,
-                         TEST_PIN_LINK1_TX_WRITE};
-    for (unsigned i = 0; i < sizeof pins / sizeof pins[0]; i++) {
-        gpio_init(pins[i]);
-        gpio_set_dir(pins[i], GPIO_OUT);
-        gpio_put(pins[i], false);
-    }
+#define EPOCH_PIN_MASK (1u << TEST_PIN_LINK0_RX_SEEN) /* D8 */
+static void epoch_pin_init(void) {
+    gpio_init(TEST_PIN_LINK0_RX_SEEN);
+    gpio_set_dir(TEST_PIN_LINK0_RX_SEEN, GPIO_OUT);
+    gpio_put(TEST_PIN_LINK0_RX_SEEN, false);
 }
-#define TEST_TOGGLE(mask) (sio_hw->gpio_togl = (mask))
+#define EPOCH_PIN_HIGH() (sio_hw->gpio_set = EPOCH_PIN_MASK)
+#define EPOCH_PIN_LOW() (sio_hw->gpio_clr = EPOCH_PIN_MASK)
 #else
-static void test_pins_init(void) {}
-#define TEST_TOGGLE(mask) ((void)0) /* argument not evaluated */
+static void epoch_pin_init(void) {}
+#define EPOCH_PIN_HIGH() ((void)0)
+#define EPOCH_PIN_LOW() ((void)0)
 #endif
 
-static uint8_t s_buf[256];
-
-#if APP_MODE == APP_MODE_PATTERN
-static uint8_t s_tx_next[LINK_COUNT];
-static uint8_t s_rx_next[LINK_COUNT];
-static bool s_rx_synced[LINK_COUNT];
-
-static void pattern_rx(unsigned i, const uint8_t *p, size_t n) {
-    for (size_t k = 0; k < n; k++) {
-        if (s_rx_synced[i] && p[k] != s_rx_next[i]) {
-            g_app_rx_pattern_errors[i]++;
-        }
-        s_rx_synced[i] = true;
-        s_rx_next[i] = (uint8_t)(p[k] + 1u);
-    }
-}
-
-static void pattern_tx(unsigned i) {
-    static uint8_t chunk[256];
-    if (link_tx_free((link_id_t)i) < sizeof chunk) {
-        return;
-    }
-    for (unsigned k = 0; k < sizeof chunk; k++) {
-        chunk[k] = (uint8_t)(s_tx_next[i] + k);
-    }
-    TEST_TOGGLE(k_tx_write_mask[i]);
-    if (link_write((link_id_t)i, chunk, sizeof chunk)) {
-        s_tx_next[i] = (uint8_t)(s_tx_next[i] + sizeof chunk);
-    }
-}
-#endif
-
-static void mag_consume(void) {
-    static bool have_last;
-    static uint32_t last_seq;
-    static uint32_t last_published_seq;
-    static bool have_published;
-
-    mag_reading_t r;
-    if (!mag_read_latest(&r)) {
-        return;
-    }
-    if (r.stale) {
-        g_app_mag_stale++;
-    }
-    if (have_published && r.s.seq == last_published_seq) {
-        return; /* nothing new */
-    }
-    have_published = true;
-    last_published_seq = r.s.seq;
-
-    if (!r.s.valid) {
-        g_app_mag_invalid++;
-        if (r.s.reason < 4u) {
-            g_app_mag_invalid_by_reason[r.s.reason]++;
-        }
-        have_last = false; /* gap expected across an abort; counted by counters */
-        return;
-    }
-    if (have_last && r.s.seq != last_seq + 1u) {
-        g_app_mag_gaps++;
-    }
-    have_last = true;
-    last_seq = r.s.seq;
-    g_app_mag_valid++;
-
-    int32_t xyz[3];
-    mag_field(&r, xyz); /* offset removed when calibrated (M-4b) */
-    g_app_mag_offset[0] = r.offset[0];
-    g_app_mag_offset[1] = r.offset[1];
-    g_app_mag_offset[2] = r.offset[2];
-    g_app_mag_offset_valid = r.offset_valid;
-    g_app_mag_xyz[0] = xyz[0];
-    g_app_mag_xyz[1] = xyz[1];
-    g_app_mag_xyz[2] = xyz[2];
-}
-
-int main(void) {
-#if APP_USB_STATUS
-    status_init(); /* USB CDC; priority lowered below all UART interrupts (B-20) */
-#endif
-    diag_init();
-    test_pins_init();
-
-    g_app_baud_ok = link_init();
-    (void)mag_init();
-    tick_init(); /* M-6: runs even if the magnetometer is faulted */
-
+static void __attribute__((noreturn)) run_epochs(void) {
+    epoch_pin_init();
+    uint32_t epoch = tick_count();
     for (;;) {
-        diag_loop_mark();
-
-        for (unsigned i = 0; i < LINK_COUNT; i++) {
-            link_id_t id = (link_id_t)i;
-            size_t n = link_read(id, s_buf, sizeof s_buf);
-#if APP_MODE == APP_MODE_PATTERN
-            if (n != 0u) {
-                TEST_TOGGLE(k_rx_seen_mask[i]);
-                pattern_rx(i, s_buf, n);
-            }
-            pattern_tx(i);
-#else
-            if (n != 0u) {
-                TEST_TOGGLE(k_rx_seen_mask[i]);
-                TEST_TOGGLE(k_tx_write_mask[i]);
-                (void)link_write(id, s_buf, n); /* reject is counted */
-            }
+        /* Wait for the next 1 ms tick. Interrupts stay enabled: UART DMA,
+         * the magnetometer and the tick keep running (EX-2). */
+        uint32_t now;
+        while ((now = tick_count()) == epoch) {
+#if APP_USB_STATUS
+            status_poll(); /* diagnostic builds only; not part of the epoch */
 #endif
+            /* __wfi(); */ /* optional: sleep until the next interrupt */
+        }
+        epoch = now;
+
+        /* Start latency: time since the tick that began this epoch. */
+        uint32_t late_us = (uint32_t)(time_us_64() - tick_time_us(now - 1u));
+        if (late_us > g_epoch_start_max_us) {
+            g_epoch_start_max_us = late_us;
         }
 
-        mag_consume();
+        EPOCH_PIN_HIGH();
+        PROF_BEGIN(PROF_EPOCH);
+        app_poll();
+        PROF_END(PROF_EPOCH);
+        EPOCH_PIN_LOW();
 
+        /* EX-8: the work must end before the next tick. */
+        if (tick_count() != epoch) {
+            diag_inc(DIAG_EPOCH_OVERRUN);
+        }
+    }
+}
+
+#else /* test applications */
+
+static void __attribute__((noreturn)) run_free(void) {
+    for (;;) {
+        diag_loop_mark(); /* D-4: one pass of the test application */
+        app_poll();
 #if APP_USB_STATUS
         uint32_t ts = diag_excluded_begin(); /* D-4: not part of EX-8 */
         status_poll();
         diag_excluded_end(ts);
 #endif
     }
+}
+
+#endif
+
+int main(void) {
+#if APP_USB_STATUS
+    status_init(); /* USB CDC; priority lowered below all UART interrupts (B-20) */
+#endif
+    diag_init();
+
+    g_app_baud_ok = link_init();
+    (void)mag_init();
+    app_init();
+    tick_init(); /* M-6: runs even if the magnetometer is faulted */
+
+#if APP_MODE == APP_MODE_USER
+    run_epochs();
+#else
+    run_free();
+#endif
 }

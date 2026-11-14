@@ -37,8 +37,10 @@ pico_sdk_init()
 
 option(APP_USB_STATUS "Report status over USB CDC (diagnostic builds only)" OFF)
 option(APP_TEST_PINS "Drive the logic-analyzer test GPIOs (HW-9)" OFF)
-set(APP_MODE "echo" CACHE STRING "Reference application mode: echo or pattern")
-set_property(CACHE APP_MODE PROPERTY STRINGS echo pattern)
+# Rev 2.14: user = the production application (app_user.c, 1 ms epochs);
+# echo / pattern = the test application (app_test.c).
+set(APP_MODE "user" CACHE STRING "Application: user, echo or pattern")
+set_property(CACHE APP_MODE PROPERTY STRINGS user echo pattern)
 
 set(APP_SOURCES
     src/main.c
@@ -46,8 +48,14 @@ set(APP_SOURCES
     src/mag.c
     src/tick.c
     src/diag.c
+    src/prof.c
     src/status.c
 )
+if(APP_MODE STREQUAL "user")
+    list(APPEND APP_SOURCES src/app_user.c)
+else()
+    list(APPEND APP_SOURCES src/app_test.c)
+endif()
 
 add_executable(firmware ${APP_SOURCES})
 
@@ -70,8 +78,10 @@ if(APP_MODE STREQUAL "pattern")
     target_compile_definitions(firmware PRIVATE APP_MODE=1)
 elseif(APP_MODE STREQUAL "echo")
     target_compile_definitions(firmware PRIVATE APP_MODE=0)
+elseif(APP_MODE STREQUAL "user")
+    target_compile_definitions(firmware PRIVATE APP_MODE=2)
 else()
-    message(FATAL_ERROR "APP_MODE must be 'echo' or 'pattern'")
+    message(FATAL_ERROR "APP_MODE must be 'user', 'echo' or 'pattern'")
 endif()
 
 if(APP_TEST_PINS)

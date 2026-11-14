@@ -10,6 +10,14 @@ Each second the firmware emits seven lines:
     CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
 
+User application builds (diag-user) add:
+
+    EPOCH last_us=.. max_us=.. avg_us=.. overrun=.. start_max_us=.. count=..
+    PROF mag=last/max/avg link0=last/max/avg link1=last/max/avg   (us)
+
+Test application builds (diag, diag-pattern) also show pattern_err on L0/L1
+and valid/invalid/gaps/stale on MAG.
+
 Counters are cumulative since boot. Run standalone to print them:
 
     py tools/fwstatus.py COM7
@@ -27,7 +35,7 @@ import serial  # pyserial
 
 def parse_line(line: str) -> tuple[str, dict[str, int]] | None:
     parts = line.strip().split()
-    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "TIM_NS"):
+    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "TIM_NS", "EPOCH", "PROF"):
         return None
     values: dict[str, int] = {}
     for p in parts[1:]:
@@ -36,7 +44,10 @@ def parse_line(line: str) -> tuple[str, dict[str, int]] | None:
             try:
                 values[k] = int(v)
             except ValueError:
-                pass
+                # PROF entries are last/max/avg
+                bits = v.split("/")
+                if len(bits) == 3 and all(b.isdigit() for b in bits):
+                    values[k + "_last"], values[k + "_max"], values[k + "_avg"] = (int(b) for b in bits)
     return parts[0], values
 
 
@@ -101,7 +112,7 @@ def delta(after: dict[str, dict[str, int]], before: dict[str, dict[str, int]], g
 
 def format_report(s: dict[str, dict[str, int]]) -> str:
     out = []
-    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "TIM_NS"):
+    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "TIM_NS", "EPOCH", "PROF"):
         if g in s:
             out.append(g + " " + " ".join(f"{k}={v}" for k, v in s[g].items()))
     return "\n".join(out)

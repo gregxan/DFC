@@ -152,8 +152,8 @@ magnetometer samples (expect ~1000/s) and checks the fault flag.
 
 ## V-2 / V-3 Latency
 
-Use the `diag` build (echo mode, test pins on). A `release` build needs
-`-DAPP_TEST_PINS=ON` for these measurements.
+Use the `diag` build (echo test application, test pins on), or
+`release-echo` for release-optimised figures.
 
 1. Capture RX, TX, RX_SEEN and TX_WRITE of one UART. Make the capture long
    enough for ≥ 100,000 bytes (~3–4 min at Windows sleep granularity).
@@ -205,13 +205,15 @@ in `g_diag_max_cycles[]`:
 | `DIAG_T_ISR_TICK` | 1 kHz tick ISR | 5 µs |
 | `DIAG_T_CRITICAL` | longest critical section | 2 µs (EX-3) |
 | `DIAG_T_API_READ`, `_WRITE`, `_MAG` | API call minus payload copy | 2 µs (EX-7) |
-| `DIAG_T_LOOP` | main-loop iteration, status reporter excluded | 100 µs (EX-8) |
+| `DIAG_T_LOOP` | test applications: main-loop pass, status reporter excluded | < 1 ms (EX-8) |
 | `DIAG_T_STATUS` | status reporter (diag builds only) | information only |
 
 The `diag` builds print these in nanoseconds on the `TIM_NS` status line.
 The `STAT` line also shows `loop_max_us` (EX-8 evidence, reporter
 excluded), `status_max_us` and `tick_overrun`, which must be 0.
-The `release` build has no USB, so read them over SWD if you also want the production figures. In the VS Code debug
+The epoch work time of the user application (EX-8) is covered separately
+below ("Epoch timing"). The `release` and `release-echo` builds have no USB,
+so read them over SWD if you also want the production figures. In the VS Code debug
 session, add `g_diag_max_cycles` to *Watch*. With OpenOCD alone:
 
 ```bash
@@ -387,3 +389,24 @@ after I2C aborts.
      `0x01`;
    - the `MAG` line must show `timeout` not climbing once the bus is
      healthy. A climbing count would mean a starved command channel.
+
+## Epoch timing (EX-8, EX-10, D-4, D-6; Rev 2.14)
+
+Use the **diag-user** build: your application, with USB status and the epoch
+pin. It works with or without UART traffic. For the full-load figure, feed
+both UARTs, e.g. with `soak_test.py --mode echo`; the user application
+forwards each UART to the other, so cross-connect the host adapters or run
+the soak on one port.
+
+1. Watch the `EPOCH` line (`fwstatus.py`):
+   - `count` rises by ~1000 per second;
+   - `overrun` = **0**;
+   - `max_us` < **1000** (EX-8). Expected: tens of µs with the stub handlers;
+   - `start_max_us` small. Expected a few µs, up to ~20 µs if UART
+     interrupts coincide with a tick.
+2. Watch the `PROF` line: each handler's `last/max/avg` in µs. Their sum
+   should be close to the `EPOCH` figures.
+3. **Optional, logic analyzer.** Capture D8 for at least 10 s. Check:
+   - the pulse period is 1000 µs (± tick jitter);
+   - the pulse width matches `EPOCH` `last_us`;
+   - the longest pulse is < 1000 µs.

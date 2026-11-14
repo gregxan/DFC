@@ -24,6 +24,31 @@
 The firmware is linked as `copy_to_ram`, so all code, every ISR included,
 executes from SRAM (B-18, EX-6). Core 1 is never started (HW-8).
 
+### Application structure (EX-1, EX-10; Rev 2.14)
+
+- `main.c` initialises the drivers, calls `app_init()`, starts the tick and
+  runs the main loop.
+- The application supplies `app_init()` and `app_poll()` (`src/app.h`). CMake
+  `APP_MODE` selects which application is built:
+  - **user** (`app_user.c`, the production build): the loop waits for each
+    1 ms tick (`tick_count()`), with interrupts enabled and an optional
+    `__wfi()`, then runs `app_poll()` once. DMA and the interrupt handlers
+    keep collecting data while it waits, so each epoch sees all data that
+    arrived up to its tick.
+    - **Timing:** `main.c` measures each epoch's work (`PROF_EPOCH`:
+      last/max/avg) and its start latency after the tick
+      (`g_epoch_start_max_us`). It counts epochs whose work runs past the
+      next tick (`DIAG_EPOCH_OVERRUN`).
+    - **Epoch start:** the tick handler runs first (~3 µs), then the loop
+      sees the new count, so an epoch starts ~3 µs after its tick.
+  - **echo / pattern** (`app_test.c`): `app_poll()` runs on every pass, as
+    fast as possible (`DIAG_T_LOOP`). The latency tests rely on this.
+- **Section profiling** (`prof.h`): `PROF_BEGIN`/`PROF_END` record
+  last/max/sum/count in cycles, at ~10 cycles per pair. They're reported on
+  the `EPOCH` and `PROF` status lines in `diag-user`.
+- **Memory:** all application buffers are static. Nothing is allocated at
+  run time (the allocator isn't even linked).
+
 ## 2. Interrupts (EX-4, EX-5)
 
 | IRQ | Priority | Handler | Work |
@@ -420,7 +445,9 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 |---|---|
 | HW-1, B-11 | `CMakePresets.json`, `CMakeLists.txt` (`PICO_BOARD`, `PICO_PLATFORM`) |
 | HW-2, HW-3, HW-6, HW-6a | `config.h` pins (and its pin-selection notes); `link_setup()`: `uart_set_hw_flow(false)`, `gpio_pull_up(rx)` |
-| HW-9 | `config.h` `TEST_PIN_*`, CMake option `APP_TEST_PINS` (on in the diag presets) |
+| HW-9 | `config.h` `TEST_PIN_*`, CMake option `APP_TEST_PINS` (on in the diag presets); epoch pin in `main.c` |
+| EX-1, EX-10 | `app.h`, `main.c` (`run_epochs()`, `run_free()`), `app_user.c`, `app_test.c`, `tick_count()` |
+| EX-8, D-4, D-6 | `prof.[ch]`, `PROF_EPOCH`, `g_epoch_start_max_us`, `DIAG_EPOCH_OVERRUN`, `DIAG_T_LOOP` |
 | B-11a | `CMakeLists.txt` `PICO_FLASH_SIZE_BYTES` |
 | HW-4, HW-5 | `config.h`; `mag_init()` pins, pull-ups, address 0x30 |
 | HW-7, HW-8 | C + Pico SDK; core 1 never launched |

@@ -1,7 +1,7 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.12
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.14
 ([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
@@ -14,7 +14,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 
 | Document | Contents |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.12), the baseline for this firmware |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.14), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7, including a board-only loopback self-test |
 
@@ -30,7 +30,11 @@ src/mag.[ch]            MMC5983MA: DMA transactions, double buffer, aborts
 src/tick.[ch]           1 kHz hardware-timer tick
 src/diag.[ch]           counters, high-water marks, timing instrumentation
 src/status.[ch]         optional USB CDC status lines (diag builds only)
-src/main.c              reference main loop (echo or pattern mode)
+src/main.c              init and the main loop (1 ms epochs for the user app)
+src/app.h               application interface: app_init(), app_poll()
+src/app_user.c          YOUR APPLICATION (production): 1 ms epoch handlers
+src/app_test.c          test application: echo or counting pattern
+src/prof.[ch]           section profiling (PROF_BEGIN / PROF_END)
 src/i2c_bus_clear.pio   PIO program: 9 SCL clocks after a bus fault (M-18)
 tools/*.py              Windows test scripts (V-1 … V-4)
 .vscode/                launch.json (SWD debug), tasks.json, settings
@@ -184,10 +188,12 @@ presets are:
 
 | Preset | Purpose |
 |---|---|
-| `release` | Production build: `-O3 -g`, no USB |
-| `diag` | Release plus USB CDC status lines, echo mode (V-1, V-2, V-3, V-5, V-6) |
-| `diag-pattern` | Release plus USB status, TX counting-pattern mode (V-1, V-4) |
-| `debug` | `CMAKE_BUILD_TYPE=Debug`, only for stepping. Don't use it for timing. |
+| `release` | **Production:** your application (`app_user.c`), `-O3 -g`, no USB |
+| `release-echo` | Release-optimised echo test application with test pins (timing read over SWD) |
+| `diag` | USB status lines, echo test application (V-1, V-2, V-3, V-5, V-6) |
+| `diag-pattern` | USB status, counting-pattern test application (V-1, V-4, loopback self-test) |
+| `diag-user` | USB status, **your application**: epoch timing and section profiles on the status lines, D8 high during each epoch |
+| `debug` | `CMAKE_BUILD_TYPE=Debug`, your application, only for stepping. Don't use it for timing. |
 
 ## Manual setup (tools installed individually)
 
@@ -258,26 +264,53 @@ UART-related interrupt (B-20). Read it with:
 py tools\fwstatus.py COM7
 ```
 
-## Using the API from your own main loop
+## Writing your application
+
+Your code goes in **`src/app_user.c`**. `main.c` initialises everything and
+then calls your `app_poll()` once per **1 ms epoch**, just after each tick
+(EX-10). While the loop waits for the tick, interrupts stay enabled: UART
+bytes keep arriving by DMA and magnetometer samples keep being published.
+At each epoch start, the previous epoch's data is ready.
+
+The file already contains three stub handlers, each profiled:
+- `mag_handler()`: reads the newest magnetometer sample;
+- `link0_handler()`: forwards UART0 data to UART1;
+- `link1_handler()`: forwards UART1 data to UART0.
+
+Replace the `TODO`s with your own processing. The API calls you'll use:
 
 ```c
-#include "link.h"
-#include "mag.h"
-#include "diag.h"
-
-uint8_t buf[256];
-size_t n = link_read(LINK_0, buf, sizeof buf);    // never blocks, may return 0
-if (!link_write(LINK_1, buf, n)) { /* rejected in full, counted */ }
+size_t avail = link_rx_available(LINK_0);       // bytes waiting
+size_t n = link_read(LINK_0, buf, sizeof buf);  // never blocks, may return 0
+link_write(LINK_1, buf, n);                     // queued in full or rejected (counted)
+size_t room = link_tx_free(LINK_1);             // TX queue space
 
 mag_reading_t r;
 if (mag_read_latest(&r) && r.s.valid && !r.stale) {
     int32_t xyz[3];
-    mag_field(&r, xyz);      // signed counts (16384/G), calibrated offset removed
+    mag_field(&r, xyz);     // signed counts (16384/G), calibrated offset removed
 }
 
-uint32_t ovf = diag_take(DIAG_L0_RX_OVERFLOW);      // atomic read-and-clear
-diag_loop_mark();                                    // once per iteration (D-4)
+uint32_t ovf = diag_take(DIAG_L0_RX_OVERFLOW);  // atomic read-and-clear
 ```
+
+**Timing.** The whole `app_poll()` must finish in under 1 ms (EX-8).
+- `main.c` measures every epoch. Build **diag-user** to see it on the
+  `EPOCH` status line: `last_us`, `max_us`, `avg_us`, `overrun` (must stay
+  0) and `start_max_us` (epoch start after its tick).
+- The `PROF` line gives each handler's last/max/avg time in µs.
+- To time your own sections, add an id to `src/prof.h` and its name to
+  `src/prof.c`, then wrap the code:
+  ```c
+  PROF_BEGIN(PROF_MY_SECTION);
+  my_code();
+  PROF_END(PROF_MY_SECTION);
+  ```
+- With a logic analyzer, D8 is high while each epoch's `app_poll()` runs
+  (diag-user).
+
+**Power.** The wait loop in `main.c` has `__wfi();` commented out.
+Uncommenting it sleeps the core between interrupts; nothing is missed.
 
 The compile-time parameters (ring sizes, SET/RESET defaults, bus clear,
 test pins) are in `src/config.h`. You can change the SET/RESET strategy at

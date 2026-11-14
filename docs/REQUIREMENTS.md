@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.13**. The changes since Revision 2 are listed in sections 11 to 23.
+**Revision 2.14**. The changes since Revision 2 are listed in sections 11 to 24.
 
 ## 1. Scope
 
@@ -28,18 +28,21 @@ Firmware for a Seeed XIAO RP2350 that:
 - **HW-6a** The internal pull-up shall be enabled on each UART RX pin (GPIO1, GPIO21) so a disconnected line idles high.
 - **HW-7** Firmware shall be written in C using the Pico SDK on the Arm Cortex-M33 cores.
 - **HW-8** All firmware shall run on core 0. Core 1 shall remain idle.
-- **HW-9** The logic-analyzer test pins (V-2, V-3) shall be on D8, D9 and D10 (GPIO2, 4, 3) and D3 (GPIO5), leaving the board's only analog inputs (D0–D2) free. They shall be driven only in builds that enable them: the diagnostic presets. Production builds leave them untouched. Pins used by the board itself (GPIO19, 22, 23, 25, 29) shall not be assigned. *(Added in Rev 2.13.)*
+- **HW-9** The logic-analyzer test pins (V-2, V-3) shall be on D8, D9 and D10 (GPIO2, 4, 3) and D3 (GPIO5), leaving the board's only analog inputs (D0–D2) free. They shall be driven only in builds that enable them: the diagnostic presets. Production builds leave them untouched. In the user application, D8 instead marks each epoch's work (high while `app_poll()` runs). *(Amended in Rev 2.14.)* Pins used by the board itself (GPIO19, 22, 23, 25, 29) shall not be assigned. *(Added in Rev 2.13.)*
 
 ## 3. Execution Model
 
-- **EX-1** The application shall be a single bare-metal main loop. It is the only consumer of the RX queues and magnetometer data, and the only producer for the TX queues.
-- **EX-2** No function called from the main loop shall block, busy-wait, or poll for completion of any UART, I2C, or DMA operation.
+- **EX-1** The application shall be a single bare-metal main loop. It is the only consumer of the RX queues and magnetometer data, and the only producer for the TX queues. The application code is supplied as `app_init()` / `app_poll()` (`src/app.h`), called from that loop. *(Clarified in Rev 2.14.)*
+- **EX-2** No function called from the main loop shall block, busy-wait, or poll for completion of any UART, I2C, or DMA operation. The main loop may wait for the next epoch tick (EX-10), provided interrupts stay enabled: DMA and the interrupt handlers keep receiving and publishing data while it waits. *(Clarified in Rev 2.14.)*
 - **EX-3** Critical sections (interrupts disabled) are allowed only around fixed-size copies, pointer/index updates, or counter read-and-clear, each lasting at most 2 µs.
 - **EX-4** All interrupt handlers shall have a bounded execution time of at most 5 µs.
 - **EX-5** Interrupt priority shall be: UART-related handlers highest (TX DMA completion, UART error), then magnetometer transaction completion (I2C STOP detect, M-12) and I2C abort (equal priority), then the magnetometer timer. *(Amended in Rev 2.1.)*
 - **EX-6** Interrupt handlers and queue access functions shall execute from RAM, not flash (satisfied by B-18).
 - **EX-7** Each RX read, TX write, and read-latest call shall take at most 2 µs plus payload copy time.
-- **EX-8** The maximum main-loop iteration time (D-4) shall be at most 100 µs. This gives a worst-case in-application RX latency of about 120 µs.
+- **EX-8** The main loop shall keep real-time performance: its worst-case execution shall be less than 1 ms (D-4). *(Replaced in Rev 2.14.)*
+  - **User application:** the work of one epoch, from the epoch start until `app_poll()` returns, shall be < 1 ms, so the next epoch never starts late. Epochs that do run late are counted (D-1).
+  - **Test applications:** one main-loop pass shall be < 1 ms.
+- **EX-10** The user application shall run on 1 ms epochs aligned to the tick grid (M-6). After each tick, the main loop calls `app_poll()` once. It consumes the data that arrived during the previous epoch: UART bytes received up to the tick (made available by DMA within U-16), and the newest magnetometer sample, published during the previous epoch (M-8). The test applications (`echo`, `pattern`) run `app_poll()` on every main-loop pass instead, so the latency tests (V-2, V-3) can measure how quickly a byte is noticed. *(Added in Rev 2.14.)*
 - **EX-9** The CPU shall not read or write a peripheral FIFO that a DMA channel is paced against, unless that channel's DREQ credit counter is resynchronised (DBG_CTDREQ) before its next transfer. The RP2350 datasheet (§12.6.4.2) warns that such access "causes the channel and peripheral to become desynchronised, and can cause corruption or loss of data". *(Added in Rev 2.12.)*
 
 ## 4. UART Requirements
@@ -80,7 +83,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 4.5 Latency
 
-- **U-16** RX latency: with a reference main loop that only polls RX, the time from the end of the stop bit to the byte being visible to the main loop shall be at most 3 µs median and at most 20 µs maximum, with all subsystems active.
+- **U-16** RX latency: with a reference main loop that only polls RX, the time from the end of the stop bit to the byte being visible to the main loop shall be at most 3 µs median and at most 20 µs maximum, with all subsystems active. "Visible" means available to the next `link_read()`. When the application consumes it is the application's choice: in the user application, at the next epoch (EX-10). *(Clarified in Rev 2.14.)*
 - **U-17** TX latency: with TX idle and a write of at most 64 bytes, the time from the write call to the start bit on the TX line shall be at most 3 µs median and at most 20 µs maximum.
 - **U-18** TX gaps: while the TX queue holds data, the gap between a stop bit and the next start bit shall be at most 1 bit time (1.1 µs). The single exception is the boundary where one TX DMA transfer ends and the completion handler starts the next; there the gap shall be at most 25 µs (about 2.3 byte times).
 
@@ -168,11 +171,16 @@ Firmware for a Seeed XIAO RP2350 that:
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
   - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9)*
-  - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*
+  - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*, epoch overruns (EX-8) *(added in Rev 2.14)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). *(Rev 2.10 note on direct FIFO writes withdrawn with U-10a in Rev 2.12.)*
 - **D-3a** Firmware shall count TX DMA completion interrupts per UART, for verification of U-13. This count is cumulative and is not cleared. *(Added in Rev 2.10.)*
-- **D-4** Firmware shall record the maximum main-loop iteration time in microseconds. In diagnostic builds the status reporter's time is excluded from that figure, since production builds have no reporter, and is recorded as a separate maximum. *(Amended in Rev 2.11.)*
+- **D-4** Firmware shall record the main loop's execution time in microseconds. *(Amended in Rev 2.11, Rev 2.14.)*
+  - **User application:** the epoch work time (last, maximum and average) and the worst epoch start latency after its tick.
+  - **Test applications:** the maximum main-loop pass time.
+
+  In diagnostic builds the status reporter's time is excluded, since production builds have no reporter, and is recorded as a separate maximum.
+- **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
 - **D-5** No flag or counter shall trigger an automatic recovery action. All of the following are normal operation, not recovery:
   - aborting a failed or timed-out magnetometer transaction and resuming the schedule (M-15, M-16);
   - the I2C bus clear at startup and on completing an arbitration-loss or timeout abort (M-2, M-15, M-18);
@@ -246,7 +254,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **V-2** RX latency shall be measured with a logic analyzer: last stop bit on the RX line to a GPIO toggled when the main loop sees the byte. At least 100,000 measurements shall meet U-16.
 - **V-3** TX latency shall be measured from a GPIO toggled at the write call to the start bit on the TX line. At least 100,000 measurements shall meet U-17.
 - **V-4** Under continuous queueing for the full 10 minutes of V-1, captured at 20 MS/s or faster, the TX line shall show no gap longer than 25 µs. The number of gaps longer than 1 bit time shall be reported and shall be consistent with the number of TX DMA transfer boundaries (U-18).
-- **V-5** Maximum interrupt handler duration and critical-section duration shall be measured and shown to meet EX-3 and EX-4. API call time and main-loop iteration time shall be shown to meet EX-7 and EX-8. The loop-time figure from a diagnostic build (D-4, reporter excluded) is acceptable evidence for EX-8. *(Amended in Rev 2.11.)*
+- **V-5** Maximum interrupt handler duration and critical-section duration shall be measured and shown to meet EX-3 and EX-4. API call time and main-loop execution time shall be shown to meet EX-7 and EX-8. The figures from a diagnostic build (D-4, reporter excluded) are acceptable evidence for EX-8: the epoch work time from `diag-user`, and the loop pass time from `diag` / `diag-pattern`. *(Amended in Rev 2.11, Rev 2.14.)*
 - **V-5a** The magnetometer timestamp (M-10) shall be compared, on a logic analyzer, with the ACK of the trigger byte on SDA/SCL. The measured lag shall be reported. Expected: about 3 µs typical, and under 20 µs maximum with all subsystems active. *(Added in Rev 2.6.)*
 - **V-6** Fault injection:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
@@ -410,3 +418,18 @@ These changes follow a check against the Seeed XIAO RP2350 product page.
 - **Added HW-9.** The test pins move from D0–D2, the board's only analog inputs, to the SPI0 pads, and are enabled only in diagnostic builds.
 - **Added B-11a.** Flash size is set to the board's actual 2 MB.
 - **Pin-selection guidance** in `src/config.h`: XIAO pad-to-GPIO map, board-reserved pins, and the alternative pads for each UART and I2C from the RP2350 datasheet GPIO function table.
+
+## 24. Revision 2.14 Changes
+
+- **Application structure.** The application code is now separate from initialisation and the main loop:
+  - `src/app_user.c` is the production application;
+  - `src/app_test.c` holds the echo and pattern test applications;
+  - the CMake option `APP_MODE` selects which is built.
+- **Added EX-10.** The user application runs on 1 ms epochs aligned to the tick, consuming the data of the previous epoch.
+- **Clarified EX-1, EX-2 and U-16.** Waiting for the epoch tick is allowed with interrupts enabled. "Visible" means available to read.
+- **Replaced EX-8.** Real-time performance is defined as worst-case main-loop execution < 1 ms (epoch work for the user application).
+- **Amended D-1.** Added the epoch-overrun counter.
+- **Amended D-4.** Epoch work time (last, max, average) and start latency.
+- **Added D-6.** Section profiling.
+- **Amended HW-9.** D8 marks epoch work in the user application.
+- **Amended V-5.** Evidence sources.
