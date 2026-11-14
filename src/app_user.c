@@ -34,6 +34,7 @@ void app_init(void) {}
  * handler in this file, not exported. */
 static mag_reading_t s_mag;  /* latest reading this epoch (may be invalid or stale) */
 static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G, offset removed */
+static int16_t s_mag_xyz16[3]; /* same, 16-bit scale (4096/G), for compact messages */
 static bool s_mag_new;       /* true if this epoch brought a new valid sample */
 
 /* ---- Magnetometer: most recent sample ------------------------------- */
@@ -52,8 +53,9 @@ static void mag_handler(void) {
         have_last = true;
         last_seq = s_mag.s.seq;
         mag_field(&s_mag, s_mag_xyz);
+        mag_field16(&s_mag, s_mag_xyz16);
         s_mag_new = true;
-        /* TODO: use s_mag_xyz[], s_mag.s.timestamp_us */
+        /* TODO: use s_mag_xyz[] / s_mag_xyz16[], s_mag.s.timestamp_us */
     }
 }
 
@@ -81,7 +83,8 @@ static void link0_handler(void) {
     /* TODO: once per epoch, send the magnetometer values if this epoch
      * brought a new sample (s_mag / s_mag_xyz are filled by mag_handler()):
      *   if (s_mag_new) {
-     *       encode s_mag_xyz[] and s_mag.s.timestamp_us into a message;
+     *       encode s_mag_xyz16[] (or s_mag_xyz[]) and s_mag.s.timestamp_us
+     *       into a message;
      *       link_write(<link>, msg, len);
      *   } */
 }

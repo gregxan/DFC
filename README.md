@@ -289,6 +289,8 @@ mag_reading_t r;
 if (mag_read_latest(&r) && r.s.valid && !r.stale) {
     int32_t xyz[3];
     mag_field(&r, xyz);     // signed counts (16384/G), calibrated offset removed
+    int16_t xyz16[3];
+    mag_field16(&r, xyz16); // same at 16-bit scale (4096/G), for compact messages
 }
 
 uint32_t ovf = diag_take(DIAG_L0_RX_OVERFLOW);  // atomic read-and-clear

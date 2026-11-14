@@ -95,6 +95,25 @@ static inline void mag_field(const mag_reading_t *r, int32_t xyz[3]) {
     }
 }
 
+/* Field at 16-bit scale: 4096 counts/G, so +/-8 G spans the int16 range.
+ * Calibrated offset removed, rounded to nearest (halves away from zero) and
+ * clamped to [-32768, 32767]. At BW = 11 the sensor noise (1.2 mG RMS, ~5
+ * counts here) is well above the 0.25 mG step, so nothing useful is lost;
+ * it halves the size of X/Y/Z in a message (6 bytes instead of 12). */
+static inline void mag_field16(const mag_reading_t *r, int16_t xyz[3]) {
+    int32_t v[3];
+    mag_field(r, v);
+    for (int i = 0; i < 3; i++) {
+        int32_t q = v[i] >= 0 ? (v[i] + 2) / 4 : -((-v[i] + 2) / 4);
+        if (q > INT16_MAX) {
+            q = INT16_MAX;
+        } else if (q < INT16_MIN) {
+            q = INT16_MIN;
+        }
+        xyz[i] = (int16_t)q;
+    }
+}
+
 /* Called from the 1 ms tick ISR only. */
 void mag_tick_isr(uint32_t tick_index);
 
