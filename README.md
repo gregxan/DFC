@@ -80,14 +80,65 @@ have their internal pull-ups enabled.
    ```bash
    git submodule update --init --recursive
    ```
-3. In VS Code, install the **Raspberry Pi Pico** extension
-   (`raspberry-pi.raspberry-pi-pico`). Use it to install SDK **2.2.0**. It
-   installs the matched toolchain (14.2.Rel1), CMake, Ninja, picotool,
-   pioasm and OpenOCD under `%USERPROFILE%\.pico-sdk`.
-   `cmake/host_tools.cmake` finds those tools there automatically. The
-   project itself still builds against the submodule SDK in `lib/pico-sdk`.
-4. Open the folder. CMake Tools picks up `CMakePresets.json`. Choose the
-   **release** configure preset and build.
+3. **Install the toolchain and tools with the Raspberry Pi Pico extension.**
+   The extension only downloads tools when it creates or imports a project,
+   so let it create a throwaway project once:
+   1. In VS Code, install the **Raspberry Pi Pico** extension
+      (`raspberry-pi.raspberry-pi-pico`) and the **CMake Tools** extension.
+   2. Open the Raspberry Pi Pico view (its icon in the left Activity Bar)
+      and choose **New C/C++ Project**.
+   3. Fill it in like this:
+      - Name: anything, e.g. `pico-tools-bootstrap`.
+      - Board: **Seeed XIAO RP2350**, or Pico 2 if it isn't listed.
+      - Location: a scratch folder such as `C:\dev\scratch` (not this
+        repo).
+      - SDK version: **2.2.0**.
+      - Under advanced options, if shown: toolchain **14.2.Rel1** and
+        picotool **2.2.0**.
+   4. Click **Create** and wait until the downloads finish. This takes a few
+      minutes the first time.
+   5. Check that `%USERPROFILE%\.pico-sdk` now contains `sdk`, `toolchain`,
+      `picotool`, `tools`, `openocd`, `cmake` and `ninja` folders.
+   6. Close and delete the throwaway project. The tools stay installed.
+   7. Put the extension's **CMake** and **Ninja** on `PATH`. The extension
+      only uses them inside its own projects. List their folders in
+      PowerShell:
+      ```bash
+      Get-ChildItem $env:USERPROFILE\.pico-sdk\cmake, $env:USERPROFILE\.pico-sdk\ninja
+      ```
+      Add `...\.pico-sdk\cmake\<version>\bin` and
+      `...\.pico-sdk\ninja\<version>` to your user `PATH`: Start → "Edit
+      environment variables for your account" → `Path` → New. Restart VS
+      Code and any terminals, then check:
+      ```bash
+      cmake --version
+      ```
+      ```bash
+      ninja --version
+      ```
+      If you already have CMake ≥ 3.21 and Ninja installed, skip this step.
+
+   This project doesn't use the SDK copy the extension downloads: it builds
+   against its own pinned submodule in `lib/pico-sdk`. It needs the
+   extension's **toolchain and host tools**, which `cmake/host_tools.cmake`
+   finds under `%USERPROFILE%\.pico-sdk` automatically.
+
+   **Don't** use the extension's *Import Project* on this repository. Import
+   rewrites `CMakeLists.txt` and `.vscode/` with the extension's own settings,
+   which would replace this project's presets, launch configuration and
+   tool discovery. If VS Code offers to import or configure the folder for
+   the Pico extension, decline.
+
+   Menu names vary slightly between extension versions. If anything differs,
+   the goal is simply to end up with the tools in
+   `%USERPROFILE%\.pico-sdk`.
+4. **Open this repository's folder** (`C:\dev\dfc`) in VS Code.
+   - CMake Tools picks up `CMakePresets.json`.
+   - In the status bar, or with *CMake: Select Configure Preset*, choose
+     **release**.
+   - Run *CMake: Build* (F7).
+
+   The output is `build\release\firmware.uf2`.
 
 ### Command line (PowerShell or cmd)
 
