@@ -108,24 +108,40 @@ One command list goes to `IC_DATA_CMD` (16-entry TX FIFO, so the whole list
 fits). The DW I2C issues RESTARTs where the `RESTART` bit is set:
 
 ```
-START 0x30W 0x00   RESTART 0x30R  b0..b6 (7 reads)   RESTART 0x30W 0x09 (ctrl0|TM_M)  STOP
+START 0x30W 0x00   RESTART 0x30R  b0..b8 (9 reads: X,Y,Z, Tout, Status)   RESTART 0x30W 0x09 TM_M  STOP
 ```
 
-That is about 121 SCL bit times, ~300 µs at 400 kHz, or ~330 µs with
+That is about 139 SCL bit times, ~350 µs at 400 kHz, or ~375 µs with
 controller overheads (M-8: ≤ 400 µs). When the SET/RESET strategy calls for
 a pulse (see below), an extra `RESTART 0x30W 0x09 SET` (or `RESET`) is
-inserted before the trigger. That adds ~70 µs, so the trigger
-write finishes ≲ 400 µs after the tick and the 0.5 ms measurement ends
-≲ 900 µs after it, before the next read (M-8: ≥ 50 µs margin).
+inserted before the trigger. That adds ~70 µs, for ~445 µs in total
+(M-8: ≤ 450 µs with a pulse). The 0.5 ms measurement then ends ≲ 950 µs
+after the tick, before the next read reaches the data registers at
+~1050 µs. The repeated STARTs follow the datasheet (p. 17; M-7).
 
 - Command DMA channel: `s_cmd` → `IC_DATA_CMD`, 32-bit, DREQ = I2C TX.
-- Data DMA channel: `IC_DATA_CMD` → `slots[!latest].raw`, 8-bit, 7
-  transfers, DREQ = I2C RX (M-11).
-- Every write to Internal Control 0 carries the persistent bits, which is
-  `Auto_SR_en` in `MAG_SR_AUTO` mode (M-5). Six command lists are prebuilt:
-  {Auto_SR_en off, on} × {no pulse, SET, RESET}.
+- Data DMA channel: `IC_DATA_CMD` → `slots[!latest].raw`, 8-bit, 9
+  transfers, DREQ = I2C RX (M-11). The 9 bytes land in `raw[7]`, `tout`
+  and `status`, which a `_Static_assert` keeps adjacent.
+- Three sample command lists are prebuilt: no pulse, SET, RESET. The
+  longest is 14 words, which fits the 16-entry FIFO. No persistent
+  Internal Control 0 bits are used (M-5).
+- **Completeness check (M-9, Rev 2.8).** When publishing, the ISR checks
+  `Meas_M_Done` (Status bit 0), which was read just before this
+  transaction's own trigger. If it is clear, the measurement was read
+  before it finished: the sample is published invalid and counted in
+  `DIAG_MAG_NOT_READY`.
 
-### SET/RESET strategy (M-4, Rev 2.4)
+### Register settings (M-3, Rev 2.8)
+
+| Register | Value | Why |
+|---|---|---|
+| Internal Control 1 (0x0A) | `SW_RST` once at startup, then BW = 11 | Known state after an MCU-only reset. BW = 11 is the only 0.5 ms option, at 1.2 mG RMS. The inhibit bits stay 0: the channels run in parallel. |
+| Internal Control 2 (0x0B) | 0x00 | Continuous mode, CM_Freq and periodic SET are off. They would run from the sensor's own oscillator and drift against the tick. |
+| Internal Control 0 (0x09) | TM_M, SET or RESET only | `Auto_SR_en` is not used: the datasheet gives 580 Hz max at BW = 11, consistent with two measurements per output (M-3a). INT, TM_T and OTP stay off. |
+| Internal Control 3 (0x0C) | 0x00 (reset default) | No self-test, I2C (not 3-wire SPI) |
+
+### SET/RESET strategy (M-4, Rev 2.4; automatic mode removed in Rev 2.8)
 
 - **At startup**, `mag_init()` writes RESET and then SET, waiting 1 ms after
   each. This happens in every mode.
@@ -137,8 +153,7 @@ write finishes ≲ 400 µs after the tick and the 0.5 ms measurement ends
 | `g_mag_sr_mode` | Behaviour |
 |---|---|
 | `0` `MAG_SR_INIT_ONLY` (default) | No pulses. Selecting it at run time runs one cycle: RESET in one transaction, SET in the next. |
-| `1` `MAG_SR_AUTO` | `Auto_SR_en` in every Internal Control 0 write |
-| `2` `MAG_SR_PULSE` | SET before the trigger every `g_mag_sr_interval` transactions (clamped 1–100, default 50). The first pulse comes immediately on entering the mode. |
+| `1` `MAG_SR_PULSE` | SET before the trigger every `g_mag_sr_interval` transactions (clamped 1–100, default 50). The first pulse comes immediately on entering the mode. |
 
 - **Pulses are always SET.** After a RESET the sensor reads with inverted
   polarity, so the sample measured after a RESET is published with
@@ -277,8 +292,11 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
    `STOP_DET` and `TX_ABRT` share `I2C1_IRQ` at the EX-5 magnetometer
    priority. The DMA completion interrupts of the two magnetometer channels
    are not used.
-2. **One STOP per transaction.** The read and the trigger write are joined
-   by a repeated START, not STOP + START. This is standard I2C and saves a
+2. **One STOP per transaction: resolved, written into the spec as Rev 2.8
+   (M-7).** This is supported by the datasheet (p. 17): a transfer "is
+   terminated by a STOP condition or another START condition", and its
+   example chains read → START → write. The read and the trigger write are
+   joined by a repeated START, not STOP + START. This is standard I2C and saves a
    few bit times. Confirm it on the bench with the MMC5983MA.
 3. **Timeout aborts are counted only as timeouts. Resolved, written into
    the spec as Rev 2.3 (M-15; see [REQUIREMENTS.md](REQUIREMENTS.md) §13).**
@@ -314,8 +332,9 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 9. **SET/RESET strategy: resolved, written into the spec as Rev 2.4**
    (M-4 replaced; M-8, M-9 and V-6 amended; see
    [REQUIREMENTS.md](REQUIREMENTS.md) §14). The strategy is selectable at
-   run time (§4). The default is a single cycle at startup. `MAG_SR_AUTO`
-   remains unverified with triggered measurements; see VERIFICATION.md.
+   run time (§4). The default is a single cycle at startup. The automatic
+   mode (`Auto_SR_en`) was removed in Rev 2.8 (M-3a). See "Register
+   settings" in §4.
 10. **Diagnostic builds.** In `diag` builds, `stdio_usb` runs `tud_task()`
     inline when a status line is written. The loop time reported there
     therefore includes USB work. EX-8 is shown on the `release` build by
@@ -343,7 +362,8 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
-| M-1 … M-5 | `mag_init()`, `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
+| M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
+| M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
 | M-6, M-6a | `tick.c` |
 | M-7, M-8 | `mag_start()`, `build_cmds()` |
 | M-9 … M-14 | `publish()`, `mag_read_latest()` |

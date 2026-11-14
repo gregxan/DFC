@@ -17,8 +17,8 @@
 
 #include "config.h"
 
-/* M-4 (Rev 2.4): SET/RESET strategy, one of MAG_SR_INIT_ONLY, MAG_SR_AUTO,
- * MAG_SR_PULSE (config.h). Read at the start of every transaction, so a
+/* M-4 (Rev 2.8): SET/RESET strategy, MAG_SR_INIT_ONLY (0) or MAG_SR_PULSE
+ * (1), see config.h. Read at the start of every transaction, so a
  * change (e.g. written from the debugger) takes effect within 1 ms. Invalid
  * values are ignored and the previous mode stays in use. */
 extern volatile uint32_t g_mag_sr_mode;
@@ -27,10 +27,14 @@ extern volatile uint32_t g_mag_sr_mode;
  * 1..MAG_SR_INTERVAL_MAX are clamped when used. */
 extern volatile uint32_t g_mag_sr_interval;
 
-/* M-10 */
+/* M-10. raw, tout and status are filled by one 9-byte DMA read of
+ * registers 0x00..0x08 and must stay adjacent (checked in mag.c). */
 typedef struct {
     uint8_t raw[MMC_SAMPLE_BYTES];
-    bool valid;            /* false after start/abort (M-9) or after a RESET pulse */
+    uint8_t tout;          /* register 0x07; not updated (TM_T unused)         */
+    uint8_t status;        /* register 0x08 at read time (Meas_M_Done = bit 0) */
+    bool valid;            /* false after start/abort or a RESET pulse, or if
+                            * Meas_M_Done was clear (M-9)                      */
     uint32_t seq;          /* index of the tick whose transaction triggered it   */
     uint64_t timestamp_us; /* us since boot when the trigger (TM_M) write completed
                             * (Rev 2.6); for M-9 invalid samples with no prior

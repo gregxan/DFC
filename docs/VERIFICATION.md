@@ -171,28 +171,44 @@ read phase returns non-0xFF data; the sample read by the transaction after
 that one is valid. Alternatively, toggle a spare pin in `mag_consume()` when
 `r.s.valid` first becomes true again.
 
-## SET/RESET strategies (M-4, Rev 2.4)
+## SET/RESET strategies (M-4)
 
 Use the `diag` build in a debug session, with the `MAGS` status line on
 screen. Set `g_mag_sr_mode` and `g_mag_sr_interval` in *Watch*, or with
-OpenOCD `mww`.
+OpenOCD `mww`. The modes are 0 = single cycle and 1 = pulse.
 
-1. **Switching.** Watch SDA/SCL on the analyzer. Start in mode 0 (no pulse
-   writes). Switch to 2 with an interval of 10: a 4-write transaction
-   (read, SET, trigger) appears every 10 ms. Set the interval to 100: every
-   100 ms. Switch to 1: no pulse writes, and every trigger byte is `0x21`.
-   Switch back to 0: one transaction carries RESET, the next carries SET, and
-   `invalid` rises by exactly 1. Throughout, the soak test stays clean and
-   `gaps` stays 0.
-2. **Pulse transaction duration (M-8).** Measure from the tick (START) to the
-   final STOP on a SET or RESET transaction. Expected ~400 µs; the limit is
-   400 µs. If it is over, raise it so M-8 can be revisited.
-3. **Auto_SR_en effectiveness.** Do this before relying on mode 1.
-   1. Hold the sensor still and log Z for 10 s in mode 1.
-   2. Apply a strong magnet briefly. This magnetises the sensor and shifts
-      the offset.
-   3. Remove the magnet and log again.
-   4. Repeat in mode 2.
+1. **Switching.** Watch SDA/SCL on the analyzer.
+   1. Start in mode 0: no pulse writes.
+   2. Switch to mode 1 with an interval of 10: a transaction carrying a SET
+      write appears every 10 ms.
+   3. Set the interval to 100: the SET transaction appears every 100 ms.
+   4. Switch back to mode 0: one transaction carries RESET, the next carries
+      SET, and `invalid` rises by exactly 1.
 
-   Mode 1 is effective if the offset returns to its original value, as it
-   does in mode 2.
+   Throughout, the soak test stays clean, and `gaps` and `not_ready` stay 0.
+2. **Transaction duration (M-8).** Measure from the tick (START) to the
+   final STOP. Expected ~375 µs without a pulse (limit 400 µs) and ~445 µs
+   with a SET or RESET (limit 450 µs).
+
+## 1 kHz measurement completeness (M-3, M-9, Rev 2.8)
+
+The datasheet lists 580 Hz as the maximum output rate at BW = 11 outside
+continuous mode. The firmware assumes this limit doesn't apply without
+`Auto_SR_en`, i.e. that a triggered measurement takes the stated 0.5 ms.
+To check that:
+
+1. Run the V-1 soak in mode 0 and in mode 1 (interval 1, the worst case:
+   every transaction is ~445 µs).
+2. `MAGS not_ready` must stay 0 and `MAG valid` must rise by ~1000/s.
+3. On the analyzer, confirm the 9th byte of each read (Status) is `0x01`
+   (Meas_M_Done set).
+
+If `not_ready` is non-zero, the 1 kHz triggered design doesn't hold. The
+fallback is continuous mode (`CM_Freq = 111`), which needs a spec change.
+
+## Software reset at startup (M-2, Rev 2.8)
+
+Put the sensor into an unusual state in a test build: for example, write
+`CTRL2 = 0x0F` (continuous mode, 1 kHz) from a debug session, then reset
+only the MCU. After boot, the bus shows `W(0x0A, 0x80)`, a 10 ms gap,
+then the product-ID read, and sampling is normal.

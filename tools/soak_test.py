@@ -180,6 +180,7 @@ def main() -> int:
             ("L0", "framing"), ("L0", "rx_overflow"), ("L0", "tx_reject"), ("L0", "pattern_err"),
             ("L1", "framing"), ("L1", "rx_overflow"), ("L1", "tx_reject"), ("L1", "pattern_err"),
             ("MAG", "gaps"), ("MAG", "i2c_error"), ("MAG", "missed_tick"), ("MAG", "timeout"),
+            ("MAGS", "not_ready"),
         ]
         for g, k in checks:
             d = delta(after, before, g, k)

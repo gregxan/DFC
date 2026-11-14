@@ -22,8 +22,15 @@
 
 /* Internal Control 1: BW[1:0]. 0b11 = 800 Hz, 0.5 ms measurement time. */
 #define MMC_CTRL1_BW_800HZ 0x03u
+#define MMC_CTRL1_SW_RST (1u << 7) /* software reset; 10 ms power-on time */
 
-/* Bytes read per sample: Xout0, Xout1, Yout0, Yout1, Zout0, Zout1, XYZout2 */
+/* Status */
+#define MMC_STATUS_MEAS_M_DONE (1u << 0)
+
+/* Field bytes per sample: Xout0, Xout1, Yout0, Yout1, Zout0, Zout1, XYZout2 */
 #define MMC_SAMPLE_BYTES 7u
+/* Bytes read per transaction (M-7, Rev 2.8): 0x00..0x08, i.e. the field
+ * bytes, Tout (0x07, not updated: TM_T is never used) and Status (0x08). */
+#define MMC_READ_BYTES 9u
 
 #endif /* MMC5983MA_H */

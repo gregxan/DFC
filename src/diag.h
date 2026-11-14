@@ -31,6 +31,7 @@ typedef enum {
     DIAG_MAG_PRODUCT_ID_FAULT,
     DIAG_MAG_BUS_CLEAR, /* D-1 (Rev 2.2): bus clears, start-up and post-abort */
     DIAG_MAG_RECOVERED, /* D-1 (Rev 2.7): re-probes that cleared the fault flag */
+    DIAG_MAG_NOT_READY, /* D-1 (Rev 2.8): samples read with Meas_M_Done clear */
     DIAG_COUNT
 } diag_ctr_t;
 

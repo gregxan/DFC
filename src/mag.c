@@ -1,5 +1,6 @@
 #include "mag.h"
 
+#include <stddef.h>
 #include <string.h>
 
 #include "hardware/dma.h"
@@ -62,7 +63,7 @@ static uint32_t s_probe_wait;         /* ticks spent in MAG_FAULT since last pro
 static volatile bool s_config_pending;/* probe matched: configure on next tick     */
 static uint8_t s_probe_id;            /* product-ID byte received by DMA           */
 static uint32_t s_probe_cmd[2];
-static uint32_t s_cfg_cmd[2][6];      /* [Auto_SR_en off/on]                       */
+static uint32_t s_cfg_cmd[6];
 
 static volatile uint32_t s_cur_slot;
 static volatile uint32_t s_cur_tick;
@@ -79,9 +80,14 @@ static uint32_t s_cycle_step;     /* 0 none, 1 RESET pending, 2 SET pending     
 static uint32_t s_since_pulse;    /* completed transactions since the last SET  */
 static bool s_pulse_now;          /* entering MAG_SR_PULSE: pulse immediately   */
 
-/* Command lists, [Auto_SR_en off/on][PRE_*]. */
-static uint32_t s_cmd[2][PRE_COUNT][I2C_TX_FIFO_DEPTH] __attribute__((aligned(4)));
-static uint32_t s_cmd_len[2][PRE_COUNT];
+/* Sample command lists, one per PRE_*. */
+static uint32_t s_cmd[PRE_COUNT][I2C_TX_FIFO_DEPTH] __attribute__((aligned(4)));
+static uint32_t s_cmd_len[PRE_COUNT];
+
+/* The 9-byte DMA read lands in raw[], tout and status in one go. */
+_Static_assert(offsetof(mag_sample_t, tout) == offsetof(mag_sample_t, raw) + MMC_SAMPLE_BYTES &&
+                   offsetof(mag_sample_t, status) == offsetof(mag_sample_t, raw) + MMC_READ_BYTES - 1u,
+               "mag_sample_t: raw, tout, status must be contiguous");
 
 static uint s_dma_cmd;
 static uint s_dma_data;
@@ -113,19 +119,20 @@ static inline void i2c_irq_unmask(void) {
     m33_hw->nvic_iser[MAG_I2C_IRQ / 32u] = 1u << (MAG_I2C_IRQ % 32u);
 }
 
-/* persist: bits carried in every Internal Control 0 write (M-5). */
-static size_t build_cmds(uint32_t *c, uint32_t persist, unsigned pre) {
+/* M-7 (Rev 2.8). No persistent Internal Control 0 bits are used (M-5:
+ * Auto_SR_en is never set), so each write carries only its own bit. */
+static size_t build_cmds(uint32_t *c, unsigned pre) {
     size_t i = 0;
     c[i++] = MMC_REG_XOUT0; /* START + W(0x00) */
-    for (unsigned k = 0; k < MMC_SAMPLE_BYTES; k++) {
-        c[i++] = CMD_READ | (k == 0u ? CMD_RESTART : 0u); /* RESTART + R x7 */
+    for (unsigned k = 0; k < MMC_READ_BYTES; k++) {
+        c[i++] = CMD_READ | (k == 0u ? CMD_RESTART : 0u); /* RESTART + R x9 */
     }
     if (pre != PRE_NONE) {
         c[i++] = CMD_RESTART | MMC_REG_CTRL0;
-        c[i++] = persist | (pre == PRE_SET ? MMC_CTRL0_SET : MMC_CTRL0_RESET);
+        c[i++] = (pre == PRE_SET ? MMC_CTRL0_SET : MMC_CTRL0_RESET);
     }
-    c[i++] = CMD_RESTART | MMC_REG_CTRL0;               /* RESTART + W(0x09)  */
-    c[i++] = CMD_STOP | persist | MMC_CTRL0_TM_M;        /* TM_M, STOP (M-5)   */
+    c[i++] = CMD_RESTART | MMC_REG_CTRL0;    /* RESTART + W(0x09)  */
+    c[i++] = CMD_STOP | MMC_CTRL0_TM_M;       /* TM_M, STOP         */
     return i;
 }
 
@@ -140,7 +147,7 @@ static inline uint32_t sr_interval(void) {
 }
 
 /* M-4: pick the pulse for the next transaction, applying any mode change. */
-static unsigned __not_in_flash_func(sr_select)(uint32_t *persist) {
+static unsigned __not_in_flash_func(sr_select)(void) {
     uint32_t mode = g_mag_sr_mode;
     if (mode > MAG_SR_PULSE) {
         mode = s_mode_applied; /* invalid value: ignore */
@@ -158,7 +165,6 @@ static unsigned __not_in_flash_func(sr_select)(uint32_t *persist) {
         s_mode_applied = mode;
     }
 
-    *persist = (mode == MAG_SR_AUTO) ? MMC_CTRL0_AUTO_SR_EN : 0u;
     if (s_cycle_step == 1u) {
         return PRE_RESET;
     }
@@ -267,15 +273,13 @@ static void __not_in_flash_func(start_dma)(mag_txn_t txn, const uint32_t *cmd, u
 
 /* Start one sample transaction (M-7). Tick ISR only, I2C IRQ masked. */
 static void __not_in_flash_func(mag_start)(uint32_t tick) {
-    uint32_t persist;
-    unsigned pre = sr_select(&persist);
-    unsigned p = persist ? 1u : 0u;
+    unsigned pre = sr_select();
 
     uint32_t slot = (s_latest == 0u) ? 1u : 0u; /* M-11 */
     s_cur_slot = slot;
     s_cur_tick = tick;
     s_cur_pre = pre;
-    start_dma(TXN_SAMPLE, s_cmd[p][pre], s_cmd_len[p][pre], s_slots[slot].raw, MMC_SAMPLE_BYTES);
+    start_dma(TXN_SAMPLE, s_cmd[pre], s_cmd_len[pre], s_slots[slot].raw, MMC_READ_BYTES);
 }
 
 /* M-2 (Rev 2.7): read the product ID (non-blocking). */
@@ -292,7 +296,7 @@ static void __not_in_flash_func(config_start)(void) {
         mode = s_mode_applied;
     }
     s_mode_applied = mode;
-    start_dma(TXN_CONFIG, s_cfg_cmd[mode == MAG_SR_AUTO ? 1 : 0], 6u, NULL, 0u);
+    start_dma(TXN_CONFIG, s_cfg_cmd, 6u, NULL, 0u);
 }
 
 /* M-16: abort without waiting. */
@@ -307,9 +311,14 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     mag_sample_t *s = &s_slots[s_cur_slot];
     uint32_t tick = s_cur_tick;
     if (s_trig_ok) {
-        /* M-9 (Rev 2.4): a measurement triggered right after a RESET pulse
-         * has inverted polarity and is published as invalid. */
-        s->valid = !s_trig_reset;
+        /* M-9: a measurement triggered right after a RESET pulse has
+         * inverted polarity (Rev 2.4), and one whose Meas_M_Done bit is
+         * still clear was read before it finished (Rev 2.8). */
+        bool done = (s->status & MMC_STATUS_MEAS_M_DONE) != 0u;
+        if (!done) {
+            diag_inc(DIAG_MAG_NOT_READY);
+        }
+        s->valid = done && !s_trig_reset;
         s->seq = s_trig_tick;
         s->timestamp_us = s_trig_time_us; /* M-10 (Rev 2.6) */
     } else {
@@ -568,6 +577,12 @@ bool mag_init(void) {
     gpio_pull_up(MAG_SDA_PIN);
     gpio_pull_up(MAG_SCL_PIN);
 
+    /* M-2 (Rev 2.8): an MCU reset does not reset the sensor. A software
+     * reset returns every register to its default and reloads OTP. The
+     * result is ignored: an absent sensor is reported by the probe below. */
+    (void)reg_write(MMC_REG_CTRL1, MMC_CTRL1_SW_RST);
+    sleep_ms(10); /* datasheet: power-on time after SW_RST is 10 ms */
+
     /* M-2 */
     uint8_t id = 0;
     bool ok = reg_read(MMC_REG_PRODUCT_ID, &id) && id == MMC_PRODUCT_ID;
@@ -581,10 +596,9 @@ bool mag_init(void) {
     if (mode > MAG_SR_PULSE) {
         mode = MAG_SR_MODE_DEFAULT;
     }
-    uint8_t persist = (mode == MAG_SR_AUTO) ? (uint8_t)MMC_CTRL0_AUTO_SR_EN : 0u;
-    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)(persist | MMC_CTRL0_RESET));
+    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_RESET);
     sleep_ms(1);
-    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)(persist | MMC_CTRL0_SET));
+    ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_SET);
     sleep_ms(1);
     if (!ok) {
         /* M-2 (Rev 2.7): fault, but set up everything so the tick can
@@ -593,19 +607,14 @@ bool mag_init(void) {
     }
     s_probe_cmd[0] = MMC_REG_PRODUCT_ID;                 /* START + W(0x2F)  */
     s_probe_cmd[1] = CMD_RESTART | CMD_READ | CMD_STOP;  /* RESTART R x1 STOP */
-    for (unsigned a = 0; a < 2u; a++) {
-        uint32_t pers = a ? MMC_CTRL0_AUTO_SR_EN : 0u;
-        s_cfg_cmd[a][0] = MMC_REG_CTRL1;
-        s_cfg_cmd[a][1] = MMC_CTRL1_BW_800HZ;
-        s_cfg_cmd[a][2] = CMD_RESTART | MMC_REG_CTRL2;
-        s_cfg_cmd[a][3] = 0u;
-        s_cfg_cmd[a][4] = CMD_RESTART | MMC_REG_CTRL0;
-        s_cfg_cmd[a][5] = CMD_STOP | pers | MMC_CTRL0_RESET;
-    }
-    for (unsigned a = 0; a < 2u; a++) {
-        for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
-            s_cmd_len[a][pre] = (uint32_t)build_cmds(s_cmd[a][pre], a ? MMC_CTRL0_AUTO_SR_EN : 0u, pre);
-        }
+    s_cfg_cmd[0] = MMC_REG_CTRL1;
+    s_cfg_cmd[1] = MMC_CTRL1_BW_800HZ;
+    s_cfg_cmd[2] = CMD_RESTART | MMC_REG_CTRL2;
+    s_cfg_cmd[3] = 0u;
+    s_cfg_cmd[4] = CMD_RESTART | MMC_REG_CTRL0;
+    s_cfg_cmd[5] = CMD_STOP | MMC_CTRL0_RESET;
+    for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
+        s_cmd_len[pre] = (uint32_t)build_cmds(s_cmd[pre], pre);
     }
     s_mode_applied = mode;
     s_cycle_step = 0u;
@@ -627,7 +636,7 @@ bool mag_init(void) {
     channel_config_set_read_increment(&c, true);
     channel_config_set_write_increment(&c, false);
     channel_config_set_dreq(&c, i2c_get_dreq(MAG_I2C, true));
-    dma_channel_configure(s_dma_cmd, &c, &hw->data_cmd, s_cmd[0][PRE_NONE], 0, false);
+    dma_channel_configure(s_dma_cmd, &c, &hw->data_cmd, s_cmd[PRE_NONE], 0, false);
 
     /* Data channel: IC_DATA_CMD -> slot, 8-bit. */
     s_dma_data = (uint)dma_claim_unused_channel(true);

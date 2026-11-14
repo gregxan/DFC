@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.7).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.8).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -54,18 +54,18 @@
 #define MAG_STALE_US 3000u
 #endif
 
-/* M-4 (Rev 2.4): SET/RESET strategy, selectable at run time through the
+/* M-4 (Rev 2.8): SET/RESET strategy, selectable at run time through the
  * global g_mag_sr_mode (see mag.h; currently changed only from a debugger).
- *   MAG_SR_INIT_ONLY - one RESET -> SET cycle at start-up, then none. If the
- *                      mode is selected again at run time, one more cycle
- *                      runs (RESET in one transaction, SET in the next).
- *   MAG_SR_AUTO      - Auto_SR_en in every write to Internal Control 0.
- *   MAG_SR_PULSE     - a SET pulse inserted before the TM_M trigger every
- *                      g_mag_sr_interval samples (clamped to 1..100).
- * A RESET start-up cycle runs in every mode. */
+ *   MAG_SR_INIT_ONLY (0) - one RESET -> SET cycle at start-up, then none. If
+ *                          the mode is selected again at run time, one more
+ *                          cycle runs (RESET in one transaction, SET in the
+ *                          next).
+ *   MAG_SR_PULSE     (1) - a SET pulse inserted before the TM_M trigger
+ *                          every g_mag_sr_interval samples (clamped 1..100).
+ * A RESET -> SET start-up cycle runs in every mode. Auto_SR_en is never used:
+ * at BW=11 it is not expected to sustain 1 kHz (docs/DESIGN.md section 6). */
 #define MAG_SR_INIT_ONLY 0u
-#define MAG_SR_AUTO 1u
-#define MAG_SR_PULSE 2u
+#define MAG_SR_PULSE 1u
 #ifndef MAG_SR_MODE_DEFAULT
 #define MAG_SR_MODE_DEFAULT MAG_SR_INIT_ONLY
 #endif
