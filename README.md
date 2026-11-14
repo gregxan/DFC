@@ -74,7 +74,7 @@ have their internal pull-ups enabled.
    git config --global core.longpaths true
    ```
    ```bash
-   git clone --recurse-submodules <repo-url> C:\dev\dfc
+   git clone --recurse-submodules <repo-url> C:\dfc
    ```
    If you already cloned without submodules:
    ```bash
@@ -90,7 +90,7 @@ have their internal pull-ups enabled.
    3. Fill it in like this:
       - Name: anything, e.g. `pico-tools-bootstrap`.
       - Board: **Seeed XIAO RP2350**, or Pico 2 if it isn't listed.
-      - Location: a scratch folder such as `C:\dev\scratch` (not this
+      - Location: a scratch folder such as `C:\scratch` (not this
         repo).
       - SDK version: **2.2.0**.
       - Under advanced options, if shown: toolchain **14.2.Rel1** and
@@ -140,7 +140,7 @@ have their internal pull-ups enabled.
    `%USERPROFILE%\.pico-sdk`.
 4. **Open this repository's folder** in VS Code: *File → Open Folder…* and
    choose the folder that contains `CMakeLists.txt` and `CMakePresets.json`
-   (e.g. `C:\dev\dfc`).
+   (e.g. `C:\dfc`).
 5. **Trust the folder.** When VS Code asks *"Do you trust the authors of the
    files in this folder?"*, choose **Yes, I trust the authors**. In
    *Restricted Mode* (shown in the title bar) the CMake Tools and Pico

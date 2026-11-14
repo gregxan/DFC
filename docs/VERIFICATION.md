@@ -71,7 +71,7 @@ Leave the magnetometer unconnected (or connect it; see "Expected values").
    `build\diag-pattern\firmware.uf2` to the `RP2350` drive.
 3. Find the board's COM port (Device Manager → Ports), then run:
    ```bash
-   py C:\dev\dfc\tools\fwstatus.py COM7 --log loopback.log
+   py C:\dfc\tools\fwstatus.py COM7 --log loopback.log
    ```
 4. Leave it running for at least 10 minutes. Counters are cumulative since
    boot, so compare a report from the first minute with the last one.
