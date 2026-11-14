@@ -31,8 +31,10 @@ extern volatile uint32_t g_mag_sr_interval;
 typedef struct {
     uint8_t raw[MMC_SAMPLE_BYTES];
     bool valid;            /* false after start/abort (M-9) or after a RESET pulse */
-    uint32_t seq;          /* index of the tick that triggered the measurement   */
-    uint64_t timestamp_us; /* time of that tick                                  */
+    uint32_t seq;          /* index of the tick whose transaction triggered it   */
+    uint64_t timestamp_us; /* us since boot when the trigger (TM_M) write completed
+                            * (Rev 2.6); for M-9 invalid samples with no prior
+                            * trigger, the nominal previous tick time            */
 } mag_sample_t;
 
 /* Result of mag_read_latest(). */

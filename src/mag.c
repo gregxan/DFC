@@ -58,6 +58,7 @@ static volatile uint32_t s_cur_tick;
 static volatile uint32_t s_cur_pre;  /* PRE_* used by the transaction in flight */
 static volatile bool s_trig_ok;       /* previous transaction's TM_M write completed */
 static volatile uint32_t s_trig_tick; /* tick of that transaction                    */
+static uint64_t s_trig_time_us;       /* when its trigger write completed (M-10)    */
 static volatile bool s_trig_reset;    /* ...and it RESET first: polarity inverted    */
 
 /* M-4 state. Tick ISR (mode selection) and I2C ISR (publish) only; the I2C
@@ -266,7 +267,7 @@ static void __not_in_flash_func(issue_abort)(void) {
 
 /* M-12 (Rev 2.1): publish the completed slot. Called from the I2C
  * STOP-detect interrupt after both DMA channels are confirmed finished. */
-static void __not_in_flash_func(publish)(void) {
+static void __not_in_flash_func(publish)(uint64_t now_us) {
     mag_sample_t *s = &s_slots[s_cur_slot];
     uint32_t tick = s_cur_tick;
     if (s_trig_ok) {
@@ -274,18 +275,19 @@ static void __not_in_flash_func(publish)(void) {
          * has inverted polarity and is published as invalid. */
         s->valid = !s_trig_reset;
         s->seq = s_trig_tick;
-        s->timestamp_us = tick_time_us(s_trig_tick);
+        s->timestamp_us = s_trig_time_us; /* M-10 (Rev 2.6) */
     } else {
         /* M-9: no prior measurement. */
         s->valid = false;
         s->seq = tick - 1u;
-        s->timestamp_us = tick_time_us(tick) - TICK_PERIOD_US;
+        s->timestamp_us = tick_time_us(tick) - TICK_PERIOD_US; /* no trigger: nominal */
     }
     __dmb();
     s_latest = s_cur_slot; /* single atomic 32-bit write */
 
     s_trig_ok = true;
     s_trig_tick = tick;
+    s_trig_time_us = now_us; /* this transaction's TM_M write just completed */
     uint32_t pre = s_cur_pre;
     s_trig_reset = (pre == PRE_RESET);
     if (pre == PRE_RESET) {
@@ -307,6 +309,10 @@ static void __not_in_flash_func(publish)(void) {
 /* I2C1: STOP_DET = transaction complete; TX_ABRT = abort (M-15). */
 static void __not_in_flash_func(i2c_isr)(void) {
     uint32_t t0 = diag_cycles();
+    /* M-10 (Rev 2.6): STOP_DET follows the trigger byte's ACK by one bit
+     * time (~2.5 us), so reading the timer first keeps the timestamp
+     * within ~3 us + interrupt latency of the real trigger. */
+    uint64_t now_us = time_us_64();
     i2c_hw_t *hw = i2c_regs();
     uint32_t st = hw->intr_stat;
 
@@ -340,7 +346,7 @@ static void __not_in_flash_func(i2c_isr)(void) {
             bool data_done = (dma_hw->ch[s_dma_data].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) == 0u;
             bool cmd_done = (dma_hw->ch[s_dma_cmd].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) == 0u;
             if (data_done && cmd_done) {
-                publish();
+                publish(now_us);
             } else {
                 /* Unexpected STOP mid-transaction. */
                 dma_hw->abort = s_dma_mask;

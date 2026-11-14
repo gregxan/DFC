@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.5**. The changes since Revision 2 are listed in sections 11 to 15.
+**Revision 2.6**. The changes since Revision 2 are listed in sections 11 to 16.
 
 ## 1. Scope
 
@@ -100,8 +100,8 @@ Firmware for a Seeed XIAO RP2350 that:
 - **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid. A measurement triggered immediately after a RESET pulse has inverted polarity, and its sample shall also be marked invalid. *(Amended in Rev 2.4.)*
 - **M-10** Each sample shall be stored as:
   - the 7 raw data bytes,
-  - a 64-bit microsecond timestamp of when that measurement was triggered (the previous tick),
-  - a 32-bit sequence number,
+  - a 64-bit microsecond timestamp of when that measurement was triggered. This is the time its trigger (TM_M) write completed, captured at the start of the completion interrupt (M-12) of the transaction that carried the trigger. The expected lag behind the actual trigger is about 3 µs plus interrupt latency. A sample with no prior trigger (M-9) carries the nominal time of the previous tick. *(Amended in Rev 2.6.)*
+  - a 32-bit sequence number: the index of the tick whose transaction triggered the measurement, so consecutive samples differ by 1,
   - a valid flag.
 
   Conversion to 18-bit X/Y/Z values is performed by the main loop.
@@ -203,6 +203,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **V-3** TX latency shall be measured from a GPIO toggled at the write call to the start bit on the TX line. At least 100,000 measurements shall meet U-17.
 - **V-4** Under continuous queueing for the full 10 minutes of V-1, captured at 20 MS/s or faster, the TX line shall show no gap longer than 25 µs. The number of gaps longer than 1 bit time shall be reported and shall be consistent with the number of TX DMA transfer boundaries (U-18).
 - **V-5** Maximum interrupt handler duration and critical-section duration shall be measured and shown to meet EX-3 and EX-4. API call time and main-loop iteration time shall be shown to meet EX-7 and EX-8.
+- **V-5a** The magnetometer timestamp (M-10) shall be compared, on a logic analyzer, with the ACK of the trigger byte on SDA/SCL. The measured lag shall be reported. Expected: about 3 µs typical, and under 20 µs maximum with all subsystems active. *(Added in Rev 2.6.)*
 - **V-6** Fault injection:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
   - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
@@ -277,3 +278,12 @@ Alternatives considered (docs/DESIGN.md §6):
   - Measured against SDK 2.2.0: 46 of 47 SDK C files in the production build, and 70 of 72 in the diagnostic build, are already clean under all of the flags.
   - Applying the flags everywhere puts SDK code under the `-Werror` gate and gives `-fstack-usage` data for SDK functions called from interrupt handlers.
 - **Added B-25.** Rules for exceptions, and the two current exceptions.
+
+## 16. Revision 2.6 Changes
+
+- **Amended M-10.** The timestamp is the time the trigger write completed, not the scheduled time of the tick.
+  - The sensor starts measuring when the trigger is written. That happens ~330 µs after the tick, or ~400 µs with a SET/RESET pulse. The tick time was therefore off by a fixed ~0.3–0.4 ms.
+  - The time is captured in the existing completion interrupt. The cost is one timer read per sample, about 0.01% of the CPU.
+  - Timestamps are no longer exactly on the 1 ms grid. `seq` still identifies the tick.
+- **Clarified M-10.** The sequence number is defined as the index of the triggering tick.
+- **Added V-5a.** Measure the timestamp lag.

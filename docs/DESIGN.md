@@ -158,10 +158,16 @@ finished. It then fills in `valid`, `seq` and `timestamp_us` and issues
 `__dmb()`. Finally it publishes the slot with a single 32-bit store to
 `s_latest` (M-12).
 
-- `seq` is the index of the tick that **triggered** the measurement, and
-  `timestamp_us` is that tick's scheduled time on the fixed 1 ms grid
-  (M-10). Consecutive valid samples have consecutive `seq`, so any lost
-  sample shows up as a gap.
+- `seq` is the index of the tick whose transaction **triggered** the
+  measurement. Consecutive valid samples have consecutive `seq`, so any
+  lost sample shows up as a gap.
+- `timestamp_us` (M-10, Rev 2.6) is when the trigger write completed. The
+  STOP-detect ISR reads the timer as its first action. That is one bit time
+  (~2.5 µs) after the trigger byte's ACK, plus interrupt latency, which is
+  typically < 1 µs and up to ~15 µs behind UART handlers. The value is
+  saved and attached to the sample when the *next* transaction reads it
+  out. An invalid sample with no prior trigger carries the nominal
+  previous-tick time instead.
 - The first transaction after start-up or after an abort has no prior
   trigger. Its sample is published with `valid = false` (M-9).
 - `mag_read_latest()` copies the 24-byte slot inside a critical section
