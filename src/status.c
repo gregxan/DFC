@@ -21,10 +21,12 @@ extern volatile uint32_t g_app_mag_valid;
 extern volatile uint32_t g_app_mag_invalid;
 extern volatile uint32_t g_app_mag_stale;
 extern volatile bool g_app_baud_ok;
+extern volatile int32_t g_app_mag_offset[3];
+extern volatile bool g_app_mag_offset_valid;
 extern volatile uint32_t g_app_rx_pattern_errors[2];
 
 #define STATUS_PERIOD_US 1000000u
-#define N_LINES 6u
+#define N_LINES 7u
 
 static uint32_t s_total[DIAG_COUNT]; /* cumulative since boot */
 static uint64_t s_next_us;
@@ -77,6 +79,11 @@ static int format_line(unsigned line) {
                         g_mag_sr_mode, g_mag_sr_interval, s_total[DIAG_MAG_RECOVERED],
                         s_total[DIAG_MAG_NOT_READY], g_app_mag_xyz[0],
                         g_app_mag_xyz[1], g_app_mag_xyz[2]);
+    case 5:
+        return snprintf(s_buf, n, "CAL offset_valid=%u offset_cal=%" PRIu32 " saturated=%" PRIu32 " ox=%" PRId32
+                        " oy=%" PRId32 " oz=%" PRId32 "\r\n",
+                        (unsigned)g_app_mag_offset_valid, s_total[DIAG_MAG_OFFSET_CAL], s_total[DIAG_MAG_SATURATED],
+                        g_app_mag_offset[0], g_app_mag_offset[1], g_app_mag_offset[2]);
     default:
         return snprintf(s_buf, n, "TIM_NS isr_uart0=%" PRIu32 " isr_uart1=%" PRIu32 " isr_txdma=%" PRIu32
                         " isr_i2c=%" PRIu32 " isr_tick=%" PRIu32 " crit=%" PRIu32 " api_read=%" PRIu32

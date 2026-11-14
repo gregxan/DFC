@@ -32,6 +32,8 @@ typedef enum {
     DIAG_MAG_BUS_CLEAR, /* D-1 (Rev 2.2): bus clears, start-up and post-abort */
     DIAG_MAG_RECOVERED, /* D-1 (Rev 2.7): re-probes that cleared the fault flag */
     DIAG_MAG_NOT_READY, /* D-1 (Rev 2.8): samples read with Meas_M_Done clear */
+    DIAG_MAG_OFFSET_CAL, /* D-1 (Rev 2.9): successful offset calibrations      */
+    DIAG_MAG_SATURATED, /* D-1 (Rev 2.9): valid samples at/near full scale    */
     DIAG_COUNT
 } diag_ctr_t;
 

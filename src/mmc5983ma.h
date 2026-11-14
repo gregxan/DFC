@@ -26,6 +26,7 @@
 
 /* Status */
 #define MMC_STATUS_MEAS_M_DONE (1u << 0)
+#define MMC_STATUS_OTP_RD_DONE (1u << 4) /* factory OTP loaded */
 
 /* Field bytes per sample: Xout0, Xout1, Yout0, Yout1, Zout0, Zout1, XYZout2 */
 #define MMC_SAMPLE_BYTES 7u

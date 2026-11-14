@@ -46,6 +46,11 @@ typedef struct {
     mag_sample_t s;
     bool present; /* at least one sample has been published */
     bool stale;   /* M-17: timestamp older than MAG_STALE_US, or none yet */
+    /* M-4b (Rev 2.9): bridge offset from the last SET/RESET calibration, in
+     * the same signed counts as mag_convert(). Subtract it from every axis:
+     * field = mag_convert(raw) - offset. Not applied by the firmware. */
+    int32_t offset[3];
+    bool offset_valid; /* false until the first successful calibration */
 } mag_reading_t;
 
 /* Blocking start-up (before the main loop): probe the product ID (M-2) and
@@ -69,6 +74,17 @@ static inline void mag_convert(const uint8_t raw[MMC_SAMPLE_BYTES], int32_t xyz[
     xyz[0] = (int32_t)x - 131072;
     xyz[1] = (int32_t)y - 131072;
     xyz[2] = (int32_t)z - 131072;
+}
+
+/* Convenience: field in signed counts with the calibrated offset removed
+ * (offset ignored if not valid). 16384 counts/G. */
+static inline void mag_field(const mag_reading_t *r, int32_t xyz[3]) {
+    mag_convert(r->s.raw, xyz);
+    if (r->offset_valid) {
+        for (int i = 0; i < 3; i++) {
+            xyz[i] -= r->offset[i];
+        }
+    }
 }
 
 /* Called from the 1 ms tick ISR only. */

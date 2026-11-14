@@ -210,5 +210,55 @@ fallback is continuous mode (`CM_Freq = 111`), which needs a spec change.
 
 Put the sensor into an unusual state in a test build: for example, write
 `CTRL2 = 0x0F` (continuous mode, 1 kHz) from a debug session, then reset
-only the MCU. After boot, the bus shows `W(0x0A, 0x80)`, a 10 ms gap,
-then the product-ID read, and sampling is normal.
+only the MCU. After boot, the bus shows:
+
+1. `W(0x0A, 0x80)`, then a 10 ms gap;
+2. the product-ID and Status reads (Status bit 4, OTP_Rd_Done, = 1);
+3. the configuration;
+4. the RESET, measure, SET, measure calibration.
+
+Then sampling is normal, with `CAL offset_valid=1 offset_cal=1`.
+
+## Offset calibration and saturation (M-4b, D-1, Rev 2.9)
+
+1. **Repeatability.** Keep the sensor still, in mode 0. Re-select mode 0
+   from the debugger 10 times (write 0 after briefly writing 1).
+   - Each re-select adds 1 to `offset_cal`.
+   - `ox/oy/oz` should agree within about ±3 counts. The datasheet gives
+     ±1 mG SET/RESET repeatability, which is ~16 counts at 16384
+     counts/G, so ±3 counts is a tight target. Record what you get.
+2. **Offset removal.** Rotate the sensor 180° about Z and compare X and Y
+   before and after. With the offset subtracted, they should be equal and
+   opposite to within noise.
+3. **Saturation and SET recovery.** Bring a strong magnet (> 10 G) close,
+   so that `saturated` rises. Remove it.
+   - In mode 0, the readings may stay shifted.
+   - Re-select mode 0, or run mode 1. The readings should return to their
+     pre-magnet values.
+
+## SET effectiveness at pulse interval 1
+
+In mode 1 with `g_mag_sr_interval = 1`, there are 1000 SET pulses per
+second, drawn from the 10 µF CAP capacitor. The datasheet gives no
+recharge time.
+
+1. Magnetise the sensor with a magnet, remove it, and note how quickly
+   the readings recover with interval 1 compared with interval 50.
+2. On a scope, check the VDD/CAP ripple at each pulse.
+
+If interval 1 is less effective than interval 50, raise the lower clamp
+on `g_mag_sr_interval`.
+
+## Supply current at 1 kHz
+
+Measure the sensor's VDD current in mode 0 and in mode 1 (interval 1).
+The estimate, scaled from the datasheet's 32 µA at 7 measurements per
+second, is about 4.5 mA in mode 0, plus the SET pulses in mode 1. Record
+the measured values.
+
+## Axis orientation
+
+The datasheet defines +X, +Y and +Z after a SET (p. 9, marking
+illustration). Point each board axis at magnetic north in turn and record
+which sensor axis, and which sign, responds. Document the mapping for
+the main-loop application.

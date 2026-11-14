@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.8).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.9).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -54,7 +54,7 @@
 #define MAG_STALE_US 3000u
 #endif
 
-/* M-4 (Rev 2.8): SET/RESET strategy, selectable at run time through the
+/* M-4 (Rev 2.9): SET/RESET strategy, selectable at run time through the
  * global g_mag_sr_mode (see mag.h; currently changed only from a debugger).
  *   MAG_SR_INIT_ONLY (0) - one RESET -> SET cycle at start-up, then none. If
  *                          the mode is selected again at run time, one more
@@ -73,6 +73,13 @@
 #define MAG_SR_INTERVAL_DEFAULT 50u
 #endif
 #define MAG_SR_INTERVAL_MAX 100u /* M-4: at least every 100 samples */
+
+/* D-1 (Rev 2.9): a valid sample counts as saturated when any axis is within
+ * this many counts of either end of the 18-bit range (+/-8 G full scale;
+ * fields above ~10 G can upset the sensor until the next SET). */
+#ifndef MAG_SAT_MARGIN
+#define MAG_SAT_MARGIN 72
+#endif
 
 /* M-2 (Rev 2.7): while the magnetometer fault flag is set, re-probe the
  * product ID every this many ticks (200 = 5 Hz). */

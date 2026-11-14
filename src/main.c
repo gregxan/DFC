@@ -27,7 +27,9 @@
 #include "tick.h"
 
 /* Observable from a debugger (and reported by status.c). */
-volatile int32_t g_app_mag_xyz[3];
+volatile int32_t g_app_mag_xyz[3];       /* field, offset removed when calibrated */
+volatile int32_t g_app_mag_offset[3];    /* latest calibrated offset (M-4b)       */
+volatile bool g_app_mag_offset_valid;
 volatile uint32_t g_app_mag_gaps;    /* sequence discontinuities between valid samples */
 volatile uint32_t g_app_mag_valid;   /* valid samples consumed                         */
 volatile uint32_t g_app_mag_invalid; /* invalid (M-9) samples consumed                 */
@@ -118,7 +120,11 @@ static void mag_consume(void) {
     g_app_mag_valid++;
 
     int32_t xyz[3];
-    mag_convert(r.s.raw, xyz);
+    mag_field(&r, xyz); /* offset removed when calibrated (M-4b) */
+    g_app_mag_offset[0] = r.offset[0];
+    g_app_mag_offset[1] = r.offset[1];
+    g_app_mag_offset[2] = r.offset[2];
+    g_app_mag_offset_valid = r.offset_valid;
     g_app_mag_xyz[0] = xyz[0];
     g_app_mag_xyz[1] = xyz[1];
     g_app_mag_xyz[2] = xyz[2];

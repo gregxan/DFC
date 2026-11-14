@@ -1,7 +1,7 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.8
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.9
 ([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
@@ -14,7 +14,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 
 | Document | Contents |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.8), the baseline for this firmware |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.9), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7 |
 
@@ -46,8 +46,15 @@ tools/*.py              Windows test scripts (V-1 … V-4)
 | Test pins: UART0 RX_SEEN / TX_WRITE | D0 / D1 | 26 / 27 |
 | Test pins: UART1 RX_SEEN / TX_WRITE | D2 / D3 | 28 / 5 |
 
-Fit 4.7 kΩ pull-ups to 3.3 V on SDA and SCL if the breakout has none. Leave
-MMC5983MA INT unconnected. The UARTs have no flow control, and both RX pins
+Fit pull-ups to 3.3 V on SDA and SCL if the breakout has none: 4.7 kΩ at
+most, 2.7 kΩ recommended. Check that the rise time is ≤ 300 ns (HW-4).
+The MMC5983MA also needs the following (HW-5a); most breakouts provide
+them, but check the schematic:
+- SPI_CS tied to VDDIO;
+- a 10 µF low-ESR capacitor on CAP;
+- 1 µF on VDD.
+
+Leave MMC5983MA INT unconnected. The UARTs have no flow control, and both RX pins
 have their internal pull-ups enabled.
 
 ## Setup on Windows (reference: VS Code extension)
@@ -177,7 +184,7 @@ if (!link_write(LINK_1, buf, n)) { /* rejected in full, counted */ }
 mag_reading_t r;
 if (mag_read_latest(&r) && r.s.valid && !r.stale) {
     int32_t xyz[3];
-    mag_convert(r.s.raw, xyz);                       // signed 18-bit counts
+    mag_field(&r, xyz);      // signed counts (16384/G), calibrated offset removed
 }
 
 uint32_t ovf = diag_take(DIAG_L0_RX_OVERFLOW);      // atomic read-and-clear

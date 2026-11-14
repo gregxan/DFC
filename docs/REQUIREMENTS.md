@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.8**. The changes since Revision 2 are listed in sections 11 to 18.
+**Revision 2.9**. The changes since Revision 2 are listed in sections 11 to 19.
 
 ## 1. Scope
 
@@ -16,8 +16,14 @@ Firmware for a Seeed XIAO RP2350 that:
 - **HW-1** MCU board shall be the Seeed XIAO RP2350.
 - **HW-2** UART0 shall use D6 (GPIO0, TX) and D7 (GPIO1, RX).
 - **HW-3** UART1 shall use the back pads D12 (GPIO20, TX) and D11 (GPIO21, RX).
-- **HW-4** The magnetometer shall connect to I2C1 on D4 (GPIO6, SDA) and D5 (GPIO7, SCL), with 4.7 kΩ pull-ups to 3.3 V if the breakout has none.
+- **HW-4** The magnetometer shall connect to I2C1 on D4 (GPIO6, SDA) and D5 (GPIO7, SCL), with pull-ups to 3.3 V of at most 4.7 kΩ (2.7 kΩ recommended by the datasheet) if the breakout has none. Rise time on both lines shall be ≤ 300 ns (datasheet t_r, fast mode), verified on a scope. *(Amended in Rev 2.9.)*
 - **HW-5** The MMC5983MA shall be powered at 3.3 V, I2C address 0x30. The INT pin is not used.
+- **HW-5a** Per the datasheet (pp. 9–11): *(Added in Rev 2.9.)*
+  - SPI_CS (pin 4) shall be tied to VDDIO to select I2C.
+  - VDDIO shall be 2.8–3.6 V (3.3 V, the same rail as VDD, is acceptable).
+  - A 10 µF low-ESR capacitor shall be placed close to the CAP pin, which supplies the SET/RESET current.
+  - VDD shall have a 1 µF decoupling capacitor.
+  - A breakout board that already provides these satisfies HW-5a. Its schematic shall be checked.
 - **HW-6** Neither UART uses flow control; only TX and RX are connected.
 - **HW-6a** The internal pull-up shall be enabled on each UART RX pin (GPIO1, GPIO21) so a disconnected line idles high.
 - **HW-7** Firmware shall be written in C using the Pico SDK on the Arm Cortex-M33 cores.
@@ -80,8 +86,9 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **M-1** I2C1 shall run at 400 kHz.
 - **M-2** At startup, firmware shall first perform one I2C bus clear (M-18), then a software reset (Internal Control 1, SW_RST) followed by the datasheet's 10 ms power-on time, then read the Product ID register (0x2F) and expect 0x30. On mismatch or no response, set the magnetometer fault flag and continue running the UARTs. The startup bus clear and probe may block, since they run before the main loop. *(Amended in Rev 2.2, 2.7, 2.8.)*
+  - The startup check also requires the Status register's OTP_Rd_Done bit (bit 4) to be set after the software reset, confirming the factory calibration was loaded. If it is clear, the check fails. *(Added in Rev 2.9.)*
   - **M-2a** While the fault flag is set, the timer handler shall re-probe the Product ID every 200 ms (5 Hz), using the magnetometer DMA channels without blocking. *(Added in Rev 2.7.)*
-    - On a match, the next tick shall configure the sensor (M-3, Internal Control 2 = 0, and a RESET whose SET follows in the first sample transaction, M-4). It shall then clear the fault flag and resume sampling. The first sample is invalid (M-9).
+    - On a match, the next tick shall configure the sensor: M-3, Internal Control 2 = 0, then a RESET followed by a TM_M trigger. The post-RESET measurement is the first sample (invalid, M-9) and the RESET half of an offset calibration (M-4b). The first sample transaction carries the SET. The firmware shall then clear the fault flag and resume sampling. *(Amended in Rev 2.9.)*
     - A failed probe or configuration returns to re-probing.
     - Probe and configuration transactions are not counted as missed ticks. A failed probe is counted as a product-ID fault, not as an I2C error.
     - The fault flag is set only by the startup check. Losing the sensor during sampling is handled by M-15/M-16 as before.
@@ -95,7 +102,13 @@ Firmware for a Seeed XIAO RP2350 that:
   - **Single cycle** (`MAG_SR_INIT_ONLY` = 0, the initial value): no further pulses. Selecting this mode again at run time performs one more RESET → SET cycle: a RESET in one transaction, then a SET in the next.
   - **Pulse** (`MAG_SR_PULSE` = 1): a SET pulse is inserted into the transaction, before the trigger write, every `g_mag_sr_interval` samples. The default is 50. Values are clamped to 1–100, so a pulse occurs at least every 100 samples.
 
-  A change to either variable shall take effect at the next transaction (within 1 ms). An invalid mode value shall be ignored, and the previous mode remains in use. Leaving a mode partway through a RESET → SET cycle shall still complete the SET. The single-cycle mode provides no ongoing compensation of offset drift.
+  A change to either variable shall take effect at the next transaction (within 1 ms). An invalid mode value shall be ignored, and the previous mode remains in use. Leaving a mode partway through a RESET → SET cycle shall still complete the SET. The single-cycle mode provides no ongoing SET; re-selecting it re-calibrates the offset (M-4b).
+- **M-4b** Every RESET → SET cycle shall also calibrate the bridge offset, following the datasheet procedure (p. 18). *(Added in Rev 2.9.)*
+  - Cycles occur at startup, when single-cycle mode is selected at run time, and after a successful re-probe.
+  - Measure once after the RESET (−H + offset) and once after the SET (+H + offset). The offset is their per-axis mean, in the same signed counts as the converted field.
+  - A calibration is used only if both measurements completed (Meas_M_Done set) and no abort intervened. Otherwise the previous offset is kept.
+  - The offset and its validity flag are returned by the read-latest function (M-13). The main loop subtracts it from every axis. The firmware does not modify the raw sample bytes (M-10).
+  - The calibration assumes the field is steady over the ~2 ms between the two measurements.
 - **M-5** Every write to Internal Control 0 (0x09) shall include any persistent control bits along with TM_M. With Auto_SR_en not used (M-3a), there are none, so each write carries only its own bit (TM_M, SET or RESET). *(Amended in Rev 2.8.)*
 
 ### 5.2 Sampling
@@ -124,7 +137,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **M-11** Two sample slots shall be used. DMA shall always write into the slot not currently marked latest.
 - **M-12** A transaction is complete when the I2C controller detects the STOP condition that ends the trigger write. On that event, the completion interrupt (I2C STOP detect) shall confirm that both magnetometer DMA channels have finished. It shall then publish the new slot as latest with a single atomic 32-bit write. DMA channel completion does not mark the end of a transaction and shall not be used for this purpose. *(Amended in Rev 2.1.)*
-- **M-13** The read-latest function shall copy the latest slot inside a critical section of at most 2 µs. It returns the sample, timestamp, sequence number, and valid flag.
+- **M-13** The read-latest function shall copy the latest slot inside a critical section of at most 2 µs. It returns the sample, timestamp, sequence number, valid flag, and the current offset calibration and its validity (M-4b). *(Amended in Rev 2.9.)*
 - **M-14** Only the latest sample is retained. No history buffer is required.
 
 ### 5.4 Errors
@@ -143,7 +156,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
-  - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8)*
+  - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached).
 - **D-4** Firmware shall record the maximum main-loop iteration time in microseconds.
@@ -225,6 +238,8 @@ Firmware for a Seeed XIAO RP2350 that:
   - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
   - Changing `g_mag_sr_mode` and `g_mag_sr_interval` from the debugger, while data flows, switches strategy within 1 ms. Each strategy produces the expected pulse pattern on the bus, and there are no UART errors or magnetometer sequence gaps. The only invalid sample is the one after each RESET. *(Added in Rev 2.4.)*
   - Powering up with the magnetometer disconnected sets the fault flag, and the product-ID fault count rises by about 5 per second. Connecting the sensor clears the fault flag within 250 ms, after which valid samples flow. There are no UART errors throughout. *(Added in Rev 2.7.)*
+  - Re-selecting single-cycle mode from the debugger with the sensor still produces one offset calibration (counter +1). Repeating it 10 times gives offsets within ±3 counts per axis. *(Added in Rev 2.9.)*
+  - Placing a strong magnet (> 10 G) near the sensor raises the saturated count. After it is removed, valid readings with the offset subtracted return to their previous values within the datasheet's ±1 mG SET/RESET repeatability, once a SET has been applied (pulse mode, or re-selecting single-cycle mode). *(Added in Rev 2.9.)*
   - Resetting the MCU (e.g. from the debugger) while magnetometer transactions are running, repeated at least 100 times, never leaves the magnetometer fault flag set after boot. *(Added in Rev 2.2.)*
   - Holding one UART's RX line low, or leaving it disconnected, causes no data loss on the other UART and no magnetometer sequence gaps.
   - Deliberately stalling the main loop produces RX overflow counts and high-water marks consistent with the queue size.
@@ -330,3 +345,16 @@ These changes follow a review of the MMC5983MA datasheet (Rev A, 4/3/2019) for o
 - **Amended M-10.** The Status byte is stored with the sample.
 - **Amended D-1.** Added the not-ready counter.
 - **Amended V-1.** Zero not-ready samples, in both modes.
+
+## 19. Revision 2.9 Changes
+
+These changes follow the second datasheet review.
+- **Amended HW-4.** Pull-up limit and rise-time verification.
+- **Added HW-5a.** SPI_CS to VDDIO, 10 µF on CAP, 1 µF on VDD.
+- **Amended M-2.** Check OTP_Rd_Done after the software reset.
+- **Amended M-2a.** The re-probe configuration ends with RESET + TM_M, so it yields a calibration.
+- **Added M-4b.** Bridge-offset calibration from every RESET → SET cycle, per the datasheet's procedure. It is returned through M-13 for the main loop to subtract.
+- **Amended M-13.** Returns the offset.
+- **Amended D-1.** Added the offset-calibration and saturated-sample counters.
+- **Amended V-6.** Added the calibration and saturation tests.
+- **Bench checks.** Section 9 procedures in VERIFICATION.md were added for SET effectiveness at a pulse interval of 1, supply current at 1 kHz, and axis orientation.

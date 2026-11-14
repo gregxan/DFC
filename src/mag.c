@@ -63,7 +63,7 @@ static uint32_t s_probe_wait;         /* ticks spent in MAG_FAULT since last pro
 static volatile bool s_config_pending;/* probe matched: configure on next tick     */
 static uint8_t s_probe_id;            /* product-ID byte received by DMA           */
 static uint32_t s_probe_cmd[2];
-static uint32_t s_cfg_cmd[6];
+static uint32_t s_cfg_cmd[8];
 
 static volatile uint32_t s_cur_slot;
 static volatile uint32_t s_cur_tick;
@@ -72,6 +72,14 @@ static volatile bool s_trig_ok;       /* previous transaction's TM_M write compl
 static volatile uint32_t s_trig_tick; /* tick of that transaction                    */
 static uint64_t s_trig_time_us;       /* when its trigger write completed (M-10)    */
 static volatile bool s_trig_reset;    /* ...and it RESET first: polarity inverted    */
+static volatile bool s_trig_cal_set;  /* ...and it was the SET of a RESET->SET cycle  */
+
+/* M-4b (Rev 2.9) offset calibration. Written in the I2C ISR (and once at
+ * start-up); read by mag_read_latest() inside its critical section. */
+static int32_t s_cal_reset_xyz[3];  /* measurement after RESET: -H + offset */
+static bool s_cal_have_reset;
+static int32_t s_offset[3];
+static volatile bool s_offset_valid;
 
 /* M-4 state. Tick ISR (mode selection) and I2C ISR (publish) only; the I2C
  * IRQ is masked while the tick runs, so they never interleave. */
@@ -290,19 +298,57 @@ static void __not_in_flash_func(probe_start)(void) {
 
 /* M-2, M-3, M-4 (Rev 2.7): configure after a successful re-probe. Ends
  * with RESET; the first sample transaction then carries the SET. */
-static void __not_in_flash_func(config_start)(void) {
+static void __not_in_flash_func(config_start)(uint32_t tick) {
     uint32_t mode = g_mag_sr_mode;
     if (mode > MAG_SR_PULSE) {
         mode = s_mode_applied;
     }
     s_mode_applied = mode;
-    start_dma(TXN_CONFIG, s_cfg_cmd, 6u, NULL, 0u);
+    s_cur_tick = tick;
+    start_dma(TXN_CONFIG, s_cfg_cmd, 8u, NULL, 0u);
 }
 
 /* M-16: abort without waiting. */
 static void __not_in_flash_func(issue_abort)(void) {
     dma_hw->abort = s_dma_mask;
     hw_set_bits(&i2c_regs()->enable, I2C_IC_ENABLE_ABORT_BITS);
+}
+
+/* M-4b (Rev 2.9): datasheet p. 18, "Using SET and RESET to remove bridge
+ * offset". After RESET a measurement is -H + offset; after SET it is
+ * +H + offset; their mean is the offset. Uses the pair produced by every
+ * RESET -> SET cycle (start-up, re-selecting mode 0, re-probe). Assumes the
+ * field is steady over the ~2 ms between the two measurements. */
+static void __not_in_flash_func(calibrate)(const mag_sample_t *s, bool done) {
+    if (s_trig_reset) {
+        s_cal_have_reset = done;
+        if (done) {
+            mag_convert(s->raw, s_cal_reset_xyz);
+        }
+        return;
+    }
+    if (s_trig_cal_set && done && s_cal_have_reset) {
+        int32_t set_xyz[3];
+        mag_convert(s->raw, set_xyz);
+        for (unsigned i = 0; i < 3u; i++) {
+            s_offset[i] = (set_xyz[i] + s_cal_reset_xyz[i]) / 2;
+        }
+        s_offset_valid = true;
+        diag_inc(DIAG_MAG_OFFSET_CAL);
+    }
+    s_cal_have_reset = false;
+}
+
+/* D-1 (Rev 2.9): informational only; no action is taken (D-5). */
+static void __not_in_flash_func(count_saturation)(const mag_sample_t *s) {
+    int32_t xyz[3];
+    mag_convert(s->raw, xyz);
+    for (unsigned i = 0; i < 3u; i++) {
+        if (xyz[i] >= 131071 - MAG_SAT_MARGIN || xyz[i] <= -131072 + MAG_SAT_MARGIN) {
+            diag_inc(DIAG_MAG_SATURATED);
+            return;
+        }
+    }
 }
 
 /* M-12 (Rev 2.1): publish the completed slot. Called from the I2C
@@ -321,8 +367,13 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
         s->valid = done && !s_trig_reset;
         s->seq = s_trig_tick;
         s->timestamp_us = s_trig_time_us; /* M-10 (Rev 2.6) */
+        calibrate(s, done);
+        if (s->valid) {
+            count_saturation(s);
+        }
     } else {
         /* M-9: no prior measurement. */
+        s_cal_have_reset = false;
         s->valid = false;
         s->seq = tick - 1u;
         s->timestamp_us = tick_time_us(tick) - TICK_PERIOD_US; /* no trigger: nominal */
@@ -335,6 +386,7 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     s_trig_time_us = now_us; /* this transaction's TM_M write just completed */
     uint32_t pre = s_cur_pre;
     s_trig_reset = (pre == PRE_RESET);
+    s_trig_cal_set = (pre == PRE_SET && s_cycle_step == 2u);
     if (pre == PRE_RESET) {
         s_cycle_step = 2u; /* SET next */
     } else if (pre == PRE_SET) {
@@ -409,9 +461,16 @@ static void __not_in_flash_func(i2c_isr)(void) {
                     s_state = MAG_FAULT;
                 }
             } else { /* TXN_CONFIG */
-                s_trig_ok = false;   /* M-9: first sample invalid       */
-                s_trig_reset = false;
-                s_cycle_step = 2u;   /* config ended with RESET: SET next */
+                /* The configuration ended with RESET + TM_M (Rev 2.9): the
+                 * first sample is that post-RESET measurement. It is
+                 * published invalid (M-9) and is the RESET half of an
+                 * offset calibration; its transaction carries the SET. */
+                s_trig_ok = true;
+                s_trig_reset = true;
+                s_trig_cal_set = false;
+                s_trig_tick = s_cur_tick;
+                s_trig_time_us = now_us;
+                s_cycle_step = 2u;   /* SET next */
                 s_since_pulse = 0u;
                 s_pulse_now = false;
                 s_fault = false;
@@ -439,7 +498,7 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
     case MAG_IDLE:
         if (s_config_pending) {
             s_config_pending = false;
-            config_start();
+            config_start(tick);
         } else {
             mag_start(tick);
         }
@@ -491,6 +550,10 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
     if (l < SLOT_NONE) {
         r->s = s_slots[l];
     }
+    r->offset[0] = s_offset[0];
+    r->offset[1] = s_offset[1];
+    r->offset[2] = s_offset[2];
+    r->offset_valid = s_offset_valid;
     cs_exit(cs);
 
     r->present = l < SLOT_NONE;
@@ -517,6 +580,27 @@ static bool reg_read(uint8_t reg, uint8_t *val) {
         return false;
     }
     return i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, val, 1, false, 5000) == 1;
+}
+
+/* Start-up only (blocking allowed): trigger one measurement, wait for it,
+ * read the field and Status. Returns false on a bus error or if
+ * Meas_M_Done is not set. */
+static bool blocking_measure(int32_t xyz[3]) {
+    uint8_t reg = MMC_REG_XOUT0;
+    uint8_t b[MMC_READ_BYTES];
+    if (!reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+        return false;
+    }
+    sleep_ms(2); /* 0.5 ms measurement at BW = 11, with margin */
+    if (i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, &reg, 1, true, 5000) != 1 ||
+        i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, b, MMC_READ_BYTES, false, 5000) != (int)MMC_READ_BYTES) {
+        return false;
+    }
+    if (!(b[MMC_READ_BYTES - 1u] & MMC_STATUS_MEAS_M_DONE)) {
+        return false;
+    }
+    mag_convert(b, xyz);
+    return true;
 }
 
 #if MAG_BUS_CLEAR
@@ -583,9 +667,11 @@ bool mag_init(void) {
     (void)reg_write(MMC_REG_CTRL1, MMC_CTRL1_SW_RST);
     sleep_ms(10); /* datasheet: power-on time after SW_RST is 10 ms */
 
-    /* M-2 */
+    /* M-2: product ID, and (Rev 2.9) factory OTP loaded after the reset. */
     uint8_t id = 0;
+    uint8_t st = 0;
     bool ok = reg_read(MMC_REG_PRODUCT_ID, &id) && id == MMC_PRODUCT_ID;
+    ok = ok && reg_read(MMC_REG_STATUS, &st) && (st & MMC_STATUS_OTP_RD_DONE) != 0u;
     /* M-3: 800 Hz bandwidth; continuous mode off. */
     ok = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
     ok = ok && reg_write(MMC_REG_CTRL2, 0u);
@@ -596,10 +682,23 @@ bool mag_init(void) {
     if (mode > MAG_SR_PULSE) {
         mode = MAG_SR_MODE_DEFAULT;
     }
+    /* M-4b (Rev 2.9): measure after each pulse for the offset calibration. */
+    int32_t m_reset[3];
+    int32_t m_set[3];
+    bool cal = ok;
     ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_RESET);
     sleep_ms(1);
+    cal = cal && ok && blocking_measure(m_reset);
     ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_SET);
     sleep_ms(1);
+    cal = cal && ok && blocking_measure(m_set);
+    if (cal) {
+        for (unsigned i = 0; i < 3u; i++) {
+            s_offset[i] = (m_set[i] + m_reset[i]) / 2;
+        }
+        s_offset_valid = true;
+        diag_inc(DIAG_MAG_OFFSET_CAL);
+    }
     if (!ok) {
         /* M-2 (Rev 2.7): fault, but set up everything so the tick can
          * re-probe at 5 Hz. */
@@ -612,7 +711,9 @@ bool mag_init(void) {
     s_cfg_cmd[2] = CMD_RESTART | MMC_REG_CTRL2;
     s_cfg_cmd[3] = 0u;
     s_cfg_cmd[4] = CMD_RESTART | MMC_REG_CTRL0;
-    s_cfg_cmd[5] = CMD_STOP | MMC_CTRL0_RESET;
+    s_cfg_cmd[5] = MMC_CTRL0_RESET;
+    s_cfg_cmd[6] = CMD_RESTART | MMC_REG_CTRL0; /* Rev 2.9: measure after the */
+    s_cfg_cmd[7] = CMD_STOP | MMC_CTRL0_TM_M;   /* RESET for the calibration  */
     for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
         s_cmd_len[pre] = (uint32_t)build_cmds(s_cmd[pre], pre);
     }

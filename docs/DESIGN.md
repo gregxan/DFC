@@ -164,6 +164,35 @@ after the tick, before the next read reaches the data registers at
 - **Status.** The `diag` builds report the current values on the `MAGS`
   status line.
 
+### Offset calibration (M-4b, Rev 2.9)
+
+This follows the datasheet procedure (p. 18). After RESET a measurement
+reads −H + offset, and after SET it reads +H + offset. The mean of the two
+is the bridge offset.
+
+- **Where the pairs come from.** Every RESET → SET cycle produces one:
+  - **Startup.** `mag_init()` blocks: RESET, then trigger and read, then
+    SET, then trigger and read.
+  - **Re-selecting mode 0 at run time.** The RESET goes in one
+    transaction, the SET in the next.
+  - **Re-probe configuration.** The configuration ends with RESET + TM_M.
+- **At run time,** `publish()` → `calibrate()` stores the post-RESET
+  reading. The next sample, whose measurement followed the cycle's SET,
+  completes the calibration, and `DIAG_MAG_OFFSET_CAL` is incremented.
+- **A pair is discarded** if either measurement wasn't complete
+  (`Meas_M_Done` clear), or if an abort or any other sample came in
+  between. The previous offset is then kept.
+- **Using the offset.** `mag_read_latest()` copies the offset and its
+  validity flag in the same critical section as the sample.
+  `mag_field()` subtracts it. The firmware never alters `raw[]`.
+- **Assumption.** The field is steady over the ~2 ms between the two
+  measurements, so re-zero with the sensor still.
+- **Saturation counter.** `count_saturation()` counts valid samples with
+  any axis within `MAG_SAT_MARGIN` (72) counts of full scale, in
+  `DIAG_MAG_SATURATED`. This is informational only (D-5). A field above
+  ~10 G can upset the sensor until the next SET, which happens in pulse
+  mode, or when mode 0 is re-selected.
+
 ### Completion and publication (M-9 … M-14)
 
 Completion is the I2C **STOP_DET** interrupt (M-12, Rev 2.1). The data
@@ -233,13 +262,15 @@ START 0x30W 0x2F  RESTART 0x30R b0  STOP                        (~100 us)
   The next tick then sends:
 
   ```
-  START 0x30W 0x0A BW  RESTART 0x30W 0x0B 0x00  RESTART 0x30W 0x09 (ctrl0|RESET)  STOP
+  START 0x30W 0x0A BW  RESTART 0x30W 0x0B 0x00  RESTART 0x30W 0x09 RESET  RESTART 0x30W 0x09 TM_M  STOP
   ```
 
   The completion of that transaction clears the fault flag, counts a
   recovery, and sets the SET/RESET cycle step to "SET pending". The first
-  sample transaction therefore carries the SET. Its sample is invalid
-  (M-9), and normal samples follow.
+  sample transaction reads the post-RESET measurement and carries the SET.
+  That sample is invalid (M-9) and is the RESET half of an offset
+  calibration (M-4b). Normal samples follow, and the next one completes
+  the calibration.
 - **NACK, mismatch, abort or timeout:** the firmware returns to
   `MAG_FAULT`. A failed probe counts as a product-ID fault. Neither probes
   nor configurations count as missed ticks. A configuration failure, or a
@@ -361,6 +392,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-10 … U-14 | `link_write()`, `tx_start()`, `tx_dma_isr()`; `LINK_TX_RING_BITS` |
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
+| M-4b, D-1 (calibration, saturation) | `calibrate()`, `count_saturation()`, `blocking_measure()`, `mag_field()` |
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
