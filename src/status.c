@@ -110,9 +110,11 @@ static int format_line(unsigned line) {
             mag_field(&s_mag, s_xyz);
         }
         return snprintf(s_buf, n, "MAGS sr_mode=%" PRIu32 " sr_interval=%" PRIu32 " recovered=%" PRIu32
-                        " not_ready=%" PRIu32 " x=%" PRId32 " y=%" PRId32 " z=%" PRId32 "\r\n",
+                        " not_ready=%" PRIu32 " runtime_fault=%" PRIu32 " x=%" PRId32 " y=%" PRId32
+                        " z=%" PRId32 "\r\n",
                         g_mag_sr_mode, g_mag_sr_interval, s_total[DIAG_MAG_RECOVERED],
-                        s_total[DIAG_MAG_NOT_READY], s_xyz[0], s_xyz[1], s_xyz[2]);
+                        s_total[DIAG_MAG_NOT_READY], s_total[DIAG_MAG_RUNTIME_FAULT], s_xyz[0], s_xyz[1],
+                        s_xyz[2]);
     case 5:
         return snprintf(s_buf, n, "CAL offset_valid=%u offset_cal=%" PRIu32 " saturated=%" PRIu32 " ox=%" PRId32
                         " oy=%" PRId32 " oz=%" PRId32 "\r\n",

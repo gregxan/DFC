@@ -61,6 +61,7 @@ static volatile mag_txn_t s_txn = TXN_SAMPLE;
 
 /* M-2 (Rev 2.7) run-time re-probe. */
 static uint32_t s_probe_wait;         /* ticks spent in MAG_FAULT since last probe */
+static uint32_t s_not_ready_score;    /* M-2b: leaky score of not-ready samples     */
 static volatile bool s_config_pending;/* probe matched: configure on next tick     */
 static uint8_t s_probe_id;            /* product-ID byte received by DMA           */
 static uint32_t s_probe_cmd[2];
@@ -405,6 +406,9 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
         bool done = (s->status & MMC_STATUS_MEAS_M_DONE) != 0u;
         if (!done) {
             diag_inc(DIAG_MAG_NOT_READY);
+            s_not_ready_score += MAG_NOT_READY_STEP; /* M-2b */
+        } else if (s_not_ready_score != 0u) {
+            s_not_ready_score--;
         }
         s->reason = !done           ? (uint8_t)MAG_SAMPLE_NOT_READY
                     : s_trig_reset  ? (uint8_t)MAG_SAMPLE_AFTER_RESET
@@ -520,6 +524,7 @@ static void __not_in_flash_func(i2c_isr)(void) {
                 s_since_pulse = 0u;
                 s_pulse_now = false;
                 s_fault = false;
+                s_not_ready_score = 0u;
                 diag_inc(DIAG_MAG_RECOVERED);
                 s_state = MAG_IDLE;
             }
@@ -545,6 +550,18 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
         if (s_config_pending) {
             s_config_pending = false;
             config_start(tick);
+        } else if (MAG_NOT_READY_FAULT_SCORE != 0u && s_not_ready_score >= MAG_NOT_READY_FAULT_SCORE) {
+            /* M-2b (Rev 2.16): the sensor answers but its measurements keep
+             * being read unfinished, the signature of a sensor that
+             * power-cycled back to its defaults. Set the fault flag and let
+             * the re-probe (M-2a) reconfigure it, starting on the next tick
+             * rather than waiting a whole probe period. */
+            diag_inc(DIAG_MAG_RUNTIME_FAULT);
+            s_not_ready_score = 0u;
+            s_trig_ok = false;
+            s_fault = true;
+            s_probe_wait = MAG_REPROBE_PERIOD_TICKS - 1u;
+            s_state = MAG_FAULT;
         } else {
             mag_start(tick);
         }

@@ -34,6 +34,8 @@ typedef enum {
     DIAG_MAG_NOT_READY, /* D-1 (Rev 2.8): samples read with Meas_M_Done clear */
     DIAG_MAG_OFFSET_CAL, /* D-1 (Rev 2.9): successful offset calibrations      */
     DIAG_MAG_SATURATED, /* D-1 (Rev 2.9): valid samples at/near full scale    */
+    DIAG_MAG_RUNTIME_FAULT, /* D-1 (Rev 2.16): fault flag set at run time by
+                             * persistent not-ready samples (M-2b)            */
     DIAG_TICK_OVERRUN,  /* D-1 (Rev 2.11): 1 ms ticks skipped because the tick
                          * ISR ran a whole period late (M-6a)              */
     DIAG_EPOCH_OVERRUN, /* D-1 (Rev 2.14): user epochs whose app_poll() ran

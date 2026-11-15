@@ -2,7 +2,7 @@
  * Compile-time configuration. Every value can be overridden with -D on the
  * command line or in CMakeLists.txt (each is wrapped in #ifndef).
  *
- * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.15).
+ * Requirement IDs refer to docs/REQUIREMENTS.md (Revision 2.16).
  */
 #ifndef APP_CONFIG_H
 #define APP_CONFIG_H
@@ -133,6 +133,20 @@
 #ifndef MAG_REPROBE_PERIOD_TICKS
 #define MAG_REPROBE_PERIOD_TICKS 200u
 #endif
+
+/* M-2b (Rev 2.16): run-time fault on persistent not-ready samples. A sensor
+ * that lost power and came back answers at its defaults (8 ms measurements),
+ * so most samples are read before they finish. Each not-ready sample adds
+ * MAG_NOT_READY_STEP to a score and each ready sample subtracts 1 (never
+ * below 0); reaching MAG_NOT_READY_FAULT_SCORE sets the fault flag, and the
+ * re-probe (M-2a) then reconfigures the sensor. With the defaults a sensor
+ * that is never ready faults after 10 samples (10 ms); one that is ready
+ * only 1 time in 8 faults after about 13 ms; isolated not-ready samples
+ * decay away. Set MAG_NOT_READY_FAULT_SCORE to 0 to disable. */
+#ifndef MAG_NOT_READY_FAULT_SCORE
+#define MAG_NOT_READY_FAULT_SCORE 20u
+#endif
+#define MAG_NOT_READY_STEP 2u
 
 /* I2C bus clear (D-5, M-2, M-15, M-16, Rev 2.2): nine SCL clocks so a
  * sensor left mid-byte releases SDA.

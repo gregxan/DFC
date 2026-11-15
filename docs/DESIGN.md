@@ -339,8 +339,21 @@ START 0x30W 0x2F  RESTART 0x30R b0  STOP                        (~100 us)
   timeout of either kind, uses the normal I2C-error and timeout counters.
 - **Recovery time:** the fault flag clears within 200 ms of the sensor
   becoming reachable, plus two ticks.
-- **Unplugging during sampling** does not set the fault flag. It produces
-  I2C errors at 1 kHz (M-15), as before.
+- **Unplugging during sampling** (NACKs, bus faults) does not set the
+  fault flag. It produces I2C errors at 1 kHz (M-15), as before, so
+  M-16a's 4 ms resume still holds.
+- **Sensor power-cycle at run time (M-2b, Rev 2.16).** A sensor that
+  returns at its defaults answers, but its 8 ms measurements are read
+  unfinished, so samples come back not ready.
+  - `publish()` keeps a leaky score: +2 per not-ready sample, −1 per
+    ready one.
+  - When the score reaches `MAG_NOT_READY_FAULT_SCORE` (20), the tick sets
+    the fault flag, counts `DIAG_MAG_RUNTIME_FAULT`, and arranges the first
+    re-probe for the next tick.
+  - The re-probe and configuration then restore BW = 11, the SET state and
+    the offset calibration.
+  - Expected: detection ≤ ~13 ms after the sensor answers again, valid
+    samples ~5 ms later.
 
 ### Bus clear (M-18, Rev 2.2; `MAG_BUS_CLEAR`, default on)
 
@@ -476,6 +489,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
 | M-4b, D-1 (calibration, saturation) | `calibrate()`, `count_saturation()`, `blocking_measure()`, `mag_field()` |
+| M-2b | `publish()` (`s_not_ready_score`), `mag_tick_isr()` (`MAG_IDLE`), `DIAG_MAG_RUNTIME_FAULT` |
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
@@ -579,7 +593,7 @@ found no definite bug. The outcomes:
 | 1 | A controller active during a PIO bus clear blocked both `hw_idle()` and `controller_hung()`: a permanent magnetometer stall | **Fixed.** `hw_idle()` polls `bus_clear_done()` first, independent of the controller (M-16) |
 | 2 | `IC_ENABLE.ABORT` set on an idle controller might never clear, leaving `MAG_ABORTING` with no exit | **Fixed.** `issue_abort()` requests the controller abort only when it is active or has commands queued; otherwise the state goes straight to `MAG_ABORTED`. Bench check added |
 | 3 | UART receiver enabled before the RX pin was selected, so it saw a low input and could deliver a spurious first byte | **Fixed.** RX pull-up and function are set first; the FIFO is drained and the RX channel's DREQ counter reset before the DMA starts (U-4a) |
-| 4 | A sensor that power-cycles at run time is never reconfigured | **Open decision** (D-5); the code matches M-2a |
+| 4 | A sensor that power-cycles at run time is never reconfigured | **Fixed in Rev 2.16** (M-2b): persistent not-ready samples set the fault flag, and the re-probe reconfigures the sensor. NACKs are deliberately excluded, to keep M-16a and V-6 |
 | 5 | Toolchain fallback could pick a RISC-V toolchain | **Fixed.** Only folders starting with a digit are considered, and a warning names the version used |
 | 6 | One unnecessary TX interrupt when a transfer finished during the copy | **Fixed, and extended.** The model then exposed a second path (ISR between the head update and the final critical section). The interrupt is now enabled only if the running transfer doesn't cover everything queued |
 | 7 | `tx_model.py` differed from the C code | **Fixed.** The model mirrors the C functions, including `link_tx_free()`, asserts no stale completion latch, and asserts the interrupt only fires with data queued |

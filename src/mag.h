@@ -69,6 +69,9 @@ typedef struct {
  * running for the UARTs (M-6). Returns false on fault. */
 bool mag_init(void);
 
+/* True while the sensor is not confirmed and configured: after a failed
+ * start-up check (M-2), or at run time after persistent not-ready samples
+ * (M-2b), until a re-probe succeeds (M-2a). */
 bool mag_fault(void);
 
 /* M-13: copy the latest sample in a short critical section. Main loop only.

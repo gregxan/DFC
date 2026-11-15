@@ -299,6 +299,11 @@ To check that:
 3. On the analyzer, confirm the 9th byte of each read (Status) is `0x01`
    (Meas_M_Done set).
 
+Since Rev 2.16, persistent not-ready samples also set the fault flag
+(M-2b). If triggered 1 kHz sampling can't complete in time, you'll see
+`runtime_fault` and `recovered` both climbing, about once every 15–20 ms,
+as the firmware reconfigures and faults again.
+
 If `not_ready` is non-zero, the 1 kHz triggered design doesn't hold. The
 fallback is continuous mode (`CM_Freq = 111`), which needs a spec change.
 
@@ -428,3 +433,22 @@ the soak on one port.
 3. **Bus clear with an active controller (M-16).** During the V-6 SDA-short
    test, `missed_tick` must stop rising within 4 ms of release every time;
    a stall would show as `missed_tick` rising ~1000/s indefinitely.
+
+## Sensor power-cycle at run time (M-2b, Rev 2.16)
+
+This needs a way to switch the magnetometer's VDD while leaving SDA and SCL
+connected, e.g. a jumper in its supply wire.
+
+1. With sampling running normally (`MAG fault=0`, `valid` rising ~1000/s),
+   note `runtime_fault`, `recovered`, `not_ready` and the x/y/z values.
+2. Remove the sensor's power for about a second, then restore it.
+3. While power is off: `i2c_error` rises ~1000/s (NACKs), and `fault`
+   stays 0.
+4. After power returns:
+   - `runtime_fault` +1 and `recovered` +1;
+   - `not_ready` rises by roughly 10–15, then stops;
+   - `valid` resumes within 50 ms, and x/y/z return to their earlier
+     values;
+   - `CAL offset_cal` +1 (the recovery re-calibrates);
+   - no UART counters change.
+5. Repeat 20 times.
