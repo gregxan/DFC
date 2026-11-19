@@ -265,6 +265,13 @@ UART-related interrupt (B-20).
   anything. Most terminals (PuTTY, `fwstatus.py`) do this automatically.
 - **Report timing:** one report per second, starting about a second after
   the port is opened.
+- **Two formats.** By default the board prints a **readable report**, so any
+  serial terminal (PuTTY, Tera Term, the VS Code serial monitor) shows
+  labelled sections for the UARTs, the magnetometer and timing. Each report
+  ends with `STATUS: all checks OK` or an `ATTENTION:` list. Type `m` in the
+  terminal for compact machine lines (`GROUP key=value`), or `h` to go back.
+  The change applies from the next report. `fwstatus.py` and `soak_test.py`
+  send `m` themselves when they connect.
 
 Read it with:
 

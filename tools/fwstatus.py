@@ -1,6 +1,9 @@
 """Reader for the firmware's USB CDC status lines (diag / diag-pattern builds).
 
-Each second the firmware emits seven lines:
+The firmware prints a readable report by default, for any serial terminal.
+This tool sends 'm' when it connects to switch the firmware to compact
+machine lines, which it parses and shows as a dashboard. In machine
+format, each second the firmware emits seven lines:
 
     STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=.. status_max_us=.. tick_overrun=..
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
@@ -70,8 +73,17 @@ class StatusMonitor:
         self._reports = 0
         self._stop = threading.Event()
         self._log = open(log_path, "a", encoding="utf-8") if log_path else None
+        # The firmware prints a readable report by default; ask for the
+        # machine-readable "GROUP key=value" lines this tool parses.
+        self._request_machine()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def _request_machine(self) -> None:
+        try:
+            self._ser.write(b"m")
+        except serial.SerialException:
+            pass
 
     def _run(self) -> None:
         buf = b""
@@ -82,6 +94,10 @@ class StatusMonitor:
                 line = raw.decode("ascii", "replace")
                 if self._log:
                     self._log.write(f"{time.time():.3f} {line.strip()}\n")
+                if line.startswith("=====") or line.startswith("\r====="):
+                    # A readable-format header: the board missed (or was reset
+                    # since) the request for machine format. Ask again.
+                    self._request_machine()
                 parsed = parse_line(line)
                 if parsed:
                     group, values = parsed
@@ -298,7 +314,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("port", help="USB CDC port of the firmware, e.g. COM7")
     ap.add_argument("--log", help="append every line, timestamped, to this file")
-    ap.add_argument("--raw", action="store_true", help="print the firmware's lines unchanged")
+    ap.add_argument("--raw", action="store_true", help="print the firmware's machine-format lines unchanged")
     ap.add_argument("--scroll", action="store_true", help="print each report below the last "
                     "instead of redrawing the screen")
     args = ap.parse_args()
