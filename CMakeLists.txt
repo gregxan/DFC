@@ -104,6 +104,10 @@ if(APP_USB_STATUS)
         # Never let a full CDC buffer stall the main loop for long.
         PICO_STDIO_USB_STDOUT_TIMEOUT_US=0
         PICO_STDIO_DEFAULT_CRLF=0
+        # The SDK's default CDC TX buffer is 64 bytes at full speed; status
+        # lines are up to ~200. status.c sends lines in pieces either way;
+        # a larger buffer just takes fewer pieces.
+        CFG_TUD_CDC_TX_BUFSIZE=256
     )
 else()
     pico_enable_stdio_usb(firmware 0)

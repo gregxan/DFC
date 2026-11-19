@@ -37,8 +37,9 @@ extern volatile uint32_t g_app_rx_pattern_errors[2];
 static uint32_t s_total[DIAG_COUNT]; /* cumulative since boot */
 static uint64_t s_next_us;
 static unsigned s_line = N_LINES;    /* N_LINES = nothing pending */
-static char s_buf[240]; /* < the 256-byte CDC TX buffer, so every line fits */
-static int s_len;
+static char s_buf[240];
+static int s_len; /* length of the line in s_buf; 0 = none pending */
+static int s_off; /* bytes of it already handed to USB */
 static uint32_t s_seq;
 
 void status_init(void) {
@@ -165,6 +166,7 @@ void status_poll(void) {
     }
     if (s_len == 0) {
         s_len = format_line(s_line);
+        s_off = 0;
         if (s_len <= 0 || s_len >= (int)sizeof s_buf) {
             s_len = 0;
             s_line++;
@@ -172,17 +174,30 @@ void status_poll(void) {
         }
         return; /* format and send on separate iterations to bound loop time */
     }
+    /* The host must have the port open with DTR asserted (most terminals
+     * do this automatically); otherwise the report is dropped. */
     if (!tud_cdc_connected()) {
         s_len = 0;
         s_line = N_LINES; /* drop this report */
         return;
     }
-    if ((int)tud_cdc_write_available() < s_len) {
-        return; /* try again next iteration */
+    /* Send as much of the line as the CDC TX buffer has room for now, and
+     * the rest on later passes. Never waits: a line can be longer than the
+     * whole buffer (64 bytes by default at USB full speed). */
+    int avail = (int)tud_cdc_write_available();
+    if (avail <= 0) {
+        return; /* try again next pass */
     }
-    stdio_put_string(s_buf, s_len, false, false);
-    s_len = 0;
-    s_line++;
+    int n = s_len - s_off;
+    if (n > avail) {
+        n = avail;
+    }
+    stdio_put_string(s_buf + s_off, n, false, false);
+    s_off += n;
+    if (s_off >= s_len) {
+        s_len = 0;
+        s_line++;
+    }
 }
 
 #else

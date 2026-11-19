@@ -258,7 +258,15 @@ in `g_diag_max_cycles[]`, and the high-water marks are in
 
 The `diag` builds enable USB serial. It shows up as a standard COM port with
 the built-in Windows driver. Its interrupt priority sits below every
-UART-related interrupt (B-20). Read it with:
+UART-related interrupt (B-20).
+
+- **Baud rate:** any. The baud setting has no effect on a USB serial port.
+- **DTR:** the port must be opened with DTR on, or the firmware won't send
+  anything. Most terminals (PuTTY, `fwstatus.py`) do this automatically.
+- **Report timing:** one report per second, starting about a second after
+  the port is opened.
+
+Read it with:
 
 ```bash
 py tools\fwstatus.py COM7
