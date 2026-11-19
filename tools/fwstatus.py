@@ -18,14 +18,20 @@ User application builds (diag-user) add:
 Test application builds (diag, diag-pattern) also show pattern_err on L0/L1
 and valid/invalid/gaps/stale on MAG.
 
-Counters are cumulative since boot. Run standalone to print them:
+Counters are cumulative since boot. Run standalone for a readable dashboard
+that redraws each second, with per-report changes (+n) and plain-language
+health checks (colour where the console supports it):
 
     py tools/fwstatus.py COM7
+    py tools/fwstatus.py COM7 --scroll       # one report below the next
+    py tools/fwstatus.py COM7 --raw          # the firmware's own lines
+    py tools/fwstatus.py COM7 --log run.log  # also record every raw line
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -59,6 +65,9 @@ class StatusMonitor:
         self._lock = threading.Lock()
         self._latest: dict[str, dict[str, int]] = {}
         self._first: dict[str, dict[str, int]] = {}
+        self._pending: dict[str, dict[str, int]] = {}
+        self._report: dict[str, dict[str, int]] = {}  # last complete report
+        self._reports = 0
         self._stop = threading.Event()
         self._log = open(log_path, "a", encoding="utf-8") if log_path else None
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -79,6 +88,15 @@ class StatusMonitor:
                     with self._lock:
                         self._latest[group] = values
                         self._first.setdefault(group, dict(values))
+                        if group == "STAT":
+                            self._pending = {}
+                        self._pending[group] = values
+                        # A report ends with TIM_NS (test applications) or
+                        # PROF (user application, mode=2).
+                        last = "PROF" if self._pending.get("STAT", {}).get("mode") == 2 else "TIM_NS"
+                        if group == last and "STAT" in self._pending:
+                            self._report = dict(self._pending)
+                            self._reports += 1
 
     def latest(self) -> dict[str, dict[str, int]]:
         with self._lock:
@@ -89,14 +107,21 @@ class StatusMonitor:
             return {k: dict(v) for k, v in self._first.items()}
 
     def wait_for_report(self, timeout: float = 5.0) -> bool:
+        """Wait until a new *complete* report (all of its lines) has arrived."""
         end = time.time() + timeout
-        start_seq = self.latest().get("STAT", {}).get("seq")
+        with self._lock:
+            start = self._reports
         while time.time() < end:
-            seq = self.latest().get("STAT", {}).get("seq")
-            if seq is not None and seq != start_seq and "TIM_NS" in self.latest():
-                return True
-            time.sleep(0.1)
+            with self._lock:
+                if self._reports != start:
+                    return True
+            time.sleep(0.05)
         return False
+
+    def report(self) -> dict[str, dict[str, int]]:
+        """The most recent complete report."""
+        with self._lock:
+            return {k: dict(v) for k, v in self._report.items()}
 
     def close(self) -> None:
         self._stop.set()
@@ -118,18 +143,184 @@ def format_report(s: dict[str, dict[str, int]]) -> str:
     return "\n".join(out)
 
 
+# ----------------------------------------------------------------- dashboard
+
+_RESET, _RED, _YEL, _GRN, _DIM, _BOLD = "\x1b[0m", "\x1b[31m", "\x1b[33m", "\x1b[32m", "\x1b[2m", "\x1b[1m"
+_MODES = {0: "echo test", 1: "pattern test", 2: "user application"}
+
+
+def _paint(text: str, colour: str, use: bool) -> str:
+    return f"{colour}{text}{_RESET}" if use else text
+
+
+def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | None, colour: bool) -> str:
+    """Human-readable view of one report. `prev` (the previous report) gives
+    per-report changes, shown as (+n)."""
+    def g(group: str, key: str, default: int = 0) -> int:
+        return cur.get(group, {}).get(key, default)
+
+    def d(group: str, key: str) -> int:
+        if prev is None:
+            return 0
+        return g(group, key) - prev.get(group, {}).get(key, 0)
+
+    def count(group: str, key: str, bad_if_rising: bool = True) -> str:
+        v, dv = g(group, key), d(group, key)
+        txt = f"{v}" + (f" (+{dv})" if dv else "")
+        if bad_if_rising and dv:
+            return _paint(txt, _RED, colour)
+        if bad_if_rising and v:
+            return _paint(txt, _YEL, colour)
+        return txt
+
+    def limit(v: int, lim: int, unit: str) -> str:
+        txt = f"{v} {unit}"
+        return _paint(txt, _RED, colour) if v > lim else txt
+
+    ok = _paint("OK", _GRN, colour)
+    lines: list[str] = []
+    problems: list[str] = []
+    mode = g("STAT", "mode", -1)
+    t_s = g("STAT", "t_ms") // 1000
+    lines.append(_paint(f"DFC status  #{g('STAT', 'seq')}   up {t_s // 3600:02d}:{t_s // 60 % 60:02d}:{t_s % 60:02d}"
+                        f"   {_MODES.get(mode, f'mode {mode}')}", _BOLD, colour))
+    baud_ok = g("STAT", "baud_ok") == 1
+    lines.append(f"  baud  UART0 {g('STAT', 'baud0')}  UART1 {g('STAT', 'baud1')}  "
+                 + (ok if baud_ok else _paint("OUT OF TOLERANCE", _RED, colour)))
+    if not baud_ok:
+        problems.append("UART baud rate outside tolerance (U-2)")
+
+    # UARTs
+    lines.append("")
+    lines.append(_paint(f"  {'UART':<14}{'UART0':>14}{'UART1':>14}", _BOLD, colour))
+    rows = [("rx_overflow", "RX overflows"), ("tx_reject", "TX rejects"), ("framing", "framing err"),
+            ("break", "breaks"), ("overrun", "HW overruns")]
+    if "pattern_err" in cur.get("L0", {}):
+        rows.append(("pattern_err", "pattern err"))
+    for key, label in rows:
+        lines.append(f"  {label:<14}{count('L0', key):>14}{count('L1', key):>14}")
+        for k in ("L0", "L1"):
+            if d(k, key):
+                problems.append(f"{'UART0' if k == 'L0' else 'UART1'} {label} rising")
+    for key, label in (("rx_hwm", "RX high-water"), ("tx_hwm", "TX high-water")):
+        lines.append(f"  {label:<14}{g('L0', key):>14}{g('L1', key):>14}")
+    lines.append(f"  {'TX interrupts':<14}{g('L0', 'tx_irq'):>14}{g('L1', 'tx_irq'):>14}")
+
+    # Magnetometer
+    lines.append("")
+    fault = g("MAG", "fault") == 1
+    if fault:
+        if d("MAG", "pid_fault") > 0 or (prev is None and g("MAG", "pid_fault") > 0):
+            why = "not detected: no answer or wrong product ID (re-probing at 5 Hz)"
+        elif d("MAGS", "runtime_fault") > 0:
+            why = "faulted at run time on not-ready samples; reconfiguring"
+        else:
+            why = "fault flag set"
+        state = _paint("FAULT - " + why, _RED, colour)
+        problems.append("magnetometer " + why)
+    else:
+        state = ok
+    lines.append(_paint("  MAGNETOMETER  ", _BOLD, colour) + state)
+    if "valid" in cur.get("MAG", {}):
+        dv = d("MAG", "valid")
+        rate = (f"  (+{dv} this report" + ("" if fault else ", expect ~1000") + ")") if prev is not None else ""
+        lines.append(f"  valid samples  {g('MAG', 'valid')}{rate}")
+        lines.append(f"  invalid {count('MAG', 'invalid', False)}   gaps {count('MAG', 'gaps')}   "
+                     f"stale {count('MAG', 'stale', False)}")
+        if d("MAG", "gaps"):
+            problems.append("magnetometer sample gaps")
+    lines.append(f"  i2c errors {count('MAG', 'i2c_error')}   timeouts {count('MAG', 'timeout')}   "
+                 f"missed ticks {count('MAG', 'missed_tick')}")
+    lines.append(f"  product-ID faults {count('MAG', 'pid_fault', False)}   bus clears {g('MAG', 'bus_clear')}   "
+                 f"recoveries {g('MAGS', 'recovered')}   run-time faults {count('MAGS', 'runtime_fault')}")
+    lines.append(f"  not ready {count('MAGS', 'not_ready')}   saturated {count('CAL', 'saturated', False)}")
+    if not fault:
+        for key, label in (("i2c_error", "I2C errors"), ("timeout", "timeouts"), ("missed_tick", "missed ticks")):
+            if d("MAG", key):
+                problems.append(f"magnetometer {label} rising")
+        if d("MAGS", "not_ready"):
+            problems.append("magnetometer samples read before the measurement finished (not ready)")
+    sr = {0: "single cycle", 1: f"SET pulse every {g('MAGS', 'sr_interval')}"}.get(g("MAGS", "sr_mode"), "?")
+    lines.append(f"  field x {g('MAGS', 'x'):>8}  y {g('MAGS', 'y'):>8}  z {g('MAGS', 'z'):>8}  counts (16384/G)"
+                 f"   SET/RESET: {sr}")
+    cal = "valid" if g("CAL", "offset_valid") == 1 else _paint("not calibrated", _YEL, colour)
+    lines.append(f"  offset x {g('CAL', 'ox'):>8}  y {g('CAL', 'oy'):>8}  z {g('CAL', 'oz'):>8}   "
+                 f"{cal}, {g('CAL', 'offset_cal')} calibrations")
+
+    # Timing
+    lines.append("")
+    lines.append(_paint("  TIMING (worst case since boot)", _BOLD, colour))
+    t = cur.get("TIM_NS", {})
+    isr = max([t.get(k, 0) for k in ("isr_uart0", "isr_uart1", "isr_txdma", "isr_i2c", "isr_tick")] or [0])
+    api = max([t.get(k, 0) for k in ("api_read", "api_write", "api_mag")] or [0])
+    lines.append(f"  interrupt handler {limit(isr, 5000, 'ns')} (<= 5000)   critical section "
+                 f"{limit(t.get('crit', 0), 2000, 'ns')} (<= 2000)   API {limit(api, 2000, 'ns')} (<= 2000)")
+    if isr > 5000 or t.get("crit", 0) > 2000 or api > 2000:
+        problems.append("a handler, critical-section or API time is over its limit (EX-3/4/7)")
+    if mode == 2:
+        e = cur.get("EPOCH", {})
+        lines.append(f"  epoch work last {e.get('last_us', 0)} us  avg {e.get('avg_us', 0)} us  max "
+                     f"{limit(e.get('max_us', 0), 999, 'us')} (< 1000)   start latency max {e.get('start_max_us', 0)} us")
+        lines.append(f"  epoch overruns {count('EPOCH', 'overrun')}   tick overruns {count('STAT', 'tick_overrun')}")
+        if e.get("max_us", 0) > 999 or d("EPOCH", "overrun"):
+            problems.append("epoch work over 1 ms (EX-8)")
+        p = cur.get("PROF", {})
+        secs = sorted({k.rsplit("_", 1)[0] for k in p})
+        if secs:
+            lines.append("  sections (last/max/avg us): " + "   ".join(
+                f"{n} {p.get(n + '_last', 0)}/{p.get(n + '_max', 0)}/{p.get(n + '_avg', 0)}" for n in secs))
+    else:
+        lines.append(f"  main-loop pass max {limit(g('STAT', 'loop_max_us'), 999, 'us')} (< 1000)   "
+                     f"tick overruns {count('STAT', 'tick_overrun')}")
+        if g("STAT", "loop_max_us") > 999:
+            problems.append("main-loop pass over 1 ms (EX-8)")
+    if d("STAT", "tick_overrun"):
+        problems.append("tick overruns (M-6a)")
+
+    lines.append("")
+    if problems:
+        lines.append(_paint("  ATTENTION", _RED, colour))
+        lines.extend("   - " + x for x in problems)
+    else:
+        lines.append("  " + _paint("All checks OK", _GRN, colour))
+    return "\n".join(lines)
+
+
+def _enable_ansi() -> bool:
+    if not sys.stdout.isatty():
+        return False
+    if os.name == "nt":
+        os.system("")  # enables ANSI escape processing in the Windows console
+    return True
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("port", help="USB CDC port of the firmware, e.g. COM7")
     ap.add_argument("--log", help="append every line, timestamped, to this file")
+    ap.add_argument("--raw", action="store_true", help="print the firmware's lines unchanged")
+    ap.add_argument("--scroll", action="store_true", help="print each report below the last "
+                    "instead of redrawing the screen")
     args = ap.parse_args()
+    ansi = _enable_ansi()
     mon = StatusMonitor(args.port, args.log)
+    prev = None
     try:
         while True:
-            if mon.wait_for_report(5.0):
-                print(format_report(mon.latest()), "\n", flush=True)
+            if not mon.wait_for_report(5.0):
+                print("(no status report in 5 s: is the diag build running and the port opened with DTR?)",
+                      file=sys.stderr)
+                continue
+            cur = mon.report()
+            if args.raw:
+                print(format_report(cur), "\n", flush=True)
             else:
-                print("(no status report in 5 s)", file=sys.stderr)
+                text = render(cur, prev, ansi)
+                if ansi and not args.scroll:
+                    print("\x1b[H\x1b[2J" + text, flush=True)  # redraw in place
+                else:
+                    print(text + "\n", flush=True)
+            prev = cur
     except KeyboardInterrupt:
         pass
     finally:

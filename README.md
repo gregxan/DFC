@@ -272,6 +272,13 @@ Read it with:
 py tools\fwstatus.py COM7
 ```
 
+This shows a dashboard that redraws once a second. It's grouped into UARTs,
+magnetometer and timing, shows per-report changes as `(+n)`, and ends with
+an **ATTENTION** list in plain language for anything wrong. Options:
+- `--scroll`: print each report below the last instead of redrawing.
+- `--raw`: show the firmware's own lines.
+- `--log run.log`: record every raw line with a timestamp.
+
 ## Writing your application
 
 Your code goes in **`src/app_user.c`**. `main.c` initialises everything and
