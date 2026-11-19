@@ -91,8 +91,20 @@ Leave the magnetometer unconnected (or connect it; see "Expected values").
 | `TIM_NS` `isr_*` | **≤ 5000** | EX-4 (nanoseconds) |
 | `TIM_NS` `crit` | **≤ 2000** | EX-3 |
 | `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 2000** | EX-7 (copy time excluded) |
-| `MAG` without a sensor | `fault=1`; `pid_fault` rising ~5/s; `i2c_error`, `timeout` and `missed_tick` not rising; `MAGS recovered=0` | the 5 Hz re-probe (M-2a), with **no effect on any UART counter** |
+| `MAG` without a sensor | `fault=1`; `no_ack` (and `pid_fault`) rising ~5/s, `wrong_id` not rising; `cause=1`; `i2c_error`, `timeout` and `missed_tick` not rising; `MAGS recovered=0` | the 5 Hz re-probe (M-2a), with **no effect on any UART counter** |
 | `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s; `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
+
+While `fault=1`, `MAG cause=` says why (Rev 2.17). The readable report
+spells it out:
+
+| `cause` | Meaning | Look at |
+|---|---|---|
+| 1 | no answer at address 0x30 | sensor power, SDA/SCL wiring, pull-ups |
+| 2 | wrong product ID; `id=` is the byte read | 0x00 or 0xFF: bus or wiring problem. Anything else: a different device at 0x30 |
+| 3 | I2C bus error (data NACK, arbitration lost, unexpected STOP, timeout) | a line held low, noise, missing pull-ups |
+| 4 | OTP not loaded after the start-up reset | the sensor itself |
+| 5 | a start-up configuration write failed | an intermittent connection |
+| 6 | run-time fault: persistent not-ready samples (M-2b) | sensor power dropouts |
 
 A UART with nothing wired to its RX shows all zero counters and
 `pattern_err=0`, because it receives nothing (the pull-up holds the line
@@ -256,7 +268,7 @@ while UART traffic runs (`soak_test.py`).
 |---|---|
 | Disconnect the magnetometer (SDA/SCL) | `MAG i2c_error` rises (~1000/s, NACK). L0/L1 counters and the soak data stay clean. |
 | Short SDA to GND for 1 s, then release | `i2c_error + timeout` rises by ≥ 300; zero UART errors. After release, `valid` resumes within 4 ms. Capture SDA, SCL and a test pin to time it (see below). `bus_clear` shows how many PIO bus clears ran. |
-| Power up with the magnetometer unplugged, then plug it in after a few seconds | `MAG fault=1` and `pid_fault` rising ~5/s. Within 250 ms of plugging in: `fault=0`, `MAGS recovered` +1, `valid` rising ~1000/s. The UARTs stay clean throughout. |
+| Power up with the magnetometer unplugged, then plug it in after a few seconds | `MAG fault=1`, `cause=1` (readable report: "no answer at address 0x30") and `no_ack` rising ~5/s. Within 250 ms of plugging in: `fault=0`, `MAGS recovered` +1, `valid` rising ~1000/s. The UARTs stay clean throughout. |
 | Reset the MCU from the debugger (or tap RESET) while running, ≥ 100 times. A script can loop `openocd ... -c "init; reset run; exit"` with random delays. | After every boot, `MAG fault=0` and `valid` rises. The startup bus clear shows as `bus_clear` = 1 right after boot. |
 | Hold one UART's RX low (break), or leave it unconnected | That UART's framing/break counts rise, at most 1/ms per type. The other UART's soak data is byte-exact and `MAG gaps` stays 0. |
 | Stall the main loop (break in the debugger, or add a temporary `busy_wait_ms(200)` to a test build) | Each UART's `rx_overflow` increments once per overrun episode, and `rx_hwm` = 8192 (the ring size). |

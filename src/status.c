@@ -104,13 +104,16 @@ static int format_line(unsigned line) {
     }
     case 3:
         return snprintf(s_buf, n, "MAG fault=%u i2c_error=%" PRIu32 " missed_tick=%" PRIu32 " timeout=%" PRIu32
-                        " pid_fault=%" PRIu32 " bus_clear=%" PRIu32
+                        " pid_fault=%" PRIu32 " no_ack=%" PRIu32 " wrong_id=%" PRIu32 " cause=%u id=0x%02X"
+                        " bus_clear=%" PRIu32
 #if APP_MODE != APP_MODE_USER
                         " valid=%" PRIu32 " invalid=%" PRIu32 " gaps=%" PRIu32 " stale=%" PRIu32
 #endif
                         "\r\n",
                         (unsigned)mag_fault(), s_total[DIAG_MAG_I2C_ERROR], s_total[DIAG_MAG_MISSED_TICK],
-                        s_total[DIAG_MAG_TIMEOUT], s_total[DIAG_MAG_PRODUCT_ID_FAULT], s_total[DIAG_MAG_BUS_CLEAR]
+                        s_total[DIAG_MAG_TIMEOUT], s_total[DIAG_MAG_NO_ACK] + s_total[DIAG_MAG_WRONG_ID],
+                        s_total[DIAG_MAG_NO_ACK], s_total[DIAG_MAG_WRONG_ID], (unsigned)mag_fault_cause(),
+                        (unsigned)mag_fault_id(), s_total[DIAG_MAG_BUS_CLEAR]
 #if APP_MODE != APP_MODE_USER
                         , g_app_mag_valid, g_app_mag_invalid, g_app_mag_gaps, g_app_mag_stale
 #endif
@@ -311,12 +314,34 @@ static int format_human(unsigned line) {
         if (!mag_fault()) {
             return snprintf(s_buf, n, "MAGNETOMETER   OK\r\n");
         }
-        if (s_delta[DIAG_MAG_RUNTIME_FAULT] != 0u) {
+        switch (mag_fault_cause()) {
+        case MAG_CAUSE_NO_ACK:
+            return snprintf(s_buf, n, "MAGNETOMETER   FAULT - no answer at address 0x%02X (check power, SDA/SCL "
+                                      "wiring, pull-ups); re-probing 5 times a second\r\n",
+                            (unsigned)MAG_I2C_ADDR);
+        case MAG_CAUSE_WRONG_ID: {
+            unsigned id = mag_fault_id();
+            return snprintf(s_buf, n, "MAGNETOMETER   FAULT - wrong product ID: read 0x%02X, expected 0x%02X (%s); "
+                                      "re-probing 5 times a second\r\n",
+                            id, (unsigned)MMC_PRODUCT_ID,
+                            (id == 0x00u || id == 0xFFu) ? "likely a bus or wiring problem"
+                                                         : "a different device at this address?");
+        }
+        case MAG_CAUSE_BUS_ERROR:
+            return snprintf(s_buf, n, "MAGNETOMETER   FAULT - I2C bus error (line held low, noise, or no "
+                                      "pull-ups); re-probing 5 times a second\r\n");
+        case MAG_CAUSE_OTP_NOT_LOADED:
+            return snprintf(s_buf, n, "MAGNETOMETER   FAULT - factory calibration (OTP) not loaded after reset; "
+                                      "re-probing\r\n");
+        case MAG_CAUSE_CONFIG_FAILED:
+            return snprintf(s_buf, n, "MAGNETOMETER   FAULT - configuration write failed; re-probing\r\n");
+        case MAG_CAUSE_NOT_READY:
             return snprintf(s_buf, n, "MAGNETOMETER   FAULT - samples kept arriving unfinished (not ready); "
                                       "reconfiguring\r\n");
+        case MAG_CAUSE_NONE:
+        default:
+            return snprintf(s_buf, n, "MAGNETOMETER   FAULT - re-probing 5 times a second\r\n");
         }
-        return snprintf(s_buf, n, "MAGNETOMETER   FAULT - not detected (no answer, or wrong product ID); "
-                                  "re-probing 5 times a second\r\n");
 #if APP_MODE != APP_MODE_USER
     case H_MAG_SAMPLES:
         return snprintf(s_buf, n, "  Samples      valid %s   invalid %" PRIu32 "   gaps %s   stale %" PRIu32 "\r\n",
@@ -331,9 +356,10 @@ static int format_human(unsigned line) {
                         cell(c, sizeof c, s_total[DIAG_MAG_MISSED_TICK], s_delta[DIAG_MAG_MISSED_TICK]),
                         s_total[DIAG_MAG_BUS_CLEAR]);
     case H_MAG_HEALTH:
-        return snprintf(s_buf, n, "  Health       product-ID faults %s   not ready %s   run-time faults %s   "
+        return snprintf(s_buf, n, "  Health       no answer %s   wrong ID %s   not ready %s   run-time faults %s   "
                                   "recoveries %" PRIu32 "\r\n",
-                        cell(a, sizeof a, s_total[DIAG_MAG_PRODUCT_ID_FAULT], s_delta[DIAG_MAG_PRODUCT_ID_FAULT]),
+                        cell(a, sizeof a, s_total[DIAG_MAG_NO_ACK], s_delta[DIAG_MAG_NO_ACK]),
+                        cell(c, sizeof c, s_total[DIAG_MAG_WRONG_ID], s_delta[DIAG_MAG_WRONG_ID]),
                         cell(b, sizeof b, s_total[DIAG_MAG_NOT_READY], s_delta[DIAG_MAG_NOT_READY]),
                         cell(d, sizeof d, s_total[DIAG_MAG_RUNTIME_FAULT], s_delta[DIAG_MAG_RUNTIME_FAULT]),
                         s_total[DIAG_MAG_RECOVERED]);
@@ -415,8 +441,17 @@ static int format_human(unsigned line) {
         }
 #endif
         if (mag_fault()) {
-            len = attn_add(len, &first, s_delta[DIAG_MAG_RUNTIME_FAULT] ? "magnetometer run-time fault"
-                                                                        : "magnetometer not detected");
+            static const char *const k_attn[] = {
+                [MAG_CAUSE_NONE] = "magnetometer fault",
+                [MAG_CAUSE_NO_ACK] = "magnetometer not answering",
+                [MAG_CAUSE_WRONG_ID] = "magnetometer wrong product ID",
+                [MAG_CAUSE_BUS_ERROR] = "magnetometer I2C bus error",
+                [MAG_CAUSE_OTP_NOT_LOADED] = "magnetometer OTP not loaded",
+                [MAG_CAUSE_CONFIG_FAILED] = "magnetometer configuration failed",
+                [MAG_CAUSE_NOT_READY] = "magnetometer run-time fault",
+            };
+            unsigned cause = (unsigned)mag_fault_cause();
+            len = attn_add(len, &first, k_attn[cause < sizeof k_attn / sizeof k_attn[0] ? cause : 0u]);
         } else {
             if (s_delta[DIAG_MAG_I2C_ERROR] | s_delta[DIAG_MAG_TIMEOUT] | s_delta[DIAG_MAG_MISSED_TICK]) {
                 len = attn_add(len, &first, "magnetometer bus errors");

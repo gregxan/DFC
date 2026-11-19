@@ -334,7 +334,10 @@ START 0x30W 0x2F  RESTART 0x30R b0  STOP                        (~100 us)
   calibration (M-4b). Normal samples follow, and the next one completes
   the calibration.
 - **NACK, mismatch, abort or timeout:** the firmware returns to
-  `MAG_FAULT`. A failed probe counts as a product-ID fault. Neither probes
+  `MAG_FAULT` and records the cause (M-2c, `mag_fault_cause()`). An address
+  NACK on a probe or configuration counts as `no_ack`, a wrong ID byte as
+  `wrong_id` (kept for `mag_fault_id()`), and any other bus cause as an I2C
+  error. Neither probes
   nor configurations count as missed ticks. A configuration failure, or a
   timeout of either kind, uses the normal I2C-error and timeout counters.
 - **Recovery time:** the fault flag clears within 200 ms of the sensor

@@ -64,6 +64,8 @@ static uint32_t s_probe_wait;         /* ticks spent in MAG_FAULT since last pro
 static uint32_t s_not_ready_score;    /* M-2b: leaky score of not-ready samples     */
 static volatile bool s_config_pending;/* probe matched: configure on next tick     */
 static uint8_t s_probe_id;            /* product-ID byte received by DMA           */
+static volatile uint8_t s_cause = MAG_CAUSE_NONE; /* mag_fault_cause_t (Rev 2.17)   */
+static volatile uint8_t s_cause_id;   /* ID byte of the latest WRONG_ID failure    */
 static uint32_t s_probe_cmd[2];
 #define CFG_CMD_LEN 10u
 static uint32_t s_cfg_cmd[CFG_CMD_LEN];
@@ -113,6 +115,14 @@ static volatile bool s_bc_running;
 
 bool mag_fault(void) {
     return s_fault;
+}
+
+mag_fault_cause_t mag_fault_cause(void) {
+    return (mag_fault_cause_t)s_cause;
+}
+
+uint8_t mag_fault_id(void) {
+    return s_cause_id;
 }
 
 /* ------------------------------------------------------------ helpers --- */
@@ -476,8 +486,19 @@ static void __not_in_flash_func(i2c_isr)(void) {
          * (NACK, arbitration loss, ...). An abort whose only cause is our
          * own timeout abort (M-16) was already counted as a timeout. */
         if (src & ABRT_REASON_BITS & ~I2C_IC_TX_ABRT_SOURCE_ABRT_USER_ABRT_BITS) {
-            /* Rev 2.7: a failed re-probe is a failed product-ID check. */
-            diag_inc(s_txn == TXN_PROBE ? DIAG_MAG_PRODUCT_ID_FAULT : DIAG_MAG_I2C_ERROR);
+            /* Rev 2.17: a probe or configuration not acknowledged at the
+             * address means no sensor (no_ack); any other bus-reported
+             * cause is an I2C error. Sample transactions keep counting
+             * every cause as an I2C error (M-15). */
+            bool no_ack = (src & I2C_IC_TX_ABRT_SOURCE_ABRT_7B_ADDR_NOACK_BITS) != 0u;
+            if (s_txn != TXN_SAMPLE) {
+                s_cause = no_ack ? MAG_CAUSE_NO_ACK : MAG_CAUSE_BUS_ERROR;
+                diag_inc(no_ack ? DIAG_MAG_NO_ACK : DIAG_MAG_I2C_ERROR);
+            } else {
+                diag_inc(DIAG_MAG_I2C_ERROR);
+            }
+        } else if (s_txn != TXN_SAMPLE) {
+            s_cause = MAG_CAUSE_BUS_ERROR; /* our own timeout abort (M-16) */
         }
         s_trig_ok = false;
         if (s_state == MAG_BUSY || s_state == MAG_ABORTING) {
@@ -496,7 +517,10 @@ static void __not_in_flash_func(i2c_isr)(void) {
             if (!(data_done && cmd_done)) {
                 /* Unexpected STOP mid-transaction. */
                 mag_dma_abort();
-                diag_inc(s_txn == TXN_PROBE ? DIAG_MAG_PRODUCT_ID_FAULT : DIAG_MAG_I2C_ERROR);
+                diag_inc(DIAG_MAG_I2C_ERROR);
+                if (s_txn != TXN_SAMPLE) {
+                    s_cause = MAG_CAUSE_BUS_ERROR;
+                }
                 s_trig_ok = false;
                 s_state = MAG_ABORTED;
             } else if (s_txn == TXN_SAMPLE) {
@@ -506,7 +530,9 @@ static void __not_in_flash_func(i2c_isr)(void) {
                     s_config_pending = true; /* configure on the next tick */
                     s_state = MAG_IDLE;
                 } else {
-                    diag_inc(DIAG_MAG_PRODUCT_ID_FAULT);
+                    diag_inc(DIAG_MAG_WRONG_ID);
+                    s_cause_id = s_probe_id;
+                    s_cause = MAG_CAUSE_WRONG_ID;
                     s_probe_wait = 0u;
                     s_state = MAG_FAULT;
                 }
@@ -524,6 +550,7 @@ static void __not_in_flash_func(i2c_isr)(void) {
                 s_since_pulse = 0u;
                 s_pulse_now = false;
                 s_fault = false;
+                s_cause = MAG_CAUSE_NONE;
                 s_not_ready_score = 0u;
                 diag_inc(DIAG_MAG_RECOVERED);
                 s_state = MAG_IDLE;
@@ -560,6 +587,7 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
             s_not_ready_score = 0u;
             s_trig_ok = false;
             s_fault = true;
+            s_cause = MAG_CAUSE_NOT_READY;
             s_probe_wait = MAG_REPROBE_PERIOD_TICKS - 1u;
             s_state = MAG_FAULT;
         } else {
@@ -571,6 +599,9 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
             diag_inc(DIAG_MAG_MISSED_TICK);
         }
         diag_inc(DIAG_MAG_TIMEOUT);
+        if (!sampling) {
+            s_cause = MAG_CAUSE_BUS_ERROR;
+        }
         s_trig_ok = false;
         /* Controller idle (e.g. the command channel never delivered): the
          * DMA abort is all that is needed; no TX_ABRT will come. */
@@ -633,16 +664,43 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
 
 /* --------------------------------------------------------------- init -- */
 
+/* Start-up I2C result (Rev 2.17): the SDK's blocking calls return
+ * PICO_ERROR_GENERIC when the transfer is not acknowledged and
+ * PICO_ERROR_TIMEOUT on a timeout. Address and data NACKs are not told
+ * apart; the 5 Hz re-probe (interrupt path) refines the cause. */
+static int s_init_rc;
+
 static bool reg_write(uint8_t reg, uint8_t val) {
     uint8_t b[2] = {reg, val};
-    return i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, b, 2, false, 5000) == 2;
+    int rc = i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, b, 2, false, 5000);
+    if (rc != 2) {
+        s_init_rc = rc;
+        return false;
+    }
+    return true;
 }
 
 static bool reg_read(uint8_t reg, uint8_t *val) {
-    if (i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, &reg, 1, true, 5000) != 1) {
-        return false;
+    int rc = i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, &reg, 1, true, 5000);
+    if (rc == 1) {
+        rc = i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, val, 1, false, 5000);
+        if (rc == 1) {
+            return true;
+        }
     }
-    return i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, val, 1, false, 5000) == 1;
+    s_init_rc = rc;
+    return false;
+}
+
+/* Record a failed start-up step (Rev 2.17). */
+static void init_bus_fail(void) {
+    if (s_init_rc == PICO_ERROR_TIMEOUT) {
+        s_cause = MAG_CAUSE_BUS_ERROR;
+        diag_inc(DIAG_MAG_I2C_ERROR);
+    } else {
+        s_cause = MAG_CAUSE_NO_ACK;
+        diag_inc(DIAG_MAG_NO_ACK);
+    }
 }
 
 /* Start-up only (blocking allowed): trigger one measurement, wait for it,
@@ -733,12 +791,31 @@ bool mag_init(void) {
     /* M-2: product ID, and (Rev 2.9) factory OTP loaded after the reset. */
     uint8_t id = 0;
     uint8_t st = 0;
-    bool ok = reg_read(MMC_REG_PRODUCT_ID, &id) && id == MMC_PRODUCT_ID;
-    ok = ok && reg_read(MMC_REG_STATUS, &st) && (st & MMC_STATUS_OTP_RD_DONE) != 0u;
+    /* Rev 2.17: each failure records its cause and is counted once. */
+    bool ok = true;
+    if (!reg_read(MMC_REG_PRODUCT_ID, &id)) {
+        init_bus_fail();
+        ok = false;
+    } else if (id != MMC_PRODUCT_ID) {
+        s_cause_id = id;
+        s_cause = MAG_CAUSE_WRONG_ID;
+        diag_inc(DIAG_MAG_WRONG_ID);
+        ok = false;
+    } else if (!reg_read(MMC_REG_STATUS, &st)) {
+        init_bus_fail();
+        ok = false;
+    } else if ((st & MMC_STATUS_OTP_RD_DONE) == 0u) {
+        s_cause = MAG_CAUSE_OTP_NOT_LOADED;
+        ok = false;
+    }
     /* M-3: 800 Hz bandwidth; continuous mode off. */
-    ok = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
-    ok = ok && reg_write(MMC_REG_CTRL2, 0u);
-    ok = ok && reg_write(MMC_REG_CTRL3, 0u);
+    bool cfg = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
+    cfg = cfg && reg_write(MMC_REG_CTRL2, 0u);
+    cfg = cfg && reg_write(MMC_REG_CTRL3, 0u);
+    if (ok && !cfg) {
+        s_cause = MAG_CAUSE_CONFIG_FAILED;
+        ok = false;
+    }
 
     /* M-4 (Rev 2.4): one RESET -> SET cycle at start-up, in every mode,
      * ending in SET so measurements have normal polarity. */
@@ -756,6 +833,9 @@ bool mag_init(void) {
     ok = ok && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_SET);
     sleep_ms(1);
     cal = cal && ok && blocking_measure(m_set);
+    if (!ok && s_cause == MAG_CAUSE_NONE) {
+        s_cause = MAG_CAUSE_CONFIG_FAILED; /* the RESET or SET write failed */
+    }
     if (cal) {
         for (unsigned i = 0; i < 3u; i++) {
             s_offset[i] = (m_set[i] + m_reset[i]) / 2;
@@ -763,11 +843,8 @@ bool mag_init(void) {
         s_offset_valid = true;
         diag_inc(DIAG_MAG_OFFSET_CAL);
     }
-    if (!ok) {
-        /* M-2 (Rev 2.7): fault, but set up everything so the tick can
-         * re-probe at 5 Hz. */
-        diag_inc(DIAG_MAG_PRODUCT_ID_FAULT);
-    }
+    /* M-2 (Rev 2.7): on a fault (cause and count recorded above), set up
+     * everything anyway so the tick can re-probe at 5 Hz. */
     s_probe_cmd[0] = MMC_REG_PRODUCT_ID;                 /* START + W(0x2F)  */
     s_probe_cmd[1] = CMD_RESTART | CMD_READ | CMD_STOP;  /* RESTART R x1 STOP */
     s_cfg_cmd[0] = MMC_REG_CTRL1;

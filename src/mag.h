@@ -65,9 +65,31 @@ typedef struct {
 /* Blocking start-up (before the main loop): bus clear, software reset,
  * product-ID and OTP check (M-2), configuration (M-3) and the first offset
  * calibration (M-4b). On failure the fault flag is set and a product-ID
- * fault is counted; the tick then re-probes at 5 Hz (M-2a) and keeps
+ * fault is counted (no_ack or wrong_id), and
+ * mag_fault_cause() says why; the tick then re-probes at 5 Hz (M-2a) and keeps
  * running for the UARTs (M-6). Returns false on fault. */
 bool mag_init(void);
+
+/* D-1 (Rev 2.17): why the fault flag is set. MAG_CAUSE_NONE while it is
+ * clear. Updated by every failed start-up check, probe or configuration,
+ * so it always describes the latest failure. */
+typedef enum {
+    MAG_CAUSE_NONE = 0,
+    MAG_CAUSE_NO_ACK = 1,         /* nothing acknowledged the address: no sensor,
+                                   * no power, or SDA/SCL wiring               */
+    MAG_CAUSE_WRONG_ID = 2,       /* a device answered with another product ID
+                                   * (the byte is in mag_fault_id())           */
+    MAG_CAUSE_BUS_ERROR = 3,      /* other I2C failure: data NACK, arbitration
+                                   * lost, unexpected STOP, timeout            */
+    MAG_CAUSE_OTP_NOT_LOADED = 4, /* start-up: OTP_Rd_Done clear after SW_RST */
+    MAG_CAUSE_CONFIG_FAILED = 5,  /* start-up: a configuration write failed   */
+    MAG_CAUSE_NOT_READY = 6,      /* run time: persistent not-ready samples (M-2b) */
+} mag_fault_cause_t;
+
+mag_fault_cause_t mag_fault_cause(void);
+
+/* Product-ID byte of the latest MAG_CAUSE_WRONG_ID failure. */
+uint8_t mag_fault_id(void);
 
 /* True while the sensor is not confirmed and configured: after a failed
  * start-up check (M-2), or at run time after persistent not-ready samples

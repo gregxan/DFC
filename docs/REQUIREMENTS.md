@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.16**. The changes since Revision 2 are listed in sections 11 to 26.
+**Revision 2.17**. The changes since Revision 2 are listed in sections 11 to 27.
 
 ## 1. Scope
 
@@ -100,7 +100,9 @@ Firmware for a Seeed XIAO RP2350 that:
   - **M-2a** While the fault flag is set, the timer handler shall re-probe the Product ID every 200 ms (5 Hz), using the magnetometer DMA channels without blocking. *(Added in Rev 2.7.)*
     - On a match, the next tick shall configure the sensor: M-3, Internal Control 2 = 0, then a RESET followed by a TM_M trigger. The post-RESET measurement is the first sample (invalid, M-9) and the RESET half of an offset calibration (M-4b). The first sample transaction carries the SET. The firmware shall then clear the fault flag and resume sampling. *(Amended in Rev 2.9.)*
     - A failed probe or configuration returns to re-probing.
-    - Probe and configuration transactions are not counted as missed ticks. A failed probe is counted as a product-ID fault, not as an I2C error.
+    - Probe and configuration transactions are not counted as missed ticks. A probe, configuration or startup check that is not acknowledged is counted as "no answer". One that reads a product ID other than 0x30 is counted as "wrong ID". Any other bus failure is counted as an I2C error, and a timeout as a timeout. *(Amended in Rev 2.17.)*
+    - **M-2c** While the fault flag is set, firmware shall record why (the fault cause): no answer, wrong product ID (with the byte read), I2C bus error, OTP not loaded, configuration failed, or run-time not-ready fault (M-2b). Each new failure updates it, and it is cleared with the fault flag. *(Added in Rev 2.17.)*
+    - The startup check uses blocking SDK calls, which report "not acknowledged" without telling address and data NACKs apart. Within 200 ms the first re-probe (M-2a) refines the cause.
     - The fault flag is set by the startup check (M-2) and by the run-time check of M-2b. A sensor that stops answering during sampling (NACK, bus fault) is handled by M-15/M-16 as before, at the full tick rate, and does not set the fault flag. *(Amended in Rev 2.16.)*
   - **M-2b** A sensor that loses power and returns answers at its default settings (8 ms measurements), so its samples are read before they finish (M-9, not ready). The firmware shall detect this and set the fault flag, so that the re-probe (M-2a) reconfigures the sensor. *(Added in Rev 2.16.)*
     - Each not-ready sample adds 2 to a score, and each ready sample subtracts 1 (never below 0). When the score reaches 20, the fault flag is set and a run-time fault is counted (D-1). The values are compile-time parameters; a threshold of 0 disables the check.
@@ -176,7 +178,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **D-1** Firmware shall maintain these 32-bit counters:
   - per UART: RX overflows, TX rejects, framing errors, breaks, hardware overruns
-  - magnetometer: I2C errors, missed ticks, timeouts, product ID faults (failed product-ID checks, startup and re-probe), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken), run-time faults (M-2b) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9; run-time faults added in Rev 2.16)*
+  - magnetometer: I2C errors, missed ticks, timeouts, no-answer probes and wrong-ID probes (failed product-ID checks at startup and re-probe, M-2a), bus clears (startup and post-abort), recoveries (re-probes that cleared the fault flag), not-ready samples (Meas_M_Done clear, M-9), offset calibrations (M-4b), saturated samples (a valid sample with any axis within 72 counts of either end of the 18-bit range; informational only, no action is taken), run-time faults (M-2b) *(bus clears added in Rev 2.2; product ID fault redefined and recoveries added in Rev 2.7; not-ready added in Rev 2.8; offset calibrations and saturated added in Rev 2.9; run-time faults added in Rev 2.16; product ID faults split into no answer and wrong ID in Rev 2.17)*
   - scheduling: tick overruns (M-6a) *(added in Rev 2.11)*, epoch overruns (EX-8): user epochs that started late because the previous epoch's work ran past its tick, plus epochs skipped entirely *(added in Rev 2.14; skipped epochs included in Rev 2.15)*
 - **D-2** Counters shall be incremented without blocking and cleared only by the main loop, using an atomic read-and-clear.
 - **D-3** Each RX and TX queue shall record a high-water mark (the maximum fill level ever reached). *(Rev 2.10 note on direct FIFO writes withdrawn with U-10a in Rev 2.12.)*
@@ -268,7 +270,7 @@ Firmware for a Seeed XIAO RP2350 that:
   - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
   - Changing `g_mag_sr_mode` and `g_mag_sr_interval` from the debugger, while data flows, switches strategy within 1 ms. Each strategy produces the expected pulse pattern on the bus, and there are no UART errors or magnetometer sequence gaps. The only invalid sample is the one after each RESET. *(Added in Rev 2.4.)*
   - Removing and restoring the magnetometer's power while sampling (with the bus still connected) produces one run-time fault and one recovery. Valid samples resume within 50 ms of the sensor answering again, with no UART errors. *(Added in Rev 2.16.)*
-  - Powering up with the magnetometer disconnected sets the fault flag, and the product-ID fault count rises by about 5 per second. Connecting the sensor clears the fault flag within 250 ms, after which valid samples flow. There are no UART errors throughout. *(Added in Rev 2.7.)*
+  - Powering up with the magnetometer disconnected sets the fault flag, the no-answer count rises by about 5 per second, and the reported fault cause is "no answer" *(Amended in Rev 2.17)*. Connecting the sensor clears the fault flag within 250 ms, after which valid samples flow. There are no UART errors throughout. *(Added in Rev 2.7.)*
   - Re-selecting single-cycle mode from the debugger with the sensor still produces one offset calibration (counter +1). Repeating it 10 times with the sensor still gives offsets within ±16 counts (±1 mG, the datasheet's SET/RESET repeatability) per axis. *(Added in Rev 2.9.)*
   - Placing a strong magnet (> 10 G) near the sensor raises the saturated count. After it is removed, valid readings with the offset subtracted return to their previous values within the datasheet's ±1 mG SET/RESET repeatability, once a SET has been applied (pulse mode, or re-selecting single-cycle mode). *(Added in Rev 2.9.)*
   - Resetting the MCU (e.g. from the debugger) while magnetometer transactions are running, repeated at least 100 times, never leaves the magnetometer fault flag set after boot. *(Added in Rev 2.2.)*
@@ -471,3 +473,10 @@ This closes the open decision from the Rev 2.15 review.
 - **Amended D-5.** M-2b is classified as normal operation.
 - **Amended V-6.** Added the sensor power-cycle test.
 - **Not changed:** NACKs and bus faults still retry at the full tick rate and never set the fault flag. Making them do so would break M-16a (resume within 4 ms) and the V-6 SDA-short test (≥ 300 errors and timeouts in 1 s).
+
+## 27. Revision 2.17 Changes
+
+- **Added M-2c.** The magnetometer fault records its cause, so the status report says whether the sensor isn't answering, answered with the wrong product ID (with the byte read), or hit another bus error, OTP or configuration failure.
+- **Amended M-2a and D-1.** The product-ID fault counter is split into "no answer" (address not acknowledged) and "wrong ID". Other bus failures during a probe now count as I2C errors. The USB machine format keeps `pid_fault` as the sum of the two.
+- **Amended V-6.** The disconnected-sensor test checks the no-answer count and the fault cause.
+- **USB status report (diagnostic builds).** The report is readable by default in any terminal. Sending `m` switches to the machine format and `h` switches back.

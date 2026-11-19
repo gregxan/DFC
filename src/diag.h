@@ -28,7 +28,10 @@ typedef enum {
     DIAG_MAG_I2C_ERROR,
     DIAG_MAG_MISSED_TICK,
     DIAG_MAG_TIMEOUT,
-    DIAG_MAG_PRODUCT_ID_FAULT,
+    DIAG_MAG_NO_ACK,    /* D-1 (Rev 2.17): probes / start-up checks not
+                         * acknowledged at the sensor address (no sensor)  */
+    DIAG_MAG_WRONG_ID,  /* D-1 (Rev 2.17): probes / start-up checks that read
+                         * a product ID other than 0x30                    */
     DIAG_MAG_BUS_CLEAR, /* D-1 (Rev 2.2): bus clears, start-up and post-abort */
     DIAG_MAG_RECOVERED, /* D-1 (Rev 2.7): re-probes that cleared the fault flag */
     DIAG_MAG_NOT_READY, /* D-1 (Rev 2.8): samples read with Meas_M_Done clear */

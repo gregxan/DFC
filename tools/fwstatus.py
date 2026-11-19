@@ -8,7 +8,7 @@ format, each second the firmware emits seven lines:
     STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=.. status_max_us=.. tick_overrun=..
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
     L1 ...
-    MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. bus_clear=.. valid=.. ...
+    MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. no_ack=.. wrong_id=.. cause=.. id=0x.. bus_clear=.. ...
     MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=..
     CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
@@ -51,7 +51,7 @@ def parse_line(line: str) -> tuple[str, dict[str, int]] | None:
         if "=" in p:
             k, v = p.split("=", 1)
             try:
-                values[k] = int(v)
+                values[k] = int(v, 0)
             except ValueError:
                 # PROF entries are last/max/avg
                 bits = v.split("/")
@@ -165,6 +165,24 @@ _RESET, _RED, _YEL, _GRN, _DIM, _BOLD = "\x1b[0m", "\x1b[31m", "\x1b[33m", "\x1b
 _MODES = {0: "echo test", 1: "pattern test", 2: "user application"}
 
 
+def _cause_text(cause: int, pid: int) -> str:
+    """Firmware mag_fault_cause_t (Rev 2.17) as text."""
+    if cause == 1:
+        return "no answer at address 0x30 (check power, SDA/SCL wiring, pull-ups); re-probing at 5 Hz"
+    if cause == 2:
+        hint = "likely a bus or wiring problem" if pid in (0x00, 0xFF) else "a different device at this address?"
+        return f"wrong product ID: read 0x{pid:02X}, expected 0x30 ({hint}); re-probing at 5 Hz"
+    if cause == 3:
+        return "I2C bus error (line held low, noise, or no pull-ups); re-probing at 5 Hz"
+    if cause == 4:
+        return "factory calibration (OTP) not loaded after reset; re-probing"
+    if cause == 5:
+        return "configuration write failed; re-probing"
+    if cause == 6:
+        return "faulted at run time on not-ready samples; reconfiguring"
+    return "fault flag set"
+
+
 def _paint(text: str, colour: str, use: bool) -> str:
     return f"{colour}{text}{_RESET}" if use else text
 
@@ -226,12 +244,7 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     lines.append("")
     fault = g("MAG", "fault") == 1
     if fault:
-        if d("MAG", "pid_fault") > 0 or (prev is None and g("MAG", "pid_fault") > 0):
-            why = "not detected: no answer or wrong product ID (re-probing at 5 Hz)"
-        elif d("MAGS", "runtime_fault") > 0:
-            why = "faulted at run time on not-ready samples; reconfiguring"
-        else:
-            why = "fault flag set"
+        why = _cause_text(g("MAG", "cause"), g("MAG", "id"))
         state = _paint("FAULT - " + why, _RED, colour)
         problems.append("magnetometer " + why)
     else:
@@ -247,7 +260,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
             problems.append("magnetometer sample gaps")
     lines.append(f"  i2c errors {count('MAG', 'i2c_error')}   timeouts {count('MAG', 'timeout')}   "
                  f"missed ticks {count('MAG', 'missed_tick')}")
-    lines.append(f"  product-ID faults {count('MAG', 'pid_fault', False)}   bus clears {g('MAG', 'bus_clear')}   "
+    lines.append(f"  no answer {count('MAG', 'no_ack', False)}   wrong ID {count('MAG', 'wrong_id', False)}   "
+                 f"bus clears {g('MAG', 'bus_clear')}   "
                  f"recoveries {g('MAGS', 'recovered')}   run-time faults {count('MAGS', 'runtime_fault')}")
     lines.append(f"  not ready {count('MAGS', 'not_ready')}   saturated {count('CAL', 'saturated', False)}")
     if not fault:
