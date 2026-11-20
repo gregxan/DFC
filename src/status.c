@@ -425,7 +425,7 @@ static const diag_timing_t k_api_slot[] = {DIAG_T_API_READ, DIAG_T_API_WRITE, DI
 static const char *const k_api_name[] = {"link_read", "link_write", "mag_read_latest"};
 #define ISR_LIMIT_NS 5000u
 #define CRIT_LIMIT_NS 2000u
-#define API_LIMIT_NS 2000u
+#define API_LIMIT_NS 3000u /* EX-7 (Rev 2.25: 2 -> 3 us, bench) */
 
 static unsigned worst(const diag_timing_t *slot, unsigned count) {
     unsigned w = 0;

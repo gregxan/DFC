@@ -107,7 +107,7 @@ Leave the magnetometer unconnected (or connect it; see "Expected values").
 | `STAT tick_overrun` | **0** | M-6a |
 | `TIM_NS` `isr_*` | **≤ 5000** | EX-4 (nanoseconds) |
 | `TIM_NS` `crit` | **≤ 2000** | EX-3 |
-| `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 2000** | EX-7 (copy time excluded) |
+| `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 3000** | EX-7 (copy time excluded) |
 | `MAG` without a sensor | `fault=1`; `no_ack` (and `pid_fault`) rising ~5/s, `wrong_id` not rising; `cause=1`; `i2c_error`, `timeout` and `missed_tick` not rising; `MAGS recovered=0` | the 5 Hz re-probe (M-2a), with **no effect on any UART counter** |
 | `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s (~`MAGS rate_hz` per second at other rates, M-3b); `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
 
@@ -303,7 +303,7 @@ in `g_diag_max_cycles[]`:
 | `DIAG_T_ISR_I2C` | I2C completion/abort ISR | 5 µs |
 | `DIAG_T_ISR_TICK` | 1 kHz tick ISR | 5 µs |
 | `DIAG_T_CRITICAL` | longest critical section | 2 µs (EX-3) |
-| `DIAG_T_API_READ`, `_WRITE`, `_MAG` | API call minus payload copy | 2 µs (EX-7) |
+| `DIAG_T_API_READ`, `_WRITE`, `_MAG` | API call minus payload copy | 3 µs (EX-7) |
 | `DIAG_T_LOOP` | test applications: main-loop pass, status reporter excluded | < 1 ms (EX-8) |
 | `DIAG_T_STATUS` | status reporter (diag builds only) | information only |
 

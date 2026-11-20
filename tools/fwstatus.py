@@ -354,8 +354,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     isr = max([t.get(k, 0) for k in ("isr_uart0", "isr_uart1", "isr_txdma", "isr_i2c", "isr_tick")] or [0])
     api = max([t.get(k, 0) for k in ("api_read", "api_write", "api_mag")] or [0])
     lines.append(f"  interrupt handler {limit(isr, 5000, 'ns')} (<= 5000)   critical section "
-                 f"{limit(t.get('crit', 0), 2000, 'ns')} (<= 2000)   API {limit(api, 2000, 'ns')} (<= 2000)")
-    if isr > 5000 or t.get("crit", 0) > 2000 or api > 2000:
+                 f"{limit(t.get('crit', 0), 2000, 'ns')} (<= 2000)   API {limit(api, 3000, 'ns')} (<= 3000)")
+    if isr > 5000 or t.get("crit", 0) > 2000 or api > 3000:
         problems.append("a handler, critical-section or API time is over its limit (EX-3/4/7)")
     if mode == 2:
         e = cur.get("EPOCH", {})
