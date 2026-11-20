@@ -25,10 +25,20 @@
  *   FINISH (0x12) -> checks that every block arrived and that the CRC of
  *                    the whole image matches. Only then does it write the
  *                    first sector (the image's start block, so a partial
- *                    image never becomes bootable), reply, and do a flash
- *                    update boot of the new slot. The bootrom then erases
- *                    the old slot's first sector (step 3: no trial boot yet).
- *   REBOOT (0x7F) -> reply, then reboot into the current firmware.
+ *                    image never becomes bootable), reply, and boot the new
+ *                    slot ON TRIAL (step 5): the updater sets the image's
+ *                    try-before-you-buy flag in the copy it writes, sets
+ *                    the boot flag for this link, and does a flash update
+ *                    boot. The new image comes up in its own updater under
+ *                    the bootrom's 16.7 s watchdog.
+ *   CONFIRM (0x13) (trial only) -> makes the trial image permanent
+ *                    (explicit_buy: the bootrom erases the old slot's first
+ *                    sector), replies, and reboots into the application.
+ *                    Without CONFIRM the watchdog fires and the bootrom
+ *                    boots the old image again.
+ *   REBOOT (0x7F) -> reply, then reboot (during a trial: the old image
+ *                    boots).
+ * During a trial only HELLO, CONFIRM and REBOOT are accepted.
  * Blocks may be sent again (each write starts with an erase); send them in
  * any order.
  */
@@ -86,15 +96,24 @@ uint32_t updater_rejects(void) {
     return s_rejects;
 }
 
+static void set_boot_flag(uint32_t link) {
+    powman_hw->scratch[FLAG_KEY_LO] = BOOT_KEY_LO;
+    powman_hw->scratch[FLAG_KEY_HI] = BOOT_KEY_HI;
+    powman_hw->scratch[FLAG_LINK] = link;
+    powman_hw->scratch[FLAG_CHECK] = flag_check(BOOT_KEY_LO, BOOT_KEY_HI, link);
+}
+
+bool updater_trial_pending(void) {
+    boot_info_t bi;
+    return rom_get_boot_info(&bi) && (bi.tbyb_and_update_info & BOOT_TBYB_AND_UPDATE_FLAG_BUY_PENDING) != 0u;
+}
+
 bool updater_request(updater_link_t link, uint64_t key) {
     if (key != UPDATER_REQUEST_KEY || !link_ok((uint32_t)link)) {
         s_rejects++;
         return false;
     }
-    powman_hw->scratch[FLAG_KEY_LO] = BOOT_KEY_LO;
-    powman_hw->scratch[FLAG_KEY_HI] = BOOT_KEY_HI;
-    powman_hw->scratch[FLAG_LINK] = (uint32_t)link;
-    powman_hw->scratch[FLAG_CHECK] = flag_check(BOOT_KEY_LO, BOOT_KEY_HI, (uint32_t)link);
+    set_boot_flag((uint32_t)link);
 #if APP_USB_STATUS
     crash_disarm(); /* an intended reboot, not a hang (D-9) */
 #endif
@@ -236,6 +255,7 @@ enum {
     UPD_CMD_BEGIN = 0x10,
     UPD_CMD_DATA = 0x11,
     UPD_CMD_FINISH = 0x12,
+    UPD_CMD_CONFIRM = 0x13,
     UPD_CMD_REBOOT = 0x7F,
     UPD_RSP_ERROR = 0xFF,
 };
@@ -255,6 +275,10 @@ enum {
     UPD_ERR_TOO_BIG = 11,    /* image larger than the slot (detail: slot size) */
     UPD_ERR_NO_INFO = 12,    /* image has no updater info block             */
     UPD_ERR_OLD_UPDATER = 13, /* image's updater protocol below the floor (detail: its protocol) */
+    UPD_ERR_TRIAL = 14,      /* command not allowed during a trial boot     */
+    UPD_ERR_NOT_TRIAL = 15,  /* CONFIRM, but this image is not on trial      */
+    UPD_ERR_BUY = 16,        /* explicit_buy failed (detail: bootrom code)  */
+    UPD_ERR_IMAGE_DEF = 17,  /* image's start block not found, or hashed/signed (cannot set the trial flag) */
 };
 
 #define UPD_BOARD_ID "DFC-XIAO-RP2350"
@@ -384,7 +408,8 @@ static const upd_port_t k_usb_port = {usb_init, usb_read, usb_write, usb_connect
 static const upd_port_t *s_port;
 static updater_link_t s_link;
 static uint8_t s_rx[UPD_MAX_PAYLOAD];
-static uint8_t s_tx[96];
+static uint8_t s_tx[100];
+static bool s_trial; /* booted on trial: explicit_buy still pending */
 
 static void send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     uint8_t h[5] = {UPD_SOF0, UPD_SOF1, cmd, (uint8_t)len, (uint8_t)(len >> 8)};
@@ -421,6 +446,7 @@ static void send_error(uint8_t code) {
 
 static void reply_hello(void) {
     boot_info_t bi;
+    memset(&bi, 0, sizeof bi);
     int8_t slot = rom_get_boot_info(&bi) ? bi.partition : (int8_t)-9;
     memset(s_tx, 0, sizeof s_tx);
     s_tx[0] = UPD_PROTO_VERSION;
@@ -435,7 +461,10 @@ static void reply_hello(void) {
     memcpy(&s_tx[32], g_build_id, bl < 32u ? bl : 32u);
     /* 64: the running image's info block, as stored in it. */
     memcpy(&s_tx[64], &g_updater_info, sizeof g_updater_info); /* the whole block */
-    send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 96u);
+    s_tx[96] = s_trial ? 1u : 0u;
+    s_tx[97] = bi.tbyb_and_update_info;
+    s_tx[98] = bi.boot_type;
+    send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 100u);
 }
 
 static void __attribute__((noreturn)) reboot_to_app(void) {
@@ -571,6 +600,49 @@ static void do_data(uint16_t len) {
     send_frame(UPD_CMD_DATA | 0x80u, b, sizeof b);
 }
 
+/* Step 5: set the try-before-you-buy flag in the image's start block (the
+ * IMAGE_DEF block the SDK's crt0 places in the first 4 KB). The block has
+ * no checksum; one with a hash or signature item is refused, as patching
+ * would break it. Returns 0, or a nonzero code. */
+static int set_tbyb(uint8_t *p, uint32_t n) {
+    for (uint32_t i = 0; i + 8u <= n; i += 4u) {
+        if (rd32(&p[i]) != PICOBIN_BLOCK_MARKER_START) {
+            continue;
+        }
+        /* Walk the items; the first must be IMAGE_TYPE (1 word). */
+        uint32_t at = i + 4u;
+        uint8_t *image_type = NULL;
+        while (at + 4u <= n) {
+            uint8_t type = p[at];
+            uint32_t words = (type & 0x80u) ? ((uint32_t)p[at + 1u] | ((uint32_t)p[at + 2u] << 8)) : p[at + 1u];
+            if (type == PICOBIN_BLOCK_ITEM_2BS_LAST) {
+                break;
+            }
+            if ((type & 0x7Fu) == (PICOBIN_BLOCK_ITEM_1BS_HASH_DEF & 0x7Fu) ||
+                (type & 0x7Fu) == (PICOBIN_BLOCK_ITEM_SIGNATURE & 0x7Fu) ||
+                (type & 0x7Fu) == (PICOBIN_BLOCK_ITEM_HASH_VALUE & 0x7Fu)) {
+                return 2; /* hashed or signed */
+            }
+            if (type == PICOBIN_BLOCK_ITEM_1BS_IMAGE_TYPE && words == 1u && image_type == NULL) {
+                image_type = &p[at + 2u];
+            }
+            if (words == 0u) {
+                return 3; /* malformed */
+            }
+            at += 4u * words;
+        }
+        if (image_type == NULL) {
+            return 4; /* not an IMAGE_DEF block */
+        }
+        uint16_t flags = (uint16_t)(image_type[0] | (image_type[1] << 8));
+        flags = (uint16_t)(flags | PICOBIN_IMAGE_TYPE_EXE_TBYB_BITS);
+        image_type[0] = (uint8_t)flags;
+        image_type[1] = (uint8_t)(flags >> 8);
+        return 0;
+    }
+    return 1; /* no start block in the first sector */
+}
+
 static void __attribute__((noreturn)) flash_update_boot(uint32_t offset) {
     rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE | REBOOT2_FLAG_NO_RETURN_ON_SUCCESS, 10, XIP_BASE + offset, 0);
     for (;;) {
@@ -620,6 +692,14 @@ static void do_finish(void) {
         send_error_detail(UPD_ERR_OLD_UPDATER, (uint32_t)s_scan.proto);
         return;
     }
+    /* Step 5: the copy written is a try-before-you-buy image, so it boots on
+     * trial and must be confirmed through its own updater. (A UF2 copied to
+     * the BOOTSEL drive is not patched: bench flashing stays permanent.) */
+    int pr = set_tbyb(s_sector0, first);
+    if (pr != 0) {
+        send_error_detail(UPD_ERR_IMAGE_DEF, (uint32_t)pr);
+        return;
+    }
     /* Everything else is in place and checked: now the start block. */
     static uint8_t copy[SECTOR] __attribute__((aligned(4)));
     memcpy(copy, s_sector0, SECTOR);
@@ -631,11 +711,39 @@ static void do_finish(void) {
     send_frame(UPD_CMD_FINISH | 0x80u, b, sizeof b);
     sleep_ms(300); /* let the reply reach the host before the port goes */
     s_up.active = false;
+    set_boot_flag((uint32_t)s_link); /* the new image starts in its updater */
     flash_update_boot(s_up.offset);
+}
+
+/* CONFIRM: make the trial image permanent. */
+static void do_confirm(void) {
+    if (!s_trial) {
+        send_error(UPD_ERR_NOT_TRIAL);
+        return;
+    }
+    int r = rom_explicit_buy(s_work, sizeof s_work);
+    if (r == BOOTROM_ERROR_LOCK_REQUIRED && bootrom_try_acquire_lock(BOOTROM_LOCK_FLASH_OP)) {
+        r = rom_explicit_buy(s_work, sizeof s_work);
+        bootrom_release_lock(BOOTROM_LOCK_FLASH_OP);
+    }
+    if (r != 0) {
+        send_error_detail(UPD_ERR_BUY, (uint32_t)r);
+        return;
+    }
+    s_trial = false;
+    send_frame(UPD_CMD_CONFIRM | 0x80u, NULL, 0u);
+    sleep_ms(300); /* let the reply reach the host before the port goes */
+    reboot_to_app();
 }
 
 /* Returns true if the frame was valid (resets the idle timeout). */
 static bool handle(uint8_t cmd, uint16_t len) {
+    if (s_trial && cmd != UPD_CMD_HELLO && cmd != UPD_CMD_CONFIRM && cmd != UPD_CMD_REBOOT) {
+        /* No new update from an image that is itself on trial; BEGIN would
+         * also reload the partition table, which can lose the pending buy. */
+        send_error(UPD_ERR_TRIAL);
+        return true;
+    }
     switch (cmd) {
     case UPD_CMD_HELLO:
         reply_hello();
@@ -648,6 +756,9 @@ static bool handle(uint8_t cmd, uint16_t len) {
         return true;
     case UPD_CMD_FINISH:
         do_finish();
+        return true;
+    case UPD_CMD_CONFIRM:
+        do_confirm();
         return true;
     case UPD_CMD_REBOOT:
         send_frame(UPD_CMD_REBOOT | 0x80u, NULL, 0u);
@@ -666,6 +777,7 @@ static void say(const char *s) {
 static void __attribute__((noreturn)) updater_run(updater_link_t link) {
     s_link = link;
     s_port = NULL;
+    s_trial = updater_trial_pending();
 #if APP_USB_STATUS
     if (link == UPDATER_LINK_USB) {
         s_port = &k_usb_port;

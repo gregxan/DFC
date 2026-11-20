@@ -330,7 +330,13 @@ UART-related interrupt (B-20).
   version (`--allow-downgrade`) or an older updater protocol
   (`--allow-older-updater`). Set the version with `-DDFC_FW_VERSION=x.y.z`
   (default 0.1.0) and raise it for every release (DESIGN 4b).
-  Not yet: trial boot with automatic fallback, and updates over UART0/UART1.
+  The new image boots **on trial**. The script reconnects to the new image's
+  own updater and confirms it. Only then does it become permanent. If
+  anything goes wrong (it doesn't boot, its updater doesn't answer, it's not
+  the image that was sent), the board goes back to the previous firmware by
+  itself within about 17 s. `--no-confirm` skips the confirm, to watch the
+  fallback happen. A `.uf2` copied to the BOOTSEL drive is not on trial.
+  Not yet: updates over UART0/UART1.
 - **Hang and crash capture.** In diagnostic builds the yellow LED blinks
   while the firmware runs. If it ever stops for 2 s, a watchdog resets the
   board, and the report's **Last reset** line says where it was stuck, or

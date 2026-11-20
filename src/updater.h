@@ -67,6 +67,11 @@ bool updater_request(updater_link_t link, uint64_t key);
 /* Rejected updater_request() calls since boot (diagnostics). */
 uint32_t updater_rejects(void);
 
+/* True while this image runs on trial (booted by the updater, not yet
+ * confirmed): the bootrom's 16.7 s watchdog is running and must not be
+ * touched, so a failed image falls back to the previous one. */
+bool updater_trial_pending(void);
+
 /* First thing in main(): runs the updater (and does not return) if a valid
  * boot flag was left by updater_request(). Always clears the flag. */
 void updater_check_boot(void);

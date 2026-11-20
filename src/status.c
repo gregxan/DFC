@@ -644,6 +644,11 @@ static int format_human(unsigned line) {
         int len = put(0, "Firmware      slot %s (%s boot), chip RP2350 A%u, built %.16s", slot_name(),
                       boot_type_name(), (unsigned)rp2350_chip_version(), g_build_id);
         len = put(len, "\r\n");
+        if (s_boot_info_ok && (s_boot_info.tbyb_and_update_info & BOOT_TBYB_AND_UPDATE_FLAG_BUY_PENDING)) {
+            len = wrap(len, LABEL, 14u,
+                       "ON TRIAL, not confirmed: the previous firmware comes back within 17 s "
+                       "(the updater did not run). Diag watchdog off.");
+        }
         return reset_text(len);
     }
     case H_UART_HEAD:

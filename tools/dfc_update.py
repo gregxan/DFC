@@ -42,6 +42,8 @@ CMD_HELLO = 0x01
 CMD_BEGIN = 0x10
 CMD_DATA = 0x11
 CMD_FINISH = 0x12
+CMD_CONFIRM = 0x13
+TRIAL_WINDOW_S = 16.7  # bootrom watchdog for a trial boot (datasheet 5.1.17)
 CMD_REBOOT = 0x7F
 RSP_ERROR = 0xFF
 ERRORS = {
@@ -49,6 +51,8 @@ ERRORS = {
     5: "no update in progress", 6: "bad offset", 7: "flash operation failed", 8: "read-back verify failed",
     9: "image CRC mismatch", 10: "block missing", 11: "image too big for the slot",
     12: "image has no updater info block", 13: "image's updater protocol is below the board's floor",
+    14: "not allowed while the board runs on trial", 15: "not on trial (nothing to confirm)",
+    16: "explicit_buy failed", 17: "cannot set the trial flag in the image's start block",
 }
 
 # Updater protocols this script can drive (src/updater.h UPDATER_PROTOCOL).
@@ -219,6 +223,8 @@ def show_hello(p: bytes) -> "Info | None":
     info = parse_info(p, 64) if len(p) >= 96 else None
     if info:
         print(f"  firmware {info.version_text}, updater protocol {info.protocol} (floor {info.floor})")
+    if len(p) >= 97 and p[96]:
+        print("  ON TRIAL: not yet confirmed")
     return info
 
 
@@ -250,7 +256,7 @@ def check_versions(new: Info, running: Info | None, allow_older_updater: bool, a
                           f"{running.version_text}. Use --allow-downgrade if that is intended.")
 
 
-def flash(link: Link, image: bytes) -> None:
+def flash(link: Link, image: bytes) -> int:
     crc = zlib.crc32(image) & 0xFFFFFFFF
     link.send(frame(CMD_BEGIN, struct.pack("<II", len(image), crc)))
     r = expect(link, CMD_BEGIN, "BEGIN")
@@ -274,9 +280,59 @@ def flash(link: Link, image: bytes) -> None:
     link.send(frame(CMD_FINISH))
     try:
         r = expect(link, CMD_FINISH, "FINISH", timeout=10.0)
-        print(f"Image verified on the board (CRC 0x{struct.unpack_from('<I', r)[0]:08X}); booting it.")
+        print(f"Image verified on the board (CRC 0x{struct.unpack_from('<I', r)[0]:08X}); booting it on trial.")
     except serial.SerialException:
-        print("Board rebooted before its FINISH reply was read; check the result below.")
+        print("Board rebooted before its FINISH reply was read; continuing.")
+    return target
+
+
+def confirm(port: str, target: int, new: Info, started: float) -> bool:
+    """The new image boots on trial into its own updater. Check it is the
+    image just sent, then CONFIRM before the bootrom's trial watchdog fires.
+    Returns False (and does not confirm) if anything is off: the board then
+    falls back to the previous firmware by itself."""
+    wait_for_port(port, gone_first=True, timeout=TRIAL_WINDOW_S)
+    deadline = started + TRIAL_WINDOW_S - 2.0  # margin for CONFIRM itself
+    link = None
+    try:
+        while True:
+            try:
+                link = Link(port)
+                link.send(frame(CMD_HELLO))
+                p = expect(link, CMD_HELLO, "HELLO (new image)", timeout=1.5)
+                break
+            except (serial.SerialException, TimeoutError):
+                if link:
+                    link.close()
+                link = None
+                if time.monotonic() > deadline:
+                    print("The new image's updater did not answer in time.")
+                    return False
+                time.sleep(0.3)
+        running = show_hello(p)
+        problems = []
+        if p[2] != target:
+            problems.append(f"it runs from slot {p[2]}, not the slot just written ({target})")
+        if not (len(p) >= 97 and p[96]):
+            problems.append("it is not on trial")
+        if running is None or running.version != new.version or running.protocol != new.protocol:
+            problems.append("its updater info differs from the image sent")
+        if problems:
+            print("Not confirming: " + "; ".join(problems) + ".")
+            return False
+        if time.monotonic() > deadline:
+            print("Too late to confirm safely.")
+            return False
+        link.send(frame(CMD_CONFIRM))
+        try:
+            expect(link, CMD_CONFIRM, "CONFIRM")
+        except serial.SerialException:
+            pass  # rebooted into the application before the reply was read
+        print(f"Confirmed {time.monotonic() - started:.1f} s after the trial boot: the new firmware is permanent.")
+        return True
+    finally:
+        if link:
+            link.close()
 
 
 def main() -> int:
@@ -288,6 +344,8 @@ def main() -> int:
                     help="flash: allow an older firmware version than the one running")
     ap.add_argument("--allow-older-updater", action="store_true",
                     help="flash: allow an image whose updater protocol is older than the running one")
+    ap.add_argument("--no-confirm", action="store_true",
+                    help="flash: write and trial-boot the image but do not confirm it (tests the fallback)")
     ap.add_argument("--enter", action="store_true",
                     help="first send '!' on the diag USB console to reboot into updater mode")
     args = ap.parse_args()
@@ -323,17 +381,30 @@ def main() -> int:
                 link.send(frame(CMD_HELLO))
                 running = show_hello(expect(link, CMD_HELLO, "HELLO"))
                 check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade)
-                flash(link, image)
+                target = flash(link, image)
             except UpdateError as e:
                 print("\nError:", e)
                 print("The running firmware is untouched. The board leaves updater mode after 90 s idle.")
                 return 1
+            started = time.monotonic()
             link.close()
-            print(f"Waiting for {args.port} to come back...")
+            if args.no_confirm:
+                print("--no-confirm: not confirming. The board returns to the previous firmware "
+                      f"about {TRIAL_WINDOW_S:.0f} s after the trial boot.")
+                return 0
+            print(f"Waiting for the new image's updater on {args.port}...")
+            try:
+                ok = confirm(args.port, target, new_info, started)
+            except (TimeoutError, UpdateError) as e:
+                print(e)
+                ok = False
+            if not ok:
+                print(f"The board returns to the previous firmware within about {TRIAL_WINDOW_S:.0f} s.")
+                return 1
+            print(f"Waiting for {args.port} to come back in the application...")
             try:
                 wait_for_port(args.port, gone_first=True, timeout=20.0)
-                print("Back. Open the terminal: the Firmware line shows the new slot, "
-                      "'flash update boot', and the new build time.")
+                print("Done. The Firmware line shows the new slot and build time.")
             except TimeoutError as e:
                 print(e)
                 return 1

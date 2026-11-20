@@ -140,7 +140,12 @@ int main(void) {
 #if APP_USB_STATUS
     /* Rev 2.22: last, once every interrupt handler is installed. */
     diag_isr_accounting_init();
-    crash_arm(); /* D-9: watchdog, fed by the main loop */
+    /* Rev 2.25: an image running on trial without its updater (the boot
+     * flag did not reach it) must not take over the bootrom's 16.7 s
+     * watchdog: that watchdog is what brings the previous image back. */
+    if (!updater_trial_pending()) {
+        crash_arm(); /* D-9: watchdog, fed by the main loop */
+    }
 #endif
 
 #if APP_MODE == APP_MODE_USER

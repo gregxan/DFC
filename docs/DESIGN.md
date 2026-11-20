@@ -523,6 +523,34 @@ image is never bootable and the running firmware is untouched.
 - Raise `UPDATER_PROTOCOL_FLOOR` once the tools stop supporting an older
   protocol, so no unit can be put back on it.
 
+## 4c. Trial boot and confirm (Rev 2.25, updater step 5)
+
+1. At FINISH the updater sets the try-before-you-buy (TBYB) bit in the image
+   type of the copy's start block (`set_tbyb()`). The SDK's IMAGE_DEF block
+   has no hash, so this one bit is the only change; a hashed or signed block
+   is refused. It then writes the boot flag for the same link and does a
+   flash update boot of the new slot.
+2. The bootrom runs a TBYB image from a flash update boot under a fixed
+   16.7 s watchdog. The new image's `updater_check_boot()` finds the flag
+   and enters its updater, which only accepts HELLO, CONFIRM and REBOOT while
+   the buy is pending.
+3. The script reconnects. It checks HELLO: the slot just written, on trial,
+   and the info block of the image sent. Then it sends CONFIRM, and the
+   updater calls `explicit_buy()`. The bootrom clears the TBYB bit in flash
+   and erases the old slot's first sector. Then the board reboots into the
+   application.
+4. Without CONFIRM the watchdog fires. At the next boot the bootrom prefers
+   the non-TBYB (old) image over the unconfirmed one. The old firmware is
+   back and the unconfirmed image is never chosen again.
+
+The application never confirms anything. If the new image comes up without
+its updater, for example because the flag check is broken, it runs until
+the watchdog fires and then the old image returns. Diag builds therefore
+do not arm their own watchdog while a buy is pending
+(`updater_trial_pending()`), and the report flags "ON TRIAL". A UF2 copied
+to the BOOTSEL drive is not patched, so bench flashing is permanent as
+before.
+
 ## 5. Resources (R-1 … R-3)
 
 | Resource | Use |

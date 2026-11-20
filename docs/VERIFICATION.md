@@ -38,7 +38,7 @@ section. Procedures not listed there have not been run.
 | Image without an updater info block refused | Pass |
 | Update interrupted (USB unplugged mid-transfer): old firmware boots | Pass |
 | Firmware downgrade refused without `--allow-downgrade` | Not run (checked on the PC only) |
-| 90 s idle timeout; power cycle in updater mode boots the firmware | Not confirmed |
+| 90 s idle timeout; power cycle in updater mode boots the firmware | Pass |
 
 All tools run on Windows (V-7). Install the Python dependency once:
 
