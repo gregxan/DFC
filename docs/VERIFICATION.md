@@ -21,6 +21,19 @@ section. Procedures not listed there have not been run.
 | Offset removal (180° turn), axis orientation, SDA short to GND, sensor power-cycle at run time (M-2b) | Not run |
 | SET/RESET modes, saturation, M-8 durations, V-5a, supply current | Not run (need a debugger, analyzer or meter) |
 
+**UART0 loopback, diag-pattern (Rev 2.25, D6→D7 jumper, magnetometer at 1 kHz), 23.3 min logged.**
+
+| Check | Result |
+|---|---|
+| UART0: 128.8 MB received at 92.2 kB/s (line rate). Pattern errors, overflows, rejects, framing, breaks and overruns all 0 | Pass |
+| UART1: transmitting at line rate (nothing wired to its RX); all counters 0 | Pass |
+| Magnetometer: 1,397,000 valid samples (1000/s), 0 invalid, gaps, I2C errors, timeouts or missed ticks | Pass |
+| No resets; tick overruns 0; main loop max 54 µs | Pass |
+| Handlers max 3.18 µs (tick), critical sections 1.17 µs, API max 2.79 µs (link_write, under the 3 µs EX-7 limit) | Pass |
+| Peak RX buffer 14 bytes, TX queue full (4096); 43.8 TX interrupts/s | Pass |
+| Noise under load: median 0.76 / 1.06 / 1.31 mG (same as without UART traffic) | Pass |
+| Tests B–D (open RX, reconnect, break) | Not reported |
+
 **A/B partition table (Rev 2.25, `c52164b`, chip RP2350 A3).**
 
 | Check | Result |
