@@ -95,19 +95,19 @@ size_t __not_in_flash_func(link_rx_available)(link_id_t id) {
 }
 
 size_t __not_in_flash_func(link_read)(link_id_t id, uint8_t *dst, size_t max) {
-    uint32_t t0 = diag_cycles();
+    diag_span_t t0 = diag_span_begin(); /* Rev 2.22: ISR time excluded */
     link_t *l = &s_links[id];
 
     /* U-8a: modulo-2^32 comparison of bytes written vs bytes read. */
     uint32_t unread = rx_total_now(l) - l->rx_read_total;
     if (unread > RX_SIZE) {
         rx_overflow(l, id);
-        diag_max(DIAG_T_API_READ, diag_cycles() - t0);
+        diag_max(DIAG_T_API_READ, diag_span_cycles(t0));
         return 0;
     }
     diag_hwm(&g_diag_rx_hwm[id], unread);
     if (unread == 0u || max == 0u) {
-        diag_max(DIAG_T_API_READ, diag_cycles() - t0);
+        diag_max(DIAG_T_API_READ, diag_span_cycles(t0));
         return 0;
     }
 
@@ -117,23 +117,23 @@ size_t __not_in_flash_func(link_read)(link_id_t id, uint8_t *dst, size_t max) {
     if (first > n) {
         first = n;
     }
-    uint32_t tc = diag_cycles();
+    diag_span_t tc = diag_span_begin();
     memcpy(dst, &l->rx_ring[idx], first);
     if (n > first) {
         memcpy(dst + first, &l->rx_ring[0], n - first);
     }
-    uint32_t copy = diag_cycles() - tc;
+    uint32_t copy = diag_span_cycles(tc);
 
     /* The DMA may have lapped the reader while copying. The oldest copied
      * byte (stream index rx_read_total) is overwritten once more than
      * RX_SIZE bytes past it have been written. */
     if (rx_total_now(l) - l->rx_read_total > RX_SIZE) {
         rx_overflow(l, id);
-        diag_max(DIAG_T_API_READ, diag_cycles() - t0 - copy);
+        diag_max(DIAG_T_API_READ, diag_span_cycles(t0) - copy);
         return 0;
     }
     l->rx_read_total += n;
-    diag_max(DIAG_T_API_READ, diag_cycles() - t0 - copy);
+    diag_max(DIAG_T_API_READ, diag_span_cycles(t0) - copy);
     return n;
 }
 
@@ -205,7 +205,7 @@ size_t __not_in_flash_func(link_tx_free)(link_id_t id) {
 }
 
 bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t len) {
-    uint32_t t0 = diag_cycles();
+    diag_span_t t0 = diag_span_begin(); /* Rev 2.22: ISR time excluded */
     link_t *l = &s_links[id];
     if (len == 0u) {
         return true;
@@ -220,12 +220,12 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     /* U-11: the whole message or nothing. */
     if (len > TX_SIZE - used) {
         diag_inc(ctr(id, DIAG_L0_TX_REJECT));
-        diag_max(DIAG_T_API_WRITE, diag_cycles() - t0);
+        diag_max(DIAG_T_API_WRITE, diag_span_cycles(t0));
         return false;
     }
 
     uint32_t n = (uint32_t)len;
-    uint32_t tc = diag_cycles();
+    diag_span_t tc = diag_span_begin();
 
     uint32_t idx = head & TX_MASK;
     uint32_t first = TX_SIZE - idx;
@@ -236,7 +236,7 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     if (n > first) {
         memcpy(&l->tx_ring[0], src + first, n - first);
     }
-    uint32_t copy = diag_cycles() - tc;
+    uint32_t copy = diag_span_cycles(tc);
 
     __dmb(); /* data visible before the new head */
     l->tx_head = head + n;
@@ -259,7 +259,7 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     }
     cs_exit(cs);
 
-    diag_max(DIAG_T_API_WRITE, diag_cycles() - t0 - copy);
+    diag_max(DIAG_T_API_WRITE, diag_span_cycles(t0) - copy);
     return true;
 }
 

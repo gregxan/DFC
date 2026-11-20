@@ -127,6 +127,10 @@ int main(void) {
     (void)mag_init();
     app_init();
     tick_init(); /* M-6: runs even if the magnetometer is faulted */
+#if APP_USB_STATUS
+    /* Rev 2.22: last, once every interrupt handler is installed. */
+    diag_isr_accounting_init();
+#endif
 
 #if APP_MODE == APP_MODE_USER
     run_epochs();

@@ -643,7 +643,7 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
 /* ---------------------------------------------------------- main loop -- */
 
 bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
-    uint32_t t0 = diag_cycles();
+    diag_span_t t0 = diag_span_begin(); /* Rev 2.22: ISR time excluded */
     cs_t cs = cs_enter();
     uint32_t l = s_latest;
     if (l < SLOT_NONE) {
@@ -663,7 +663,7 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
         uint64_t now = time_us_64();
         r->stale = (now - r->s.timestamp_us) > MAG_STALE_US;
     }
-    diag_max(DIAG_T_API_MAG, diag_cycles() - t0);
+    diag_max(DIAG_T_API_MAG, diag_span_cycles(t0));
     return r->present;
 }
 

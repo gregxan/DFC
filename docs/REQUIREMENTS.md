@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.21**. The changes since Revision 2 are listed in sections 11 to 31.
+**Revision 2.22**. The changes since Revision 2 are listed in sections 11 to 32.
 
 ## 1. Scope
 
@@ -38,7 +38,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **EX-4** All interrupt handlers shall have a bounded execution time of at most 5 µs.
 - **EX-5** Interrupt priority shall be: UART-related handlers highest (TX DMA completion, UART error), then magnetometer transaction completion (I2C STOP detect, M-12) and I2C abort (equal priority), then the magnetometer timer. *(Amended in Rev 2.1.)*
 - **EX-6** Interrupt handlers and queue access functions shall execute from RAM, not flash (satisfied by B-18).
-- **EX-7** Each RX read, TX write, and read-latest call shall take at most 2 µs plus payload copy time.
+- **EX-7** Each RX read, TX write, and read-latest call shall take at most 2 µs plus payload copy time. The time is the call's own execution: in diagnostic builds, time spent in interrupt handlers that preempt the call (e.g. the USB stack) is measured and excluded. *(Amended in Rev 2.22.)*
 - **EX-8** The main loop shall keep real-time performance: its worst-case execution shall be less than 1 ms (D-4). *(Replaced in Rev 2.14.)*
   - **User application:** the work of one epoch, from the epoch start until `app_poll()` returns, shall be < 1 ms, so the next epoch never starts late. Epochs that do run late are counted (D-1).
   - **Test applications:** one main-loop pass shall be < 1 ms.
@@ -503,3 +503,12 @@ Found at first hardware bring-up with the D-8 experiment: measurements complete 
 - **Amended M-8.** The limits rise by 70 µs for the extra address phases.
 - **Startup calibration (M-4b)** reads Status on its own before the data.
 - **D-8 experiment** compares Status read alone with Status at the end of a burst, each 2 ms after a fresh trigger.
+
+## 32. Revision 2.22 Changes
+
+- **Amended EX-7.** At bring-up, mag_read_latest measured 14.6 µs against the 2 µs limit. In diagnostic builds, every enabled interrupt is now routed through a wrapper that adds up time spent in handlers, nested ones counted once. The API timings subtract it, so they show only the call itself. Production builds keep the plain vector table and are unchanged. The handler timings (V-5) were already measured inside each handler.
+- **USB status report (diagnostic builds).**
+  - The readable format fits an 80-column terminal: at most 78 characters per line, with long values and conclusions wrapped.
+  - ATTENTION lists one item per line and names what is over its limit, with the value, e.g. "mag_read_latest 14600 ns, over the 2000 ns API limit".
+  - The timing section names the worst handler and the worst API call.
+  - The machine format is unchanged.

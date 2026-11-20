@@ -1,6 +1,9 @@
 #include "diag.h"
 
 #include "hardware/clocks.h"
+#include "hardware/irq.h"
+#include "hardware/structs/scb.h"
+#include "hardware/sync.h"
 
 volatile uint32_t g_diag_ctr[DIAG_COUNT];
 volatile uint32_t g_diag_max_cycles[DIAG_T_COUNT];
@@ -13,6 +16,55 @@ static uint32_t s_loop_last;
 static bool s_loop_started;
 static uint32_t s_loop_excluded; /* cycles of excluded work this iteration */
 static uint32_t s_cycles_per_us;
+
+volatile uint32_t g_diag_isr_cycles;
+
+#if APP_USB_STATUS && DIAG_TIMING
+/* Rev 2.22: every enabled interrupt goes through isr_wrap(), which times
+ * the outermost handler (nested ones fall inside it) and then calls the
+ * original handler. Diagnostic builds only: production has no USB stack
+ * preempting the main loop, and keeps the plain vector table. */
+static irq_handler_t s_isr_orig[NUM_IRQS];
+static volatile uint32_t s_isr_depth;
+static uint32_t s_isr_t0;
+
+static void __not_in_flash_func(isr_wrap)(void) {
+    uint32_t t = diag_cycles();
+    uint32_t irq = __get_current_exception() - VTABLE_FIRST_IRQ;
+    uint32_t save = save_and_disable_interrupts();
+    bool outer = (s_isr_depth++ == 0u);
+    if (outer) {
+        s_isr_t0 = t;
+    }
+    restore_interrupts(save);
+
+    s_isr_orig[irq]();
+
+    save = save_and_disable_interrupts();
+    if (outer) {
+        g_diag_isr_cycles = g_diag_isr_cycles + (diag_cycles() - s_isr_t0);
+    }
+    s_isr_depth = s_isr_depth - 1u;
+    restore_interrupts(save);
+}
+
+void diag_isr_accounting_init(void) {
+    irq_handler_t *vt = (irq_handler_t *)scb_hw->vtor;
+    uint32_t save = save_and_disable_interrupts();
+    for (uint i = 0; i < NUM_IRQS; i++) {
+        if (irq_is_enabled(i)) {
+            s_isr_orig[i] = vt[VTABLE_FIRST_IRQ + i];
+            vt[VTABLE_FIRST_IRQ + i] = isr_wrap;
+        }
+    }
+    __dsb();
+    __isb();
+    restore_interrupts(save);
+}
+#else
+void diag_isr_accounting_init(void) {
+}
+#endif
 
 void diag_init(void) {
 #if DIAG_TIMING

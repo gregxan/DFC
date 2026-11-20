@@ -111,6 +111,37 @@ static inline void diag_max(diag_timing_t t, uint32_t cycles) {
 #endif
 }
 
+/* ---- API timing without interrupt time (Rev 2.22) -------------------- */
+
+/* Cycles spent in interrupt handlers since boot (outermost handler entry to
+ * exit, nested ones included once). Counted only in diagnostic builds,
+ * where diag_isr_accounting_init() wraps every enabled interrupt; it stays
+ * 0 otherwise. Lets the API timings (EX-7) leave out time the main loop was
+ * preempted, e.g. by the USB stack, which is not part of the API's cost. */
+extern volatile uint32_t g_diag_isr_cycles;
+
+typedef struct {
+    uint32_t t0;
+    uint32_t i0;
+} diag_span_t;
+
+static inline diag_span_t diag_span_begin(void) {
+    diag_span_t s;
+    s.i0 = g_diag_isr_cycles;
+    s.t0 = diag_cycles();
+    return s;
+}
+
+/* Cycles since diag_span_begin(), minus interrupt time in between. */
+static inline uint32_t diag_span_cycles(diag_span_t s) {
+    uint32_t elapsed = diag_cycles() - s.t0;
+    uint32_t isr = g_diag_isr_cycles - s.i0;
+    return isr < elapsed ? elapsed - isr : 0u;
+}
+
+/* Diagnostic builds: call once, after every interrupt handler is installed. */
+void diag_isr_accounting_init(void);
+
 /* ---- critical sections (EX-3) ---------------------------------------- */
 
 typedef struct {

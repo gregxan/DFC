@@ -117,8 +117,10 @@ RP2350's own pull resistors and a slow address scan. The readable report
 shows it under the magnetometer:
 
 ```
-  Wiring       (boot check) SDA pulled up   SCL pulled up   no short   answers: none   swapped: 0x30
-               -> sensor answers only with SDA/SCL swapped: swap the D4/D5 wires
+  Wiring      SDA pulled up, SCL pulled up, no short (boot check)
+              answers: none   with SDA/SCL swapped: 0x30
+              -> sensor answers only with SDA/SCL swapped: swap the D4/D5
+                 wires
 ```
 
 | Conclusion | What to do |
@@ -142,14 +144,20 @@ Below the wiring check, diagnostic builds show what happened at start-up
 and how long real measurements take:
 
 ```
-  Start-up     ID 0x30   status 0x10 (OTP loaded)   result: OK   calibration: OK (status 0x01)
-  Meas. time   800 Hz 0.52 ms   100 Hz 8.10 ms   800 Hz set before a repeated START 0.52 ms   Status burst/direct 0x01/0x01
-               -> sensor timing OK
+  Start-up    ID 0x30, status 0x10 (OTP loaded), result OK
+              calibration OK (status 0x11)
+  Meas. time  800 Hz 0.10 ms   100 Hz 7.50 ms
+              800 Hz set before a repeated START 0.72 ms
+              Status read alone / after data: 0x11 / 0x10
+              -> sensor timing OK (reading the data clears Meas_M_Done, so
+                 Status is read first)
 ```
 
-Expected: about 0.5 ms at 800 Hz, about 8 ms at 100 Hz, the repeated-START
-case the same as 800 Hz, and bit 0 set in both Status values. The
-conclusion line names the first thing that differs.
+These are the values from the first bring-up. Expected: well under 1 ms
+at 800 Hz (the datasheet says 0.5 ms), about 8 ms at 100 Hz, and the
+repeated-START case well under 2 ms. Status read alone shows bit 0 set;
+after the data it reads clear on the real part (Rev 2.21). The conclusion
+line names the first thing that differs.
 
 ### Optional fault checks (same wiring)
 
