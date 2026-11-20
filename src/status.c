@@ -63,6 +63,14 @@ void status_init(void) {
     stdio_init_all();
     /* B-20: USB below every UART-related interrupt, and below ours. */
     irq_set_priority(USBCTRL_IRQ, IRQ_PRIO_USB);
+    /* Rev 2.23 (bring-up fix). The SDK runs the USB stack in two places:
+     * the USB controller IRQ (updates endpoint state) and a spare IRQ that
+     * runs tud_task() (starts transfers on the same endpoints). It assumes
+     * neither can preempt the other, as both default to the same priority.
+     * Lowering only USBCTRL_IRQ (B-20) let tud_task() interrupt the
+     * controller handler mid-update; the SDK then panicked ("ep .. was
+     * already available"), about every 1-2 minutes. Same priority for both. */
+    irq_set_priority(PICO_STDIO_USB_LOW_PRIORITY_IRQ, IRQ_PRIO_USB);
     s_next_us = time_us_64() + STATUS_PERIOD_US;
 }
 
@@ -471,6 +479,47 @@ static int reset_text(int len) {
         }
         return wrap(len, LABEL, 14u, t);
     }
+    if (c->kind == CRASH_KIND_PANIC) {
+        if (c->exception >= 16u) {
+            snprintf(t, sizeof t, "PANIC in interrupt IRQ %u (%s):", c->exception - 16u, irq_name(c->exception - 16u));
+        } else {
+            snprintf(t, sizeof t, "PANIC in the main loop (%s):", crumb);
+        }
+        len = wrap(len, "Last reset    ", 14u, t);
+        /* The format string is in the image: check it before using it. */
+        uintptr_t f = (uintptr_t)c->panic_fmt;
+        char msg[100];
+        bool ok = f >= 0x20000000u && f < 0x20082000u - sizeof msg;
+        size_t k = 0;
+        for (; ok && k < sizeof msg - 1u && c->panic_fmt[k] != '\0'; k++) {
+            char ch = c->panic_fmt[k];
+            if ((ch < ' ' || ch > '~') && ch != '\n') {
+                ok = false;
+            }
+        }
+        if (!ok) {
+            snprintf(t, sizeof t, "(message not readable, format at 0x%08" PRIX32 ")", (uint32_t)f);
+        } else {
+            memcpy(msg, c->panic_fmt, k);
+            msg[k] = '\0';
+            for (size_t i = 0; i < k; i++) {
+                if (msg[i] == '\n') {
+                    msg[i] = ' ';
+                }
+            }
+            if (strstr(msg, "%s") != NULL || strstr(msg, "%%") != NULL) {
+                snprintf(t, sizeof t, "\"%s\"", msg); /* not formatted: arguments unknown */
+            } else {
+                char fm[sizeof msg + 4];
+                snprintf(fm, sizeof fm, "\"%s\"", msg);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+                snprintf(t, sizeof t, fm, c->panic_arg[0], c->panic_arg[1]);
+#pragma GCC diagnostic pop
+            }
+        }
+        return wrap(len, LABEL, 14u, t);
+    }
     if (c->kind == CRASH_KIND_FAULT) {
         if (c->exception >= 16u) {
             snprintf(t, sizeof t, "HARD FAULT in interrupt IRQ %u (%s)", c->exception - 16u,
@@ -735,9 +784,10 @@ static int format_human(unsigned line) {
             len = attn_item(len, &count, "UART baud rate out of tolerance");
         }
         if (crash_last()->kind != CRASH_KIND_NONE) {
-            len = attn_item(len, &count, crash_last()->kind == CRASH_KIND_FAULT
-                                             ? "the board reset after a HARD FAULT (see Last reset)"
-                                             : "the board reset after a HANG: watchdog (see Last reset)");
+            static const char *const k_rst[] = {"", "the board reset after a HANG: watchdog (see Last reset)",
+                                                "the board reset after a HARD FAULT (see Last reset)",
+                                                "the board reset after a PANIC (see Last reset)"};
+            len = attn_item(len, &count, k_rst[crash_last()->kind <= CRASH_KIND_PANIC ? crash_last()->kind : 0u]);
         }
         static const char *const ename[] = {"RX overflows", "TX rejects", "framing errors", "breaks",
                                             "HW overruns"};

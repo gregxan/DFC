@@ -112,6 +112,12 @@ if(APP_USB_STATUS)
         # lines are up to ~200. status.c sends lines in pieces either way;
         # a larger buffer just takes fewer pieces.
         CFG_TUD_CDC_TX_BUFSIZE=256
+        # Rev 2.23 (bring-up fix): the SDK runs tud_task() in this spare
+        # IRQ. status.c gives it the USB controller's priority, so neither
+        # can preempt the other (the SDK assumes they cannot).
+        PICO_STDIO_USB_LOW_PRIORITY_IRQ=51
+        # D-9: a panic records its message and resets, instead of halting.
+        PICO_PANIC_FUNCTION=crash_panic
     )
 else()
     pico_enable_stdio_usb(firmware 0)

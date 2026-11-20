@@ -111,7 +111,21 @@ void wirecheck_run(void) {
     }
     busy_wait_us(200);
 
-    /* 1. Held low against the internal pull-up. */
+    /* 1. Held low against the internal pull-up. A sensor caught mid-read by
+     * an MCU reset can hold SDA low until it is clocked out, so first give
+     * it nine SCL pulses and a STOP (as the start-up bus clear does). */
+    if (!gpio_get(pin[0]) && gpio_get(pin[1])) {
+        for (unsigned k = 0; k < 9u && !gpio_get(pin[0]); k++) {
+            od_low(pin[1]);
+            busy_wait_us(HALF_US);
+            od_release(pin[1]);
+            busy_wait_us(HALF_US);
+        }
+        od_low(pin[0]);
+        busy_wait_us(HALF_US);
+        od_release(pin[0]);
+        busy_wait_us(200);
+    }
     for (unsigned i = 0; i < 2u; i++) {
         s_wc.held_low[i] = !gpio_get(pin[i]);
     }

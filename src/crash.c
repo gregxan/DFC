@@ -4,6 +4,8 @@
 
 #include "hardware/gpio.h"
 #include "hardware/structs/m33.h"
+#include <stdarg.h>
+
 #include "hardware/watchdog.h"
 
 #include "tick.h"
@@ -20,7 +22,12 @@ void crash_capture(void) {
     uint32_t reason = watchdog_hw->reason;
     if ((s0 & 0xFF000000u) == CRASH_MAGIC) {
         uint32_t kind = s0 & 0x00FF0000u;
-        if (kind == CRASH_FAULT) {
+        if (kind == CRASH_PANIC) {
+            s_last.kind = CRASH_KIND_PANIC;
+            s_last.panic_fmt = (const char *)watchdog_hw->scratch[1];
+            s_last.panic_arg[0] = watchdog_hw->scratch[2];
+            s_last.panic_arg[1] = watchdog_hw->scratch[3];
+        } else if (kind == CRASH_FAULT) {
             s_last.kind = CRASH_KIND_FAULT;
             s_last.pc = watchdog_hw->scratch[1];
             s_last.lr = watchdog_hw->scratch[2];
@@ -61,6 +68,27 @@ void crash_disarm(void) {
 
 const crash_t *crash_last(void) {
     return &s_last;
+}
+
+/* D-9: replaces the SDK's panic() in diagnostic builds (PICO_PANIC_FUNCTION).
+ * Records the message format and the first two arguments, then resets. The
+ * format string is in the image, so it is still there after the reset. */
+void __attribute__((noreturn)) crash_panic(const char *fmt, ...);
+void __attribute__((noreturn)) crash_panic(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    uint32_t a0 = va_arg(ap, uint32_t);
+    uint32_t a1 = va_arg(ap, uint32_t);
+    va_end(ap);
+    uint32_t ipsr = __get_current_exception();
+    uint32_t s0 = watchdog_hw->scratch[0];
+    watchdog_hw->scratch[0] = CRASH_MAGIC | CRASH_PANIC | (s0 & 0x0000FF00u) | (ipsr & 0xFFu);
+    watchdog_hw->scratch[1] = (uint32_t)fmt;
+    watchdog_hw->scratch[2] = a0;
+    watchdog_hw->scratch[3] = a1;
+    hw_set_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_TRIGGER_BITS);
+    for (;;) {
+    }
 }
 
 /* HardFault (MemManage, BusFault and UsageFault escalate to it, as they are

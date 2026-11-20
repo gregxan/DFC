@@ -9,6 +9,7 @@
  *   scratch[1]  interrupt running now (IRQ + 1, 0 = none)    fault: PC
  *   scratch[2]  tick count, written by the tick ISR          fault: LR
  *   scratch[3]  tick count last seen by the main loop        fault: CFSR
+ *   (panic: message format pointer and the first two arguments)
  *
  * If the main loop stops for 2 s (stuck in a loop, in a library call, or
  * starved by an interrupt that never returns), the watchdog resets the
@@ -36,7 +37,7 @@ enum {
     CRUMB_COUNT
 };
 
-enum { CRASH_KIND_NONE = 0, CRASH_KIND_WATCHDOG = 1, CRASH_KIND_FAULT = 2 };
+enum { CRASH_KIND_NONE = 0, CRASH_KIND_WATCHDOG = 1, CRASH_KIND_FAULT = 2, CRASH_KIND_PANIC = 3 };
 
 typedef struct {
     uint8_t kind;      /* CRASH_KIND_*                                     */
@@ -46,6 +47,8 @@ typedef struct {
     uint32_t isr_tick; /* watchdog: last tick count from the tick ISR      */
     uint32_t loop_tick;/* watchdog: last tick count seen by the main loop  */
     uint32_t pc, lr, cfsr; /* fault                                       */
+    const char *panic_fmt; /* panic: message format (in the image, still valid) */
+    uint32_t panic_arg[2]; /* panic: first two arguments                   */
 } crash_t;
 
 #if APP_USB_STATUS
@@ -55,6 +58,7 @@ typedef struct {
 #define CRASH_MAGIC 0xDF000000u
 #define CRASH_ARMED 0x00010000u
 #define CRASH_FAULT 0x00020000u
+#define CRASH_PANIC 0x00030000u
 
 static inline void crash_crumb(unsigned c) {
     watchdog_hw->scratch[0] = CRASH_MAGIC | CRASH_ARMED | ((uint32_t)c << 8);

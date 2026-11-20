@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.23**. The changes since Revision 2 are listed in sections 11 to 33.
+**Revision 2.24**. The changes since Revision 2 are listed in sections 11 to 34.
 
 ## 1. Scope
 
@@ -250,6 +250,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **B-18** The binary type shall be copy_to_ram, so all code executes from SRAM.
 - **B-19** Debug printing over UART shall be disabled (`pico_enable_stdio_uart(<target> 0)`), since GPIO0/1 are used by UART0.
 - **B-20** USB serial shall be disabled in production builds. If enabled for debugging, it uses the built-in Windows USB serial driver (shows up as a COM port), and its interrupt priority shall be below all UART-related interrupts.
+  - Both USB interrupts shall have that priority: the USB controller IRQ and the IRQ in which the SDK runs `tud_task()`. The SDK assumes neither can preempt the other. *(Added in Rev 2.24.)*
   - In diagnostic builds, receiving `~` on the USB console shall reboot the board into the USB bootloader (BOOTSEL) for reflashing, about 100 ms later so a notice reaches the terminal. *(Added in Rev 2.20.)*
 - **B-21** Release builds shall use `CMAKE_BUILD_TYPE=Release` with `-g`.
 - **B-22** Compiler warnings shall include `-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion`. B-22, B-23 and B-24 apply to every C source compiled into the image, including the Pico SDK's (B-25). *(Amended in Rev 2.5.)*
@@ -523,3 +524,11 @@ Found at first hardware bring-up with the D-8 experiment: measurements complete 
 ## 33. Revision 2.23 Changes
 
 - **Added D-9.** Hang and crash capture in diagnostic builds. During bring-up the board occasionally stopped responding: no output, and `~` was ignored, so the main loop or the USB stack had stopped. The watchdog report now shows whether the main loop was stuck (and where), an interrupt never returned (and which one), or the processor faulted (PC, LR and fault type). The `~` reboot disarms the watchdog first, and writes its notice through stdio rather than calling TinyUSB directly.
+
+## 34. Revision 2.24 Changes
+
+Found at bring-up with D-9: the diagnostic build reset with a HardFault in the USB controller interrupt (IRQ 14) about every 1–2 minutes. CFSR was 0, the signature of the SDK's `panic()`, which ends in a breakpoint. This was the earlier "stops responding".
+- **Cause.** B-20 lowered the USB controller IRQ to 0xC0, but the SDK's `tud_task()` IRQ (a spare IRQ) stayed at the default 0x80. `tud_task()` could therefore interrupt the controller handler while it was updating an endpoint, start a transfer on the same endpoint, and trip the SDK's consistency checks (e.g. "ep .. was already available").
+- **Amended B-20.** The `tud_task()` IRQ is fixed at SPARE_IRQ_5 (51) and given the same priority as the controller IRQ.
+- **Amended D-9.** In diagnostic builds a `panic()` records its message and first two arguments, then resets. The report prints the message.
+- **D-7 wiring check.** A sensor caught mid-read by an MCU reset can hold SDA low. The check now clocks SCL nine times and sends a STOP before deciding that SDA is held low.
