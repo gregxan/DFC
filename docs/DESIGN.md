@@ -232,9 +232,14 @@ datasheet times are upper bounds, and D-8 now also times BW 01.
   only when the transaction completes. After an abort the next transaction
   writes BW again. The list is 19 words at most. The command channel is
   DREQ-paced, so it need not fit the 16-entry FIFO.
-- **Per-sample period.** Each sample stores `period_ticks` (the N of its
-  trigger). Consumers check gaps with `seq == last_seq + last_period`.
-  `mag_read_latest()` scales the M-17 stale limit by it. It fits in the
+- **First read after a BW write.** It waits at least 2 ticks
+  (`first_period()`), because the bench measured 0.72 ms for that first
+  measurement. This applies after a rate change and after a re-probe
+  configuration. `s_cur_period` and `s_trig_period` carry the actual period.
+- **Per-sample period.** Each sample stores `period_ticks` (the ticks from its
+  trigger to its read: N, or 2 after a BW write at 1 kHz). Consumers check gaps with `seq == last_seq + last_period`.
+  `mag_read_latest()` scales the M-17 stale limit by the longer of it and
+  the current rate's N, so the last sample before a slow-down is not stale. It fits in the
   padding byte, so `mag_sample_t` stays 24 bytes.
 - **Re-probe.** `config_start()` writes the selected rate's BW, and the first
   sample transaction follows N ticks after the configuration.

@@ -132,6 +132,17 @@ static volatile uint32_t s_rate_applied;
 static volatile uint32_t s_cur_rate;
 static uint32_t s_trig_rate;
 static uint32_t s_next_tick; /* tick index of the next sample transaction */
+/* Ticks from the trigger in flight / the trigger being read to their read.
+ * Normally the rate's period_ticks, but at least 2 after a bandwidth write:
+ * bring-up (D-8, "800 Hz set before a repeated START") measured the first
+ * measurement after one at 0.72 ms, which does not fit in 1 ms. */
+static uint32_t s_cur_period;
+static uint32_t s_trig_period;
+
+static inline uint32_t first_period(uint32_t rate) {
+    uint32_t p = k_rates[rate].period_ticks;
+    return p < 2u ? 2u : p;
+}
 
 /* Sample command lists, one per PRE_*, plus one built when the rate changes
  * (with the bandwidth write). The longest is 19 words. */
@@ -422,7 +433,8 @@ static void __not_in_flash_func(mag_start)(uint32_t tick) {
     s_cur_tick = tick;
     s_cur_pre = pre;
     s_cur_rate = rate;
-    s_next_tick = tick + k_rates[rate].period_ticks;
+    s_cur_period = (rate != s_rate_applied) ? first_period(rate) : k_rates[rate].period_ticks;
+    s_next_tick = tick + s_cur_period;
     start_dma(TXN_SAMPLE, cmd, len, &s_slots[slot].status, MMC_READ_BYTES);
 }
 
@@ -524,7 +536,7 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
                     : s_trig_reset  ? (uint8_t)MAG_SAMPLE_AFTER_RESET
                                     : (uint8_t)MAG_SAMPLE_OK;
         s->valid = (s->reason == MAG_SAMPLE_OK);
-        s->period_ticks = k_rates[s_trig_rate].period_ticks;
+        s->period_ticks = (uint8_t)s_trig_period;
         s->seq = s_trig_tick;
         s->timestamp_us = s_trig_time_us; /* M-10 (Rev 2.6) */
         calibrate(s, done);
@@ -548,6 +560,7 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     s_trig_tick = tick;
     s_trig_time_us = now_us; /* this transaction's TM_M write just completed */
     s_trig_rate = s_cur_rate;
+    s_trig_period = s_cur_period;
     s_rate_applied = s_cur_rate; /* M-3b: any bandwidth write has landed */
     uint32_t pre = s_cur_pre;
     s_trig_reset = (pre == PRE_RESET);
@@ -653,7 +666,8 @@ static void __not_in_flash_func(i2c_isr)(void) {
                 s_trig_time_us = now_us;
                 s_trig_rate = s_cur_rate; /* M-3b: written by the configuration */
                 s_rate_applied = s_cur_rate;
-                s_next_tick = s_cur_tick + k_rates[s_cur_rate].period_ticks;
+                s_trig_period = first_period(s_cur_rate); /* it wrote BW */
+                s_next_tick = s_cur_tick + s_trig_period;
                 s_cycle_step = 2u;   /* SET next */
                 s_since_pulse = 0u;
                 s_pulse_now = false;
@@ -766,7 +780,11 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
         r->stale = true;
     } else {
         uint64_t now = time_us_64();
-        uint32_t p = r->s.period_ticks != 0u ? r->s.period_ticks : 1u;
+        /* After a slow-down the next sample comes at the new, longer
+         * period: use the longer of the two (bench, Rev 2.25). */
+        uint32_t p = r->s.period_ticks;
+        uint32_t pa = k_rates[s_rate_applied].period_ticks;
+        p = p > pa ? p : pa;
         r->stale = (now - r->s.timestamp_us) > (uint64_t)MAG_STALE_US * p; /* M-17 */
     }
     diag_max(DIAG_T_API_MAG, diag_span_cycles(t0));
@@ -1028,6 +1046,8 @@ bool mag_init(void) {
     s_rate_applied = rate;
     s_cur_rate = rate;
     s_trig_rate = rate;
+    s_cur_period = k_rates[rate].period_ticks;
+    s_trig_period = s_cur_period;
     s_next_tick = 0u;
     bool cfg = ok && reg_write(MMC_REG_CTRL1, k_rates[rate].bw);
     cfg = cfg && reg_write(MMC_REG_CTRL2, 0u);
