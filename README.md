@@ -352,9 +352,9 @@ UART-related interrupt (B-20).
   ```bash
   py tools\dfc_update.py COM20 --uart --enter flash build\release\firmware.uf2
   ```
-  `--enter` sends the trigger message (`DFC!UPDT` + the request key). The test
-  builds react to it, and the user application must have its own entry (see
-  `app_user.c`). The updater listens on UART0, UART1 and, in diag builds,
+  `--enter` sends the trigger, 20 consecutive `!`. The user application
+  (`app_user.c`) and the test builds react to it on both UARTs. Replace it in
+  `app_user.c` if your protocol has its own "enter updater" message. The updater listens on UART0, UART1 and, in diag builds,
   USB, and serves whichever port speaks first. `--baud` (default 921600)
   must match the link. `--block-size` shortens bursts for a pass-through
   device. `tools/sim_board.py` simulates a board over a pty, for testing the

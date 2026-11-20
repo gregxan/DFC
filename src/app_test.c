@@ -88,16 +88,15 @@ static void test_pins_init(void) {}
 
 static uint8_t s_buf[256];
 
-/* Rev 2.25: the generic updater trigger ("DFC!UPDT" + request key, see
- * updater.h) on either UART reboots into the updater on that link. */
+/* Rev 2.25: the generic updater trigger (20 consecutive '!', updater.h) on
+ * either UART reboots into the updater on that link. */
 static updater_trigger_t s_trigger[LINK_COUNT];
 _Static_assert((int)LINK_0 == (int)UPDATER_LINK_UART0 && (int)LINK_1 == (int)UPDATER_LINK_UART1,
                "link and updater link numbers must match");
 
 static void check_trigger(unsigned i, const uint8_t *p, size_t n) {
-    uint64_t key;
-    if (updater_trigger_scan(&s_trigger[i], p, n, &key)) {
-        (void)updater_request((updater_link_t)i, key); /* no return if the key is right */
+    if (updater_trigger_scan(&s_trigger[i], p, n)) {
+        (void)updater_request((updater_link_t)i, UPDATER_REQUEST_KEY); /* does not return */
     }
 }
 

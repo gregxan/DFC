@@ -7,7 +7,7 @@ firmware itself: it checks the host side, not the board.
 
 Models the updater protocol of src/updater.c (framing, HELLO, BEGIN with
 bypass flags, chunked DATA assembly, FINISH checks, trial, CONFIRM, REBOOT)
-and the test application's trigger + echo."""
+and the test application's trigger (20 x '!') + echo."""
 import os, struct, sys, time, zlib, select
 
 SOF = b"\xA5\x5A"
@@ -130,14 +130,11 @@ class Board:
     def feed(self, data):
         if self.mode == "app":
             for b in data:
-                self.win = (self.win + bytes([b]))[-16:]
-                if len(self.win) == 16 and self.win[:8] == b"DFC!UPDT":
-                    k = struct.unpack("<Q", self.win[8:])[0]
-                    if k == REQ_KEY:
-                        self.log.append("trigger accepted")
-                        self.mode = "updater"; self.buf = b""; self.win = b""
-                        return
-                    self.log.append("trigger with wrong key rejected")
+                self.win = (self.win + bytes([b]))[-20:]
+                if self.win == b"!" * 20:
+                    self.log.append("trigger accepted")
+                    self.mode = "updater"; self.buf = b""; self.win = b""
+                    return
             os.write(self.fd, data)  # echo application
             return
         self.buf += data

@@ -29,10 +29,20 @@
 static uint8_t s_link0_buf[512];
 static uint8_t s_link1_buf[512];
 
-/* Firmware update entry (Rev 2.25). Example only, commented out: without an
- * entry like this a deployed unit cannot be updated over its UARTs. See the
- * example in link0_handler(). */
-/* static updater_trigger_t s_upd_trigger[LINK_COUNT]; */
+/* Firmware update entry (Rev 2.25): 20 consecutive '!' on either UART
+ * reboots into the updater (updater.h, updater_trigger_scan()). Without an
+ * entry like this a deployed unit cannot be updated over its UARTs. Replace
+ * it with your own protocol's "enter updater" message if you prefer, calling
+ * updater_request(link, UPDATER_REQUEST_KEY) when it arrives. */
+static updater_trigger_t s_upd_trigger[LINK_COUNT];
+
+static void check_update_request(link_id_t id, const uint8_t *p, size_t n) {
+    if (updater_trigger_scan(&s_upd_trigger[id], p, n)) {
+        /* Reboots into the updater (UART0, UART1, and USB in diag builds);
+         * does not return. */
+        (void)updater_request(id == LINK_0 ? UPDATER_LINK_UART0 : UPDATER_LINK_UART1, UPDATER_REQUEST_KEY);
+    }
+}
 
 void app_init(void) {}
 
@@ -85,24 +95,8 @@ static void link0_handler(void) {
         if (n == 0u) {
             break;
         }
+        check_update_request(LINK_0, s_link0_buf, n); /* firmware update entry */
         /* TODO: parse / process LINK_0 data here. */
-
-        /* Firmware update entry (Rev 2.25, updater.h), example. Either use
-         * the generic trigger message, "DFC!UPDT" + the 64-bit request key,
-         * which is what tools/dfc_update.py --enter sends on a UART:
-         *
-         *     uint64_t key;
-         *     if (updater_trigger_scan(&s_upd_trigger[LINK_0], s_link0_buf, n, &key)) {
-         *         (void)updater_request(UPDATER_LINK_UART0, key);
-         *     }
-         *
-         * or have your own protocol's "enter updater" message carry the key
-         * and call updater_request(UPDATER_LINK_UART0, key_from_message).
-         * Either way updater_request() checks the key. If it is right, the
-         * board reboots into the updater listening on UART0, UART1 (and USB
-         * in diag builds), and the call does not return. A wrong key returns
-         * false and changes nothing. Do the same in link1_handler() with
-         * UPDATER_LINK_UART1 if updates may also come in on UART1. */
         (void)link_write(LINK_1, s_link0_buf, n);
         avail -= n;
     }
@@ -132,6 +126,7 @@ static void link1_handler(void) {
         if (n == 0u) {
             break;
         }
+        check_update_request(LINK_1, s_link1_buf, n); /* firmware update entry */
         /* TODO: parse / process LINK_1 data here */
         (void)link_write(LINK_0, s_link1_buf, n);
         avail -= n;

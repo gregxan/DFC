@@ -504,23 +504,11 @@ static const upd_port_t *const k_ports[] = {
 
 /* ------------------------------------------------------- trigger helper -- */
 
-bool updater_trigger_scan(updater_trigger_t *t, const uint8_t *p, size_t n, uint64_t *key) {
-    static const uint8_t k_prefix[8] = {'D', 'F', 'C', '!', 'U', 'P', 'D', 'T'};
+bool updater_trigger_scan(updater_trigger_t *t, const uint8_t *p, size_t n) {
     for (size_t i = 0; i < n; i++) {
-        /* Shift the byte into a 16-byte window; the message is the 8-byte
-         * prefix followed by the 8-byte key, little-endian. */
-        memmove(t->win, &t->win[1], sizeof t->win - 1u);
-        t->win[sizeof t->win - 1u] = p[i];
-        if (t->n < sizeof t->win) {
-            t->n++;
-        }
-        if (t->n == sizeof t->win && memcmp(t->win, k_prefix, sizeof k_prefix) == 0) {
-            uint64_t k = 0;
-            for (unsigned j = 0; j < 8u; j++) {
-                k |= (uint64_t)t->win[8u + j] << (8u * j);
-            }
-            *key = k;
-            t->n = 0u;
+        t->run = (p[i] == (uint8_t)UPDATER_TRIGGER_CHAR) ? t->run + 1u : 0u;
+        if (t->run >= UPDATER_TRIGGER_COUNT) {
+            t->run = 0u;
             return true;
         }
     }

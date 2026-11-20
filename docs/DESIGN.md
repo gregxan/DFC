@@ -551,13 +551,16 @@ writes flash. A frame stalled for 500 ms mid-way is dropped.
 - **Why polling is enough.** The protocol is stop-and-wait, so nothing
   arrives while the updater writes flash or replies. A byte with a framing
   error, break or overrun is dropped, and the frame CRC catches it.
-- **Entry.** `updater_trigger_scan()` recognises the generic trigger
-  message: `DFC!UPDT` followed by the 64-bit request key, little-endian,
-  16 bytes. It keeps a 16-byte window across calls and returns the key it
-  carried. The caller passes that key to `updater_request()`, which checks
-  it. The test applications scan both UARTs. `app_user.c` shows the call,
-  commented out. An application with its own protocol can carry the key in
-  its own message instead.
+- **Entry.** `updater_trigger_scan()` recognises the generic trigger: 20
+  consecutive `!` (`UPDATER_TRIGGER_CHAR`, `UPDATER_TRIGGER_COUNT`), counted
+  across calls; any other byte restarts the count. The caller then calls
+  `updater_request(link, UPDATER_REQUEST_KEY)`. The user application
+  (`check_update_request()` in `app_user.c`) and the test applications
+  (`check_trigger()` in `app_test.c`) scan both UARTs. The run carries no
+  key, so any stream with 20 `!` in a row enters the updater. Nothing is
+  written then, and the updater returns to the firmware after 90 s without
+  a host. An application with its own protocol can use its own message
+  instead.
 - **Host.** `dfc_update.py --uart` uses the port at `--baud`. `--enter`
   sends the trigger. A UART does not disappear on a reboot, so the script
   waits a second and retries HELLO. It skips request frames, so its own
@@ -747,7 +750,7 @@ reset still brings the old image back.
 | M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
 | F-1 … F-4 | `partition_table.json`, `CMakeLists.txt` (pt.uf2, E10 block, slot-size check); §4a |
 | F-5, F-6 | `g_updater_info`, `keep_info()`, `info_at()`, `scan_chunk()` (`updater.c`); `DFC_FW_VERSION`; `UPDATER_PROTOCOL`, `UPDATER_PROTOCOL_FLOOR` (`updater.h`); §4b |
-| F-7 … F-10 | `updater_request()`, `set_boot_flag()`, `updater_check_boot()`, `updater_trigger_scan()`, `updater_run()`, `k_ports[]`; `!` in `status_poll()`; `check_trigger()` (`app_test.c`); §4b3 |
+| F-7 … F-10 | `updater_request()`, `set_boot_flag()`, `updater_check_boot()`, `updater_trigger_scan()`, `updater_run()`, `k_ports[]`; `!` in `status_poll()`; `check_trigger()` (`app_test.c`); `check_update_request()` (`app_user.c`); §4b3 |
 | F-11 … F-13 | `parse_byte()`, `handle()`, `do_begin()`, `do_data()`, `reply_hello()`; §4b2 |
 | F-14 … F-17 | `flash_op()`, `partition_location()`, `write_sector()`, `do_finish()`; `tools/dfc_update.py` (`check_versions()`, `find_info()`) |
 | F-18 … F-20 | `set_tbyb()`, `flash_update_boot()`, `do_confirm()`, `updater_trial_pending()`; `crash_arm()`/`crash_feed()` gating in `main.c`/`crash.c`; §4c |

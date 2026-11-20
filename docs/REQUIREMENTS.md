@@ -261,8 +261,8 @@ Firmware for a Seeed XIAO RP2350 that:
   - A power cycle or the RESET button clears it.
 - **F-9** Triggers:
   - **Diagnostic USB console:** the `!` key.
-  - **Generic trigger message:** `DFC!UPDT` followed by the request key, little-endian (16 bytes), recognised by `updater_trigger_scan()`. The test applications shall act on it on both UARTs.
-  - **User application:** an application-defined message carrying the request key, passed to `updater_request()`. `app_user.c` shows the call. Without such an entry a deployed unit cannot be updated.
+  - **Generic trigger:** 20 consecutive `!` characters on a UART, recognised by `updater_trigger_scan()`. The user application and the test applications shall act on it on both UARTs, calling `updater_request(link, UPDATER_REQUEST_KEY)`. The run carries no key, so any stream containing it enters the updater, which writes nothing and returns to the firmware after 90 s without a host (F-10).
+  - **User application:** it may replace the generic trigger with its own "enter updater" message, calling `updater_request()` with the request key. Without some entry a deployed unit cannot be updated.
 - **F-10** In updater mode:
   - The updater shall listen on UART0 and UART1 (921,600 baud 8N1, polled, independent of the link drivers) and, in diagnostic builds, on USB.
   - It shall serve the first port that delivers a valid frame.

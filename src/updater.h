@@ -72,24 +72,26 @@ typedef enum {
  * from the main loop. */
 bool updater_request(updater_link_t link, uint64_t key);
 
-/* Optional helper for applications: the generic trigger message.
+/* Optional helper for applications: the generic trigger, a run of
+ * UPDATER_TRIGGER_COUNT consecutive '!' characters on a link.
  *
- *     "DFC!UPDT" (8 ASCII bytes) followed by the 64-bit request key,
- *     little-endian (16 bytes in all)
+ * Feed it every received byte of a link, in order (any chunking). It returns
+ * true once the run is complete; the caller then calls
+ * updater_request(link, UPDATER_REQUEST_KEY). Any other byte restarts the
+ * count. The user and test applications use it on both UARTs;
+ * tools/dfc_update.py sends it with --enter --uart. An application with its
+ * own protocol can use its own "enter updater" message instead.
  *
- * Feed it every received byte of a link, in order (any chunking). When the
- * message has passed by it returns true with the key it carried. The caller
- * then calls updater_request(link, key), which checks the key, so a wrong
- * one changes nothing. The test applications (app_test.c) use it.
- * tools/dfc_update.py sends it with --enter on a UART. An application with
- * its own protocol can use its own message instead. */
-#define UPDATER_TRIGGER_PREFIX "DFC!UPDT"
+ * The run carries no key, so any stream containing 20 '!' in a row enters
+ * the updater. Then nothing is written: after 90 s without a host it
+ * reboots back into the firmware. */
+#define UPDATER_TRIGGER_CHAR '!'
+#define UPDATER_TRIGGER_COUNT 20u
 typedef struct {
-    uint8_t win[16];
-    uint8_t n;
+    uint32_t run; /* consecutive trigger characters seen */
 } updater_trigger_t;
 
-bool updater_trigger_scan(updater_trigger_t *t, const uint8_t *p, size_t n, uint64_t *key);
+bool updater_trigger_scan(updater_trigger_t *t, const uint8_t *p, size_t n);
 
 /* Rejected updater_request() calls since boot (diagnostics). */
 uint32_t updater_rejects(void);

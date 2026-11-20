@@ -60,10 +60,9 @@ ERRORS = {
 BYPASS_NO_INFO = 0x1
 BYPASS_BELOW_FLOOR = 0x2
 BYPASS_NO_TRIAL = 0x4
-# src/updater.h UPDATER_REQUEST_KEY and the generic trigger message
-# (updater_trigger_scan): --enter on a UART sends TRIGGER_PREFIX + key.
-REQUEST_KEY = 0xDFCC0DEB007ED00D
-TRIGGER_PREFIX = b"DFC!UPDT"
+# src/updater.h UPDATER_TRIGGER_CHAR / UPDATER_TRIGGER_COUNT: --enter on a
+# UART sends this run; the application then calls updater_request().
+TRIGGER = b"!" * 20
 # src/updater.h UPDATER_NO_TRIAL_KEY. --no-trial makes the user type it.
 NO_TRIAL_KEY = 0xDFCBADA55B007ED0
 
@@ -414,8 +413,8 @@ class Board:
         link = self.open()
         try:
             if self.uart:
-                link.send(TRIGGER_PREFIX + struct.pack("<Q", REQUEST_KEY))
-                what = "the updater trigger message"
+                link.send(TRIGGER)
+                what = "the updater trigger (20 x '!')"
             else:
                 link.send(b"!")
                 what = "'!'"
@@ -502,7 +501,7 @@ def main() -> int:
     ap.add_argument("--baud", type=int, default=921600, help="--uart: baud rate (default 921600, the links' rate)")
     ap.add_argument("--enter", action="store_true",
                     help="first reboot the running firmware into updater mode: '!' on the USB console, or "
-                         "with --uart the trigger message (\"DFC!UPDT\" + request key)")
+                         "with --uart the trigger, 20 consecutive '!'")
     ap.add_argument("--allow-downgrade", action="store_true",
                     help="flash: allow an older firmware version than the one running")
     ap.add_argument("--allow-older-updater", action="store_true",
