@@ -1,8 +1,25 @@
 # Verification (section 9)
 
-None of the procedures below has been run yet. Every numeric limit in the
-requirements is an engineering estimate that these measurements must
-confirm.
+Every numeric limit in the requirements is an engineering estimate that
+these measurements must confirm. Results so far are logged in the next
+section. Procedures not listed there have not been run.
+
+## Bench results
+
+**Magnetometer, `diag` build, board and sensor only (Rev 2.25, firmware `eeb7a72`).**
+
+| Check | Result |
+|---|---|
+| Wiring check, start-up (ID, OTP, calibration), measurement timing | Pass |
+| Cold boot: `Last reset` normal, all checks OK | Pass |
+| 1 kHz completeness: `not ready` 0 over several minutes, single-cycle mode | Pass |
+| Rate changes 1000 / 200 / 100 / 50 Hz: no `stale`, `not ready`, `gaps` or `invalid` at the changes | Pass (after `737b12e`) |
+| Noise (mG RMS, x / y / z) | 1000 Hz 0.76 / 1.05 / 1.32; 200 Hz 0.29 / 0.43 / 0.53; 100 Hz 0.21 / 0.32 / 0.41; 50 Hz about the same as 100 Hz. Allow ~10 s of settling after a change |
+| SDA / SCL disconnect and reconnect while running (V-6, M-7a) | Pass (after the bus-clear STOP fix, `897909b`) |
+| Sensor powered after boot (V-6) | Accepted limitation: needs an MCU reset (see V-6) |
+| RESET button, 20 times | Pass |
+| Offset removal (180° turn), axis orientation, SDA short to GND, sensor power-cycle at run time (M-2b) | Not run |
+| SET/RESET modes, saturation, M-8 durations, V-5a, supply current | Not run (need a debugger, analyzer or meter) |
 
 All tools run on Windows (V-7). Install the Python dependency once:
 
