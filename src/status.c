@@ -15,6 +15,7 @@
 
 #include "diag.h"
 #include "mag.h"
+#include "wirecheck.h"
 
 #include "prof.h"
 
@@ -22,7 +23,7 @@ extern volatile bool g_app_baud_ok;
 
 #if APP_MODE == APP_MODE_USER
 extern volatile uint32_t g_epoch_start_max_us;
-#define N_LINES 9u /* adds EPOCH and PROF */
+#define N_LINES 10u /* adds EPOCH and PROF */
 #else
 /* Test application (app_test.c) results. */
 extern volatile uint32_t g_app_mag_gaps;
@@ -30,7 +31,7 @@ extern volatile uint32_t g_app_mag_valid;
 extern volatile uint32_t g_app_mag_invalid;
 extern volatile uint32_t g_app_mag_stale;
 extern volatile uint32_t g_app_rx_pattern_errors[2];
-#define N_LINES 7u
+#define N_LINES 8u
 #endif
 
 #define STATUS_PERIOD_US 1000000u
@@ -135,13 +136,24 @@ static int format_line(unsigned line) {
                         " oy=%" PRId32 " oz=%" PRId32 "\r\n",
                         (unsigned)s_mag.offset_valid, s_total[DIAG_MAG_OFFSET_CAL], s_total[DIAG_MAG_SATURATED],
                         s_mag.offset[0], s_mag.offset[1], s_mag.offset[2]);
+    case 6: { /* Rev 2.18: start-up wiring check */
+        const wirecheck_t *w = wirecheck_result();
+        return snprintf(s_buf, n, "WIRE ran=%u sda_low=%u scl_low=%u sda_pullup=%u scl_pullup=%u shorted=%u"
+                        " found=%u found_swapped=%u mag=%u mag_swapped=%u first=0x%02X first_swapped=0x%02X\r\n",
+                        (unsigned)w->ran, (unsigned)w->held_low[WIRE_SDA], (unsigned)w->held_low[WIRE_SCL],
+                        (unsigned)w->ext_pullup[WIRE_SDA], (unsigned)w->ext_pullup[WIRE_SCL], (unsigned)w->shorted,
+                        (unsigned)w->n_found[0], (unsigned)w->n_found[1],
+                        (unsigned)wirecheck_found(0u, (uint8_t)MAG_I2C_ADDR),
+                        (unsigned)wirecheck_found(1u, (uint8_t)MAG_I2C_ADDR),
+                        w->n_found[0] ? (unsigned)w->found[0][0] : 0u, w->n_found[1] ? (unsigned)w->found[1][0] : 0u);
+    }
 #if APP_MODE == APP_MODE_USER
-    case 7: /* EX-8, D-4: 1 ms epoch work time */
+    case 8: /* EX-8, D-4: 1 ms epoch work time */
         return snprintf(s_buf, n, "EPOCH last_us=%" PRIu32 " max_us=%" PRIu32 " avg_us=%" PRIu32
                         " overrun=%" PRIu32 " start_max_us=%" PRIu32 " count=%" PRIu32 "\r\n",
                         us(g_prof[PROF_EPOCH].last), us(g_prof[PROF_EPOCH].max), us(prof_avg(PROF_EPOCH)),
                         s_total[DIAG_EPOCH_OVERRUN], g_epoch_start_max_us, (uint32_t)g_prof[PROF_EPOCH].count);
-    case 8: { /* D-6: sections, as last/max/avg in us */
+    case 9: { /* D-6: sections, as last/max/avg in us */
         int len = snprintf(s_buf, n, "PROF");
         for (unsigned i = 1; i < PROF_COUNT && len > 0 && (unsigned)len < n; i++) {
             len += snprintf(s_buf + len, n - (unsigned)len, " %s=%" PRIu32 "/%" PRIu32 "/%" PRIu32, g_prof_name[i],
@@ -194,6 +206,8 @@ enum {
     H_MAG_HEALTH,
     H_MAG_FIELD,
     H_MAG_CAL,
+    H_WIRE,
+    H_WIRE_VERDICT,
     H_BLANK2,
     H_TIM_HEAD,
     H_TIM_ISR,
@@ -378,6 +392,23 @@ static int format_human(unsigned line) {
                         s_mag.offset[0], s_mag.offset[1], s_mag.offset[2],
                         s_mag.offset_valid ? "calibrated" : "not calibrated", s_total[DIAG_MAG_OFFSET_CAL],
                         s_total[DIAG_MAG_SATURATED]);
+    case H_WIRE: { /* Rev 2.18: start-up wiring check */
+        const wirecheck_t *w = wirecheck_result();
+        char f[2][32];
+        for (unsigned s = 0; s < 2u; s++) {
+            unsigned k = w->n_found[s] < WIRE_MAX_FOUND ? w->n_found[s] : WIRE_MAX_FOUND;
+            int m = snprintf(f[s], sizeof f[s], k ? "" : "none");
+            for (unsigned j = 0; j < k && m > 0 && (unsigned)m < sizeof f[s]; j++) {
+                m += snprintf(f[s] + m, sizeof f[s] - (unsigned)m, "%s0x%02X", j ? " " : "", (unsigned)w->found[s][j]);
+            }
+        }
+        return snprintf(s_buf, n, "  Wiring       (boot check) SDA %s   SCL %s   %s   answers: %s   swapped: %s\r\n",
+                        w->held_low[WIRE_SDA] ? "LOW" : (w->ext_pullup[WIRE_SDA] ? "pulled up" : "no pull-up"),
+                        w->held_low[WIRE_SCL] ? "LOW" : (w->ext_pullup[WIRE_SCL] ? "pulled up" : "no pull-up"),
+                        w->shorted ? "SDA-SCL SHORTED" : "no short", f[0], f[1]);
+    }
+    case H_WIRE_VERDICT:
+        return snprintf(s_buf, n, "               -> %s\r\n", wirecheck_verdict());
     case H_TIM_HEAD:
         return snprintf(s_buf, n, "TIMING (worst case since boot)\r\n");
     case H_TIM_ISR:

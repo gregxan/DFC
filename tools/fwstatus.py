@@ -3,7 +3,7 @@
 The firmware prints a readable report by default, for any serial terminal.
 This tool sends 'm' when it connects to switch the firmware to compact
 machine lines, which it parses and shows as a dashboard. In machine
-format, each second the firmware emits seven lines:
+format, each second the firmware emits eight lines:
 
     STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=.. status_max_us=.. tick_overrun=..
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
@@ -11,6 +11,7 @@ format, each second the firmware emits seven lines:
     MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. no_ack=.. wrong_id=.. cause=.. id=0x.. bus_clear=.. ...
     MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=..
     CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
+    WIRE ran=.. sda_low=.. scl_low=.. sda_pullup=.. scl_pullup=.. shorted=.. found=.. mag=.. mag_swapped=.. ...
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
 
 User application builds (diag-user) add:
@@ -44,7 +45,7 @@ import serial  # pyserial
 
 def parse_line(line: str) -> tuple[str, dict[str, int]] | None:
     parts = line.strip().split()
-    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "TIM_NS", "EPOCH", "PROF"):
+    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "WIRE", "TIM_NS", "EPOCH", "PROF"):
         return None
     values: dict[str, int] = {}
     for p in parts[1:]:
@@ -153,7 +154,7 @@ def delta(after: dict[str, dict[str, int]], before: dict[str, dict[str, int]], g
 
 def format_report(s: dict[str, dict[str, int]]) -> str:
     out = []
-    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "TIM_NS", "EPOCH", "PROF"):
+    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "WIRE", "TIM_NS", "EPOCH", "PROF"):
         if g in s:
             out.append(g + " " + " ".join(f"{k}={v}" for k, v in s[g].items()))
     return "\n".join(out)
@@ -181,6 +182,31 @@ def _cause_text(cause: int, pid: int) -> str:
     if cause == 6:
         return "faulted at run time on not-ready samples; reconfiguring"
     return "fault flag set"
+
+
+def _wire_text(w: dict[str, int]) -> str:
+    """Start-up wiring check (Rev 2.18), same conclusions as the firmware."""
+    def pin(name: str) -> str:
+        if w.get(name + "_low"):
+            return f"{name.upper()} LOW"
+        return f"{name.upper()} " + ("pulled up" if w.get(name + "_pullup") else "no pull-up")
+    facts = f"{pin('sda')}, {pin('scl')}, " + ("SDA-SCL SHORTED" if w.get("shorted") else "no short")
+    if w.get("sda_low") or w.get("scl_low"):
+        why = "a line is held low: shorted to GND, or pulled to an unpowered VDDIO"
+    elif w.get("shorted"):
+        why = "SDA and SCL are shorted together"
+    elif w.get("mag"):
+        why = "sensor answers at 0x30" + ("" if w.get("sda_pullup") and w.get("scl_pullup")
+                                          else ", but external pull-ups are missing")
+    elif w.get("mag_swapped"):
+        why = "sensor answers only with SDA/SCL swapped: swap the D4/D5 wires"
+    elif w.get("found") or w.get("found_swapped"):
+        why = f"a device answers at 0x{w.get('first') or w.get('first_swapped'):02X}, not 0x30"
+    elif not w.get("sda_pullup") and not w.get("scl_pullup"):
+        why = "nothing answers, no pull-ups: sensor VDDIO not powered, or SDA/SCL not reaching it"
+    else:
+        why = "pull-ups present but nothing answers: check CS to VDDIO, VDD, GND"
+    return facts + " -> " + why
 
 
 def _paint(text: str, colour: str, use: bool) -> str:
@@ -264,6 +290,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
                  f"bus clears {g('MAG', 'bus_clear')}   "
                  f"recoveries {g('MAGS', 'recovered')}   run-time faults {count('MAGS', 'runtime_fault')}")
     lines.append(f"  not ready {count('MAGS', 'not_ready')}   saturated {count('CAL', 'saturated', False)}")
+    if g("WIRE", "ran"):
+        lines.append("  wiring (boot check)  " + _wire_text(cur.get("WIRE", {})))
     if not fault:
         for key, label in (("i2c_error", "I2C errors"), ("timeout", "timeouts"), ("missed_tick", "missed ticks")):
             if d("MAG", key):

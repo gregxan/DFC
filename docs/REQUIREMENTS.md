@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.17**. The changes since Revision 2 are listed in sections 11 to 27.
+**Revision 2.18**. The changes since Revision 2 are listed in sections 11 to 28.
 
 ## 1. Scope
 
@@ -196,6 +196,7 @@ Firmware for a Seeed XIAO RP2350 that:
   - resynchronising the RX read position after overflow (U-9).
 
   Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
+- **D-7** Diagnostic builds shall check the magnetometer wiring once at startup, before the I2C controller takes the pins, using no test equipment: each line's level with the internal pull-up (held low), each line's rise against the internal pull-down after being driven low (external pull-up present), SDA–SCL short, and an I2C address scan (0x08–0x77) with SDA/SCL as wired and swapped. The results and a one-line conclusion are reported over USB. Production builds shall not include it. *(Added in Rev 2.18.)*
 - **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
 
 ## 7. Resources
@@ -480,3 +481,7 @@ This closes the open decision from the Rev 2.15 review.
 - **Amended M-2a and D-1.** The product-ID fault counter is split into "no answer" (address not acknowledged) and "wrong ID". Other bus failures during a probe now count as I2C errors. The USB machine format keeps `pid_fault` as the sum of the two.
 - **Amended V-6.** The disconnected-sensor test checks the no-answer count and the fault cause.
 - **USB status report (diagnostic builds).** The report is readable by default in any terminal. Sending `m` switches to the machine format and `h` switches back.
+
+## 28. Revision 2.18 Changes
+
+- **Added D-7.** A start-up wiring self-test in diagnostic builds: held-low lines, external pull-ups, an SDA–SCL short, and address scans as wired and swapped. It reports a conclusion such as "swap the D4/D5 wires" or "sensor VDDIO not powered", for bring-up without a meter. It takes about 110 ms before the main loop, and only in diagnostic builds.

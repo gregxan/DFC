@@ -110,6 +110,32 @@ A UART with nothing wired to its RX shows all zero counters and
 `pattern_err=0`, because it receives nothing (the pull-up holds the line
 idle).
 
+### Magnetometer wiring check without test equipment (Rev 2.18)
+
+Diagnostic builds test the SDA/SCL wiring at every start-up, using the
+RP2350's own pull resistors and a slow address scan. The readable report
+shows it under the magnetometer:
+
+```
+  Wiring       (boot check) SDA pulled up   SCL pulled up   no short   answers: none   swapped: 0x30
+               -> sensor answers only with SDA/SCL swapped: swap the D4/D5 wires
+```
+
+| Conclusion | What to do |
+|---|---|
+| sensor answers at 0x30 as wired: wiring OK | wiring is fine; any remaining fault is in the sensor or its configuration |
+| answers at 0x30, but SDA/SCL lack external pull-ups | add 4.7 kΩ from SDA and from SCL to 3V3 (the internal pull-ups only work at the scan's slow speed) |
+| answers only with SDA/SCL swapped | swap the wires on D4 and D5 (or at the sensor end) |
+| nothing answers and no pull-ups seen | the sensor board's VDDIO is not powered (its pull-ups run from VDDIO), or SDA/SCL don't reach the sensor |
+| pull-up on one line only | that other line's wire or crimp is open, or on the wrong pin |
+| pull-ups present but nothing answers | VDDIO is powered: check CS is tied to VDDIO, VDD is powered, and GND is connected |
+| a line held low | that line is shorted to GND, or its pull-up goes to an unpowered VDDIO |
+| SDA and SCL are shorted together | look for a solder bridge or two wires on one pin |
+| a device answers, but not at 0x30 | a different chip is on the bus |
+
+The check runs only at start-up. After rewiring (with the USB unplugged),
+plug back in, or press **R**, and reconnect the terminal.
+
 ### Optional fault checks (same wiring)
 
 - **Break and line errors.** Unplug the jumper from one RX pin and briefly

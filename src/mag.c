@@ -15,6 +15,7 @@
 #include "config.h"
 #include "diag.h"
 #include "tick.h"
+#include "wirecheck.h"
 
 #if MAG_BUS_CLEAR
 #include "i2c_bus_clear.pio.h"
@@ -771,6 +772,11 @@ static void startup_bus_clear(void) {
 
 bool mag_init(void) {
     sleep_ms(10); /* MMC5983MA power-on time */
+
+#if APP_USB_STATUS
+    /* Rev 2.18: diagnostic builds check the SDA/SCL wiring first. */
+    wirecheck_run();
+#endif
 
 #if MAG_BUS_CLEAR
     startup_bus_clear();

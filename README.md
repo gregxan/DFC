@@ -272,6 +272,10 @@ UART-related interrupt (B-20).
   terminal for compact machine lines (`GROUP key=value`), or `h` to go back.
   The change applies from the next report. `fwstatus.py` and `soak_test.py`
   send `m` themselves when they connect.
+- **Wiring check.** Diagnostic builds also test the magnetometer's SDA/SCL
+  wiring at start-up, with no test equipment, and print a conclusion such
+  as "swap the D4/D5 wires" or "sensor VDDIO not powered" under the
+  magnetometer section. See `docs/VERIFICATION.md` for what each one means.
 
 Read it with:
 
