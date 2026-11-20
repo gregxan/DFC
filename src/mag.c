@@ -40,6 +40,36 @@ enum { PRE_NONE = 0, PRE_SET = 1, PRE_RESET = 2, PRE_COUNT = 3 };
 
 volatile uint32_t g_mag_sr_mode = MAG_SR_MODE_DEFAULT;
 volatile uint32_t g_mag_sr_interval = MAG_SR_INTERVAL_DEFAULT;
+volatile uint32_t g_mag_rate_hz = MAG_RATE_DEFAULT_HZ;
+
+/* M-3b (Rev 2.25): output rates. Each sample is one triggered measurement
+ * at the sensor's own bandwidth setting; nothing is averaged in firmware.
+ * The measurement starts at the end of a transaction (~0.45 ms after its
+ * tick) and is read ~0.06 ms after the tick period_ticks later, so it has
+ * about period_ticks - 0.4 ms to finish:
+ *   1000 Hz: BW 800 Hz, 0.5 ms (datasheet), 0.6 ms available, 1.2 mG RMS
+ *    200 Hz: BW 200 Hz, 4 ms,               4.6 ms available, 0.6 mG RMS
+ *    100 Hz: BW 100 Hz, 8 ms,               9.6 ms available, 0.4 mG RMS
+ *     50 Hz: BW 100 Hz, 8 ms,              19.6 ms available, 0.4 mG RMS
+ * BW 400 Hz (2 ms) has no slot: 500 Hz leaves 1.6 ms. 50 Hz has the same
+ * noise as 100 Hz, as BW 100 Hz is the sensor's slowest setting.
+ * wait_ms: start-up wait from trigger to read (blocking calibration). */
+typedef struct {
+    uint16_t hz;
+    uint8_t period_ticks;
+    uint8_t bw;
+    uint8_t wait_ms;
+} mag_rate_t;
+
+static const mag_rate_t k_rates[] = {
+    {1000u, 1u, MMC_CTRL1_BW_800HZ, 2u},
+    {200u, 5u, MMC_CTRL1_BW_200HZ, 5u},
+    {100u, 10u, MMC_CTRL1_BW_100HZ, 9u},
+    {50u, 20u, MMC_CTRL1_BW_100HZ, 9u},
+};
+#define RATE_COUNT (sizeof k_rates / sizeof k_rates[0])
+#define BW_NONE 0xFFu
+_Static_assert(TICK_PERIOD_US == 1000u, "k_rates assumes a 1 ms tick");
 
 typedef enum {
     MAG_FAULT,    /* product ID not confirmed: re-probe at 5 Hz (M-2)   */
@@ -94,9 +124,21 @@ static uint32_t s_cycle_step;     /* 0 none, 1 RESET pending, 2 SET pending     
 static uint32_t s_since_pulse;    /* completed transactions since the last SET  */
 static bool s_pulse_now;          /* entering MAG_SR_PULSE: pulse immediately   */
 
-/* Sample command lists, one per PRE_*. */
-static uint32_t s_cmd[PRE_COUNT][I2C_TX_FIFO_DEPTH] __attribute__((aligned(4)));
+/* M-3b (Rev 2.25) rate state. s_rate_applied: rate the sensor is set to
+ * (updated when a transaction that wrote it completes); s_cur_rate: rate of
+ * the transaction in flight; s_trig_rate: rate of the measurement it reads.
+ * Tick ISR and I2C ISR only (never interleaved, see above). */
+static volatile uint32_t s_rate_applied;
+static volatile uint32_t s_cur_rate;
+static uint32_t s_trig_rate;
+static uint32_t s_next_tick; /* tick index of the next sample transaction */
+
+/* Sample command lists, one per PRE_*, plus one built when the rate changes
+ * (with the bandwidth write). The longest is 19 words. */
+#define CMD_MAX 20u
+static uint32_t s_cmd[PRE_COUNT][CMD_MAX] __attribute__((aligned(4)));
 static uint32_t s_cmd_len[PRE_COUNT];
+static uint32_t s_cmd_rate[CMD_MAX] __attribute__((aligned(4)));
 
 /* The 9-byte DMA read lands in status, raw[] and tout in one go (Rev 2.21). */
 _Static_assert(offsetof(mag_sample_t, raw) == offsetof(mag_sample_t, status) + 1u &&
@@ -143,8 +185,10 @@ static inline void i2c_irq_unmask(void) {
 }
 
 /* M-7 (Rev 2.8). No persistent Internal Control 0 bits are used (M-5:
- * Auto_SR_en is never set), so each write carries only its own bit. */
-static size_t build_cmds(uint32_t *c, unsigned pre) {
+ * Auto_SR_en is never set), so each write carries only its own bit.
+ * bw != BW_NONE adds a bandwidth write (M-3b) before the pulse/trigger, so
+ * the measurement triggered here already uses it. */
+static size_t __not_in_flash_func(build_cmds)(uint32_t *c, unsigned pre, unsigned bw) {
     size_t i = 0;
     /* Rev 2.21: Status first. Reading the output registers clears
      * Meas_M_Done, so a burst ending at Status always read "not ready". */
@@ -153,6 +197,10 @@ static size_t build_cmds(uint32_t *c, unsigned pre) {
     c[i++] = CMD_RESTART | MMC_REG_XOUT0;    /* RESTART + W(0x00)    */
     for (unsigned k = 0; k < MMC_READ_BYTES - 1u; k++) {
         c[i++] = CMD_READ | (k == 0u ? CMD_RESTART : 0u); /* RESTART + R x8 */
+    }
+    if (bw != BW_NONE) {
+        c[i++] = CMD_RESTART | MMC_REG_CTRL1;
+        c[i++] = bw;                          /* X/YZ-inhibit 0 (M-3) */
     }
     if (pre != PRE_NONE) {
         c[i++] = CMD_RESTART | MMC_REG_CTRL0;
@@ -171,6 +219,40 @@ static inline uint32_t sr_interval(void) {
         n = MAG_SR_INTERVAL_MAX;
     }
     return n;
+}
+
+/* M-3b: rate index for hz, or RATE_COUNT if not supported. */
+static unsigned __not_in_flash_func(rate_index)(uint32_t hz) {
+    for (unsigned i = 0; i < RATE_COUNT; i++) {
+        if (k_rates[i].hz == hz) {
+            return i;
+        }
+    }
+    return RATE_COUNT;
+}
+
+/* M-3b: rate for the next transaction; an invalid request is ignored. */
+static unsigned __not_in_flash_func(rate_select)(void) {
+    unsigned r = rate_index(g_mag_rate_hz);
+    return r < RATE_COUNT ? r : s_rate_applied;
+}
+
+uint32_t mag_rate_hz(void) {
+    return k_rates[s_rate_applied].hz;
+}
+
+bool mag_rate_supported(uint32_t hz) {
+    return rate_index(hz) < RATE_COUNT;
+}
+
+uint32_t mag_rate_next(uint32_t hz) {
+    unsigned r = rate_index(hz);
+    return k_rates[r + 1u < RATE_COUNT ? r + 1u : 0u].hz; /* invalid -> first */
+}
+
+uint8_t mag_rate_bw(uint32_t hz) {
+    unsigned r = rate_index(hz);
+    return k_rates[r < RATE_COUNT ? r : s_rate_applied].bw;
 }
 
 /* M-4: pick the pulse for the next transaction, applying any mode change. */
@@ -326,12 +408,22 @@ static void __not_in_flash_func(start_dma)(mag_txn_t txn, const uint32_t *cmd, u
 /* Start one sample transaction (M-7). Tick ISR only, I2C IRQ masked. */
 static void __not_in_flash_func(mag_start)(uint32_t tick) {
     unsigned pre = sr_select();
+    unsigned rate = rate_select(); /* M-3b */
+    const uint32_t *cmd = s_cmd[pre];
+    uint32_t len = s_cmd_len[pre];
+    if (rate != s_rate_applied) {
+        /* Also written again after an abort, as it may not have arrived. */
+        len = (uint32_t)build_cmds(s_cmd_rate, pre, k_rates[rate].bw);
+        cmd = s_cmd_rate;
+    }
 
     uint32_t slot = (s_latest == 0u) ? 1u : 0u; /* M-11 */
     s_cur_slot = slot;
     s_cur_tick = tick;
     s_cur_pre = pre;
-    start_dma(TXN_SAMPLE, s_cmd[pre], s_cmd_len[pre], &s_slots[slot].status, MMC_READ_BYTES);
+    s_cur_rate = rate;
+    s_next_tick = tick + k_rates[rate].period_ticks;
+    start_dma(TXN_SAMPLE, cmd, len, &s_slots[slot].status, MMC_READ_BYTES);
 }
 
 /* M-2 (Rev 2.7): read the product ID (non-blocking). */
@@ -348,6 +440,9 @@ static void __not_in_flash_func(config_start)(uint32_t tick) {
         mode = s_mode_applied;
     }
     s_mode_applied = mode;
+    unsigned rate = rate_select(); /* M-3b */
+    s_cur_rate = rate;
+    s_cfg_cmd[1] = k_rates[rate].bw;
     s_cur_tick = tick;
     start_dma(TXN_CONFIG, s_cfg_cmd, CFG_CMD_LEN, NULL, 0u);
 }
@@ -429,6 +524,7 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
                     : s_trig_reset  ? (uint8_t)MAG_SAMPLE_AFTER_RESET
                                     : (uint8_t)MAG_SAMPLE_OK;
         s->valid = (s->reason == MAG_SAMPLE_OK);
+        s->period_ticks = k_rates[s_trig_rate].period_ticks;
         s->seq = s_trig_tick;
         s->timestamp_us = s_trig_time_us; /* M-10 (Rev 2.6) */
         calibrate(s, done);
@@ -438,10 +534,12 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     } else {
         /* M-9: no prior measurement. */
         s_cal_have_reset = false;
+        uint32_t p = k_rates[s_cur_rate].period_ticks;
         s->reason = (uint8_t)MAG_SAMPLE_NO_PRIOR;
         s->valid = false;
-        s->seq = tick - 1u;
-        s->timestamp_us = tick_time_us(tick) - TICK_PERIOD_US; /* no trigger: nominal */
+        s->period_ticks = (uint8_t)p;
+        s->seq = tick - p;
+        s->timestamp_us = tick_time_us(tick) - p * TICK_PERIOD_US; /* no trigger: nominal */
     }
     __dmb();
     s_latest = s_cur_slot; /* single atomic 32-bit write */
@@ -449,6 +547,8 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     s_trig_ok = true;
     s_trig_tick = tick;
     s_trig_time_us = now_us; /* this transaction's TM_M write just completed */
+    s_trig_rate = s_cur_rate;
+    s_rate_applied = s_cur_rate; /* M-3b: any bandwidth write has landed */
     uint32_t pre = s_cur_pre;
     s_trig_reset = (pre == PRE_RESET);
     s_trig_cal_set = (pre == PRE_SET && s_cycle_step == 2u);
@@ -551,6 +651,9 @@ static void __not_in_flash_func(i2c_isr)(void) {
                 s_trig_cal_set = false;
                 s_trig_tick = s_cur_tick;
                 s_trig_time_us = now_us;
+                s_trig_rate = s_cur_rate; /* M-3b: written by the configuration */
+                s_rate_applied = s_cur_rate;
+                s_next_tick = s_cur_tick + k_rates[s_cur_rate].period_ticks;
                 s_cycle_step = 2u;   /* SET next */
                 s_since_pulse = 0u;
                 s_pulse_now = false;
@@ -595,7 +698,9 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
             s_cause = MAG_CAUSE_NOT_READY;
             s_probe_wait = MAG_REPROBE_PERIOD_TICKS - 1u;
             s_state = MAG_FAULT;
-        } else {
+        } else if ((int32_t)(tick - s_next_tick) >= 0) {
+            /* M-3b: every period_ticks-th tick; a skipped tick (M-6a) does
+             * not delay the sample beyond the next tick. */
             mag_start(tick);
         }
         break;
@@ -661,7 +766,8 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
         r->stale = true;
     } else {
         uint64_t now = time_us_64();
-        r->stale = (now - r->s.timestamp_us) > MAG_STALE_US;
+        uint32_t p = r->s.period_ticks != 0u ? r->s.period_ticks : 1u;
+        r->stale = (now - r->s.timestamp_us) > (uint64_t)MAG_STALE_US * p; /* M-17 */
     }
     diag_max(DIAG_T_API_MAG, diag_span_cycles(t0));
     return r->present;
@@ -731,7 +837,7 @@ static bool blocking_measure(int32_t xyz[3]) {
     if (!reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
         return false;
     }
-    sleep_ms(2); /* 0.5 ms measurement at BW = 11, with margin */
+    sleep_ms(k_rates[s_rate_applied].wait_ms); /* measurement time, with margin */
     /* Rev 2.21: Status before the data (reading the data clears Meas_M_Done). */
     uint8_t st = 0;
     if (!reg_read(MMC_REG_STATUS, &st) || !burst_read(b)) {
@@ -851,7 +957,12 @@ static void boot_experiment(void) {
         }
     }
     sleep_ms(10);
-    (void)reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ); /* restore */
+    /* 4. Rev 2.25: BW = 200 Hz, for the 200 Hz rate's margin. */
+    if (reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_200HZ) && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+        s_boot.t_200_us = time_measurement();
+    }
+    sleep_ms(10);
+    (void)reg_write(MMC_REG_CTRL1, k_rates[s_rate_applied].bw); /* restore */
     s_boot.ran = true;
 }
 #endif
@@ -907,8 +1018,18 @@ bool mag_init(void) {
 #if APP_USB_STATUS
     s_boot.status = st;
 #endif
-    /* M-3: 800 Hz bandwidth; continuous mode off. */
-    bool cfg = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
+    /* M-3, M-3b: the start-up rate's bandwidth; continuous mode off. */
+    unsigned rate = rate_index(g_mag_rate_hz);
+    if (rate >= RATE_COUNT) {
+        rate = rate_index(MAG_RATE_DEFAULT_HZ);
+        rate = rate < RATE_COUNT ? rate : 0u;
+        g_mag_rate_hz = k_rates[rate].hz;
+    }
+    s_rate_applied = rate;
+    s_cur_rate = rate;
+    s_trig_rate = rate;
+    s_next_tick = 0u;
+    bool cfg = ok && reg_write(MMC_REG_CTRL1, k_rates[rate].bw);
     cfg = cfg && reg_write(MMC_REG_CTRL2, 0u);
     cfg = cfg && reg_write(MMC_REG_CTRL3, 0u);
     if (ok && !cfg) {
@@ -954,7 +1075,7 @@ bool mag_init(void) {
     s_probe_cmd[0] = MMC_REG_PRODUCT_ID;                 /* START + W(0x2F)  */
     s_probe_cmd[1] = CMD_RESTART | CMD_READ | CMD_STOP;  /* RESTART R x1 STOP */
     s_cfg_cmd[0] = MMC_REG_CTRL1;
-    s_cfg_cmd[1] = MMC_CTRL1_BW_800HZ;
+    s_cfg_cmd[1] = k_rates[rate].bw; /* M-3b: set again by config_start() */
     s_cfg_cmd[2] = CMD_RESTART | MMC_REG_CTRL2;
     s_cfg_cmd[3] = 0u;
     s_cfg_cmd[4] = CMD_RESTART | MMC_REG_CTRL3; /* M-3: Internal Control 3 = 0 */
@@ -964,7 +1085,7 @@ bool mag_init(void) {
     s_cfg_cmd[8] = CMD_RESTART | MMC_REG_CTRL0; /* Rev 2.9: measure after the */
     s_cfg_cmd[9] = CMD_STOP | MMC_CTRL0_TM_M;   /* RESET for the calibration  */
     for (unsigned pre = 0; pre < PRE_COUNT; pre++) {
-        s_cmd_len[pre] = (uint32_t)build_cmds(s_cmd[pre], pre);
+        s_cmd_len[pre] = (uint32_t)build_cmds(s_cmd[pre], pre, BW_NONE);
     }
     s_mode_applied = mode;
     s_cycle_step = 0u;

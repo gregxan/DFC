@@ -35,6 +35,7 @@ extern volatile uint32_t g_app_mag_valid;
 extern volatile uint32_t g_app_mag_invalid;
 extern volatile uint32_t g_app_mag_stale;
 extern volatile uint32_t g_app_rx_pattern_errors[2];
+void app_mag_noise_take(uint32_t *count, uint32_t rms_ug[3]); /* D-10 */
 #define N_LINES 9u
 #endif
 
@@ -46,7 +47,8 @@ extern volatile uint32_t g_app_rx_pattern_errors[2];
  *                        parsed by tools/fwstatus.py and tools/soak_test.py.
  * Send 'm' over the same USB port for machine lines, 'h' for readable. The
  * switch takes effect at the next report. '~' reboots into the USB
- * bootloader for reflashing (Rev 2.20). */
+ * bootloader for reflashing (Rev 2.20). 'r' steps the magnetometer rate
+ * 1000 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). */
 static bool s_human = true;
 static bool s_want_human = true;
 
@@ -82,6 +84,12 @@ static uint32_t ns(diag_timing_t t) {
 /* Latest sample as the status line shows it (read once per report). */
 static mag_reading_t s_mag;
 static int32_t s_xyz[3];
+
+#if APP_MODE != APP_MODE_USER
+/* D-10 (Rev 2.25): noise of the valid samples in the last report period. */
+static uint32_t s_noise_n;
+static uint32_t s_noise_ug[3];
+#endif
 
 #if APP_MODE == APP_MODE_USER
 static uint32_t us(uint32_t cycles) {
@@ -140,10 +148,18 @@ static int format_line(unsigned line) {
         }
         return snprintf(s_buf, n, "MAGS sr_mode=%" PRIu32 " sr_interval=%" PRIu32 " recovered=%" PRIu32
                         " not_ready=%" PRIu32 " runtime_fault=%" PRIu32 " x=%" PRId32 " y=%" PRId32
-                        " z=%" PRId32 "\r\n",
+                        " z=%" PRId32 " rate_hz=%" PRIu32 " rate_req_hz=%" PRIu32 " bw=%u"
+#if APP_MODE != APP_MODE_USER
+                        " noise_n=%" PRIu32 " nx_ug=%" PRIu32 " ny_ug=%" PRIu32 " nz_ug=%" PRIu32
+#endif
+                        "\r\n",
                         g_mag_sr_mode, g_mag_sr_interval, s_total[DIAG_MAG_RECOVERED],
                         s_total[DIAG_MAG_NOT_READY], s_total[DIAG_MAG_RUNTIME_FAULT], s_xyz[0], s_xyz[1],
-                        s_xyz[2]);
+                        s_xyz[2], mag_rate_hz(), g_mag_rate_hz, (unsigned)mag_rate_bw(mag_rate_hz())
+#if APP_MODE != APP_MODE_USER
+                        , s_noise_n, s_noise_ug[0], s_noise_ug[1], s_noise_ug[2]
+#endif
+        );
     case 5:
         return snprintf(s_buf, n, "CAL offset_valid=%u offset_cal=%" PRIu32 " saturated=%" PRIu32 " ox=%" PRId32
                         " oy=%" PRId32 " oz=%" PRId32 "\r\n",
@@ -163,12 +179,13 @@ static int format_line(unsigned line) {
     case 7: { /* Rev 2.19: start-up results and measurement timing */
         const mag_boot_t *bt = mag_boot();
         return snprintf(s_buf, n, "BOOT ran=%u id=0x%02X status=0x%02X cause=%u cal_ok=%u cal_status=0x%02X"
-                        " t_fast_us=%u t_slow_us=%u t_rs_us=%u burst_status=0x%02X direct_status=0x%02X"
+                        " t_fast_us=%u t_slow_us=%u t_rs_us=%u t_200_us=%u burst_status=0x%02X direct_status=0x%02X"
                         " rst=%u rst_crumb=%u rst_irq=%" PRIu32 " rst_exc=%u rst_ticks=%" PRIu32
                         " rst_pc=0x%08" PRIX32 " rst_lr=0x%08" PRIX32 " rst_cfsr=0x%08" PRIX32 "\r\n",
                         (unsigned)bt->ran, (unsigned)bt->id, (unsigned)bt->status, (unsigned)bt->cause,
                         (unsigned)bt->cal_ok, (unsigned)bt->cal_status, (unsigned)bt->t_fast_us,
-                        (unsigned)bt->t_slow_us, (unsigned)bt->t_rs_us, (unsigned)bt->burst_status,
+                        (unsigned)bt->t_slow_us, (unsigned)bt->t_rs_us, (unsigned)bt->t_200_us,
+                        (unsigned)bt->burst_status,
                         (unsigned)bt->direct_status, (unsigned)crash_last()->kind, (unsigned)crash_last()->crumb,
                         crash_last()->irq, (unsigned)crash_last()->exception,
                         crash_last()->isr_tick - crash_last()->loop_tick, crash_last()->pc, crash_last()->lr,
@@ -227,12 +244,16 @@ enum {
     H_TX_IRQ,
     H_BLANK1,
     H_MAG_STATE,
+    H_MAG_RATE,
 #if APP_MODE != APP_MODE_USER
     H_MAG_SAMPLES,
 #endif
     H_MAG_BUS,
     H_MAG_HEALTH,
     H_MAG_FIELD,
+#if APP_MODE != APP_MODE_USER
+    H_MAG_NOISE,
+#endif
     H_MAG_CAL,
     H_WIRE,
     H_WIRE_VERDICT,
@@ -565,7 +586,7 @@ static int format_human(unsigned line) {
         static const char *const mode[] = {"echo test", "pattern test", "user application"};
         return snprintf(s_buf, n,
                         "\r\n===== DFC status #%" PRIu32 " | up %02" PRIu32 ":%02" PRIu32 ":%02" PRIu32
-                        " | %s =====\r\n(type 'm' machine format, 'h' readable, '~' reflash)\r\n",
+                        " | %s =====\r\n(type 'm' machine format, 'h' readable, 'r' mag rate, '~' reflash)\r\n",
                         s_seq, tm / 3600u, (tm / 60u) % 60u, tm % 60u, mode[APP_MODE]);
     }
     case H_BAUD:
@@ -640,6 +661,19 @@ static int format_human(unsigned line) {
             return put(len, "MAGNETOMETER  FAULT - re-probing 5 times a second\r\n");
         }
     }
+    case H_MAG_RATE: { /* M-3b (Rev 2.25) */
+        static const char *const k_bw[] = {"100 Hz", "200 Hz", "400 Hz", "800 Hz"};
+        uint32_t hz = mag_rate_hz();
+        uint32_t req = g_mag_rate_hz;
+        int len = put(0, "  Rate        %" PRIu32 " Hz: one measurement every %" PRIu32 " ms, sensor BW %s\r\n", hz,
+                      1000u / hz, k_bw[mag_rate_bw(hz) & 3u]);
+        if (req != hz) {
+            snprintf(t, sizeof t, "%" PRIu32 " Hz requested: %s", req,
+                     mag_rate_supported(req) ? "taking effect at the next sample" : "not supported, ignored");
+            len = wrap(len, LABEL, 14u, t);
+        }
+        return len;
+    }
 #if APP_MODE != APP_MODE_USER
     case H_MAG_SAMPLES: {
         char it[4][40];
@@ -677,6 +711,19 @@ static int format_human(unsigned line) {
     case H_MAG_FIELD:
         return snprintf(s_buf, n, "  Field       x %7" PRId32 "   y %7" PRId32 "   z %7" PRId32 "   (16384 counts/G)\r\n",
                         s_xyz[0], s_xyz[1], s_xyz[2]);
+#if APP_MODE != APP_MODE_USER
+    case H_MAG_NOISE: { /* D-10 (Rev 2.25) */
+        if (s_noise_n < 2u) {
+            return snprintf(s_buf, n, "  Noise       - (fewer than 2 valid samples this report)\r\n");
+        }
+        char v[3][16];
+        for (unsigned i = 0; i < 3u; i++) {
+            snprintf(v[i], sizeof v[i], "%" PRIu32 ".%02" PRIu32, s_noise_ug[i] / 1000u, (s_noise_ug[i] % 1000u) / 10u);
+        }
+        return snprintf(s_buf, n, "  Noise       x %s  y %s  z %s mG RMS (%" PRIu32 " samples, keep still)\r\n", v[0],
+                        v[1], v[2], s_noise_n);
+    }
+#endif
     case H_MAG_CAL:
         if (g_mag_sr_mode == MAG_SR_PULSE) {
             snprintf(a, sizeof a, "SET every %" PRIu32, g_mag_sr_interval);
@@ -726,10 +773,11 @@ static int format_human(unsigned line) {
     case H_BOOT_TIME: {
         const mag_boot_t *bt = mag_boot();
         return snprintf(s_buf, n,
-                        "  Meas. time  800 Hz %s   100 Hz %s\r\n" LABEL "800 Hz set before a repeated START %s\r\n" LABEL
+                        "  Meas. time  800 Hz %s   200 Hz %s   100 Hz %s\r\n" LABEL
+                        "800 Hz set before a repeated START %s\r\n" LABEL
                         "Status read alone / after data: 0x%02X / 0x%02X\r\n",
-                        ms_text(a, sizeof a, bt->t_fast_us), ms_text(b, sizeof b, bt->t_slow_us),
-                        ms_text(c, sizeof c, bt->t_rs_us), (unsigned)bt->direct_status,
+                        ms_text(a, sizeof a, bt->t_fast_us), ms_text(d, sizeof d, bt->t_200_us),
+                        ms_text(b, sizeof b, bt->t_slow_us), ms_text(c, sizeof c, bt->t_rs_us), (unsigned)bt->direct_status,
                         (unsigned)bt->burst_status);
     }
     case H_BOOT_VERDICT:
@@ -895,7 +943,8 @@ void status_poll(void) {
         return;
     }
 
-    /* From the host: 'm' machine format, 'h' readable, '~' bootloader. */
+    /* From the host: 'm' machine format, 'h' readable, 'r' mag rate,
+     * '~' bootloader. */
     crash_crumb(CRUMB_STATUS_INPUT);
     int ch = getchar_timeout_us(0);
     crash_crumb(CRUMB_IDLE);
@@ -903,6 +952,9 @@ void status_poll(void) {
         s_want_human = false;
     } else if (ch == 'h' || ch == 'H') {
         s_want_human = true;
+    } else if (ch == 'r' || ch == 'R') {
+        /* M-3b (Rev 2.25): next rate; shown from the next report. */
+        g_mag_rate_hz = mag_rate_next(g_mag_rate_hz);
     } else if (ch == '~') {
         static const char k_msg[] = "\r\n\r\n*** '~' received: rebooting into the USB bootloader. The COM port "
                                     "will close; the board appears as the RP2350 drive. ***\r\n";
@@ -931,6 +983,7 @@ void status_poll(void) {
         s_prev_valid = v;
         s_d_gaps = gp - s_prev_gaps;
         s_prev_gaps = gp;
+        app_mag_noise_take(&s_noise_n, s_noise_ug); /* D-10 */
         for (unsigned k = 0; k < 2u; k++) {
             uint32_t pe = g_app_rx_pattern_errors[k];
             s_d_pattern[k] = pe - s_prev_pattern[k];

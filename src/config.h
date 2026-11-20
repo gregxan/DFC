@@ -96,7 +96,16 @@
 /* M-6 */
 #define TICK_PERIOD_US 1000u
 
-/* M-17 */
+/* M-3b (Rev 2.25): magnetometer output rate at start-up, in Hz. One of
+ * 1000, 200, 100 or 50 (see the table in mag.c); changed at run time through
+ * g_mag_rate_hz (mag.h). Each rate uses the sensor's own bandwidth setting,
+ * one triggered measurement per output sample, with no averaging in
+ * firmware. */
+#ifndef MAG_RATE_DEFAULT_HZ
+#define MAG_RATE_DEFAULT_HZ 1000u
+#endif
+
+/* M-17: stale limit per sample period (3 ms at 1 kHz, 60 ms at 50 Hz). */
 #ifndef MAG_STALE_US
 #define MAG_STALE_US 3000u
 #endif

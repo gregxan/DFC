@@ -6,7 +6,9 @@
  *   - every UART byte received during the previous epoch is in the RX ring
  *     (DMA, U-3..U-5);
  *   - the newest magnetometer sample was published during the previous
- *     epoch (~445-515 us after its tick, M-8) and is complete.
+ *     epoch (~445-515 us after its tick, M-8) and is complete. At 1 kHz
+ *     every epoch brings a new sample; at 200/100/50 Hz (M-3b, g_mag_rate_hz)
+ *     only every 5th/10th/20th does, and s_mag_new is false in between.
  * The whole of app_poll() must finish in < 1 ms (EX-8); main.c measures it
  * (PROF_EPOCH) and counts epochs that run late (DIAG_EPOCH_OVERRUN).
  *
@@ -41,17 +43,19 @@ static bool s_mag_new;       /* true if this epoch brought a new valid sample */
 static void mag_handler(void) {
     static bool have_last;
     static uint32_t last_seq;
+    static uint32_t last_period; /* M-3b: ticks to the next sample */
 
     s_mag_new = false;
     if (mag_read_latest(&s_mag) && s_mag.s.valid && !s_mag.stale) {
         if (have_last && s_mag.s.seq == last_seq) {
             return; /* same sample as last epoch: nothing new */
         }
-        if (have_last && s_mag.s.seq != last_seq + 1u) {
+        if (have_last && s_mag.s.seq != last_seq + last_period) {
             /* gap: samples were missed (abort / fault) */
         }
         have_last = true;
         last_seq = s_mag.s.seq;
+        last_period = s_mag.s.period_ticks;
         mag_field(&s_mag, s_mag_xyz);
         mag_field16(&s_mag, s_mag_xyz16);
         s_mag_new = true;

@@ -1,9 +1,11 @@
 /*
- * MMC5983MA sampled at 1 kHz over I2C1 entirely by DMA (section 5).
+ * MMC5983MA sampled over I2C1 entirely by DMA (section 5), at 1000, 200,
+ * 100 or 50 Hz (M-3b, Rev 2.25).
  *
- * Each 1 ms tick starts one transaction:
- *   START  W(0x00)  RESTART R x9  [RESTART W(0x09, SET|RESET)]
- *          RESTART W(0x09, TM_M)  STOP
+ * Every Nth 1 ms tick (N = 1, 5, 10, 20) starts one transaction:
+ *   START W(0x08) RESTART R x1 RESTART W(0x00) RESTART R x8
+ *         [RESTART W(0x0A, BW)]  (rate change only)
+ *         [RESTART W(0x09, SET|RESET)]  RESTART W(0x09, TM_M)  STOP
  * i.e. read the measurement triggered by the previous transaction, then
  * trigger the next one. The I2C STOP_DET interrupt marks completion and
  * publishes the sample; TX_ABRT is the abort path (M-15).
@@ -28,6 +30,27 @@ extern volatile uint32_t g_mag_sr_mode;
  * 1..MAG_SR_INTERVAL_MAX are clamped when used. */
 extern volatile uint32_t g_mag_sr_interval;
 
+/* M-3b (Rev 2.25): requested output rate in Hz (1000, 200, 100 or 50).
+ * Read at the start of every sample transaction; a new value takes effect
+ * at the next sample (within one sample period of the old rate). Invalid
+ * values are ignored and the previous rate stays in use. */
+extern volatile uint32_t g_mag_rate_hz;
+
+/* Rate the sensor is configured for now (Hz): equals g_mag_rate_hz once a
+ * change has taken effect. */
+uint32_t mag_rate_hz(void);
+
+/* True if hz is one of the supported rates. */
+bool mag_rate_supported(uint32_t hz);
+
+/* The supported rate after hz in the list 1000 -> 200 -> 100 -> 50 -> 1000
+ * (for stepping through them from a console). */
+uint32_t mag_rate_next(uint32_t hz);
+
+/* Sensor bandwidth (Internal Control 1 BW, MMC_CTRL1_BW_*) used at rate hz;
+ * the current rate's if hz is not supported. */
+uint8_t mag_rate_bw(uint32_t hz);
+
 /* M-9, M-10 (Rev 2.11): why a sample is or is not valid. */
 typedef enum {
     MAG_SAMPLE_OK = 0,          /* valid                                           */
@@ -46,6 +69,9 @@ typedef struct {
     uint8_t tout;          /* register 0x07; not updated (TM_T unused)         */
     bool valid;            /* true exactly when reason == MAG_SAMPLE_OK (M-9)  */
     uint8_t reason;        /* mag_sample_reason_t (Rev 2.11)                   */
+    uint8_t period_ticks;  /* M-3b (Rev 2.25): sample period in 1 ms ticks
+                            * (1, 5, 10, 20); the next sample's seq is
+                            * seq + period_ticks                              */
     uint32_t seq;          /* index of the tick whose transaction triggered it   */
     uint64_t timestamp_us; /* us since boot when the trigger (TM_M) write completed
                             * (Rev 2.6); for M-9 invalid samples with no prior
@@ -56,7 +82,8 @@ typedef struct {
 typedef struct {
     mag_sample_t s;
     bool present; /* at least one sample has been published */
-    bool stale;   /* M-17: timestamp older than MAG_STALE_US, or none yet */
+    bool stale;   /* M-17: timestamp older than MAG_STALE_US per sample period
+                   * (3 ms at 1 kHz, 60 ms at 50 Hz), or none yet */
     /* M-4b (Rev 2.9): bridge offset from the last SET/RESET calibration, in
      * the same signed counts as mag_convert(). Subtract it from every axis:
      * field = mag_convert(raw) - offset. Not applied by the firmware. */
@@ -109,6 +136,8 @@ typedef struct {
     uint16_t t_fast_us;  /* BW = 800 Hz, each write ended by STOP            */
     uint16_t t_slow_us;  /* BW = 100 Hz (default), each write ended by STOP  */
     uint16_t t_rs_us;    /* BW = 800 Hz written, then TM_M after a repeated START */
+    uint16_t t_200_us;   /* Rev 2.25: BW = 200 Hz, STOP-terminated writes (the
+                          * 200 Hz rate allows ~4.6 ms; datasheet 4 ms)     */
     uint8_t burst_status;  /* Status at the end of a 9-byte burst, 2 ms after TM_M */
     uint8_t direct_status; /* Status read on its own, 2 ms after another TM_M */
 } mag_boot_t;
@@ -149,9 +178,10 @@ static inline void mag_field(const mag_reading_t *r, int32_t xyz[3]) {
 
 /* Field at 16-bit scale: 4096 counts/G, so +/-8 G spans the int16 range.
  * Calibrated offset removed, rounded to nearest (halves away from zero) and
- * clamped to [-32768, 32767]. At BW = 11 the sensor noise (1.2 mG RMS, ~5
- * counts here) is well above the 0.25 mG step, so nothing useful is lost;
- * it halves the size of X/Y/Z in a message (6 bytes instead of 12). */
+ * clamped to [-32768, 32767]. It halves the size of X/Y/Z in a message (6
+ * bytes instead of 12). At 1 kHz (BW = 11) the sensor noise (1.2 mG RMS) is
+ * about 5 steps of 0.25 mG, so nothing useful is lost. At 100 and 50 Hz
+ * (0.4 mG) it is under 2 steps: use mag_field() if that matters. */
 static inline void mag_field16(const mag_reading_t *r, int16_t xyz[3]) {
     int32_t v[3];
     mag_field(r, v);
@@ -166,7 +196,8 @@ static inline void mag_field16(const mag_reading_t *r, int16_t xyz[3]) {
     }
 }
 
-/* Called from the 1 ms tick ISR only. */
+/* Called from the 1 ms tick ISR only (every tick; a sample transaction
+ * starts on every Nth one, M-3b). */
 void mag_tick_isr(uint32_t tick_index);
 
 #endif /* MAG_H */

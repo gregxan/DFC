@@ -9,10 +9,11 @@ format, each second the firmware emits nine lines:
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
     L1 ...
     MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. no_ack=.. wrong_id=.. cause=.. id=0x.. bus_clear=.. ...
-    MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=..
+    MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=.. rate_hz=.. rate_req_hz=.. bw=..
+         noise_n=.. nx_ug=.. ny_ug=.. nz_ug=..   (noise: test builds only)
     CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
     WIRE ran=.. sda_low=.. scl_low=.. sda_pullup=.. scl_pullup=.. shorted=.. found=.. mag=.. mag_swapped=.. ...
-    BOOT ran=.. id=0x.. status=0x.. cause=.. cal_ok=.. t_fast_us=.. t_slow_us=.. t_rs_us=.. burst_status=0x.. ...
+    BOOT ran=.. id=0x.. status=0x.. cause=.. cal_ok=.. t_fast_us=.. t_slow_us=.. t_rs_us=.. t_200_us=.. ...
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
 
 User application builds (diag-user) add:
@@ -31,6 +32,8 @@ health checks (colour where the console supports it):
     py tools/fwstatus.py COM7 --scroll       # one report below the next
     py tools/fwstatus.py COM7 --raw          # the firmware's own lines
     py tools/fwstatus.py COM7 --log run.log  # also record every raw line
+    py tools/fwstatus.py COM7 --rate 100     # set the magnetometer rate first
+                                             # (1000, 200, 100 or 50 Hz)
 """
 
 from __future__ import annotations
@@ -80,6 +83,9 @@ class StatusMonitor:
         self._request_machine()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def send(self, data: bytes) -> None:
+        self._ser.write(data)
 
     def _request_machine(self) -> None:
         try:
@@ -279,7 +285,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     lines.append(_paint("  MAGNETOMETER  ", _BOLD, colour) + state)
     if "valid" in cur.get("MAG", {}):
         dv = d("MAG", "valid")
-        rate = (f"  (+{dv} this report" + ("" if fault else ", expect ~1000") + ")") if prev is not None else ""
+        hz = g("MAGS", "rate_hz") or 1000
+        rate = (f"  (+{dv} this report" + ("" if fault else f", expect ~{hz}") + ")") if prev is not None else ""
         lines.append(f"  valid samples  {g('MAG', 'valid')}{rate}")
         lines.append(f"  invalid {count('MAG', 'invalid', False)}   gaps {count('MAG', 'gaps')}   "
                      f"stale {count('MAG', 'stale', False)}")
@@ -299,6 +306,7 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
             return "error" if v == 0 else ("never" if v == 0xFFFF else f"{v / 1000:.2f} ms")
         lines.append(f"  start-up  ID 0x{b.get('id', 0):02X}  status 0x{b.get('status', 0):02X}  "
                      f"calibration {'OK' if b.get('cal_ok') else 'failed'}   meas. time 800 Hz {t(b.get('t_fast_us', 0))}"
+                     f", 200 Hz {t(b.get('t_200_us', 0))}"
                      f", 100 Hz {t(b.get('t_slow_us', 0))}, after repeated START {t(b.get('t_rs_us', 0))}"
                      f", Status alone/after data 0x{b.get('direct_status', 0):02X}/0x{b.get('burst_status', 0):02X}")
     if not fault:
@@ -307,6 +315,16 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
                 problems.append(f"magnetometer {label} rising")
         if d("MAGS", "not_ready"):
             problems.append("magnetometer samples read before the measurement finished (not ready)")
+    m = cur.get("MAGS", {})
+    if "rate_hz" in m:
+        bw = {0: "100 Hz", 1: "200 Hz", 2: "400 Hz", 3: "800 Hz"}.get(m.get("bw"), "?")
+        txt = f"  rate {m['rate_hz']} Hz (sensor BW {bw}, one measurement per sample)"
+        if m.get("rate_req_hz", m["rate_hz"]) != m["rate_hz"]:
+            txt += f"   {m['rate_req_hz']} Hz requested"
+        lines.append(txt)
+    if m.get("noise_n", 0) >= 2:
+        lines.append(f"  noise x {m['nx_ug'] / 1000:.2f}  y {m['ny_ug'] / 1000:.2f}  z {m['nz_ug'] / 1000:.2f} mG RMS"
+                     f" over {m['noise_n']} samples (board kept still)")
     sr = {0: "single cycle", 1: f"SET pulse every {g('MAGS', 'sr_interval')}"}.get(g("MAGS", "sr_mode"), "?")
     lines.append(f"  field x {g('MAGS', 'x'):>8}  y {g('MAGS', 'y'):>8}  z {g('MAGS', 'z'):>8}  counts (16384/G)"
                  f"   SET/RESET: {sr}")
@@ -368,6 +386,8 @@ def main() -> int:
     ap.add_argument("--raw", action="store_true", help="print the firmware's machine-format lines unchanged")
     ap.add_argument("--scroll", action="store_true", help="print each report below the last "
                     "instead of redrawing the screen")
+    ap.add_argument("--rate", type=int, choices=(1000, 200, 100, 50), help="set the magnetometer rate (Hz) "
+                    "by sending 'r' until the firmware reports it; lasts until the next reset")
     ap.add_argument("--bootsel", action="store_true", help="send '~' to reboot the board into its USB "
                     "bootloader (RP2350 drive) for reflashing, then exit")
     args = ap.parse_args()
@@ -389,6 +409,9 @@ def main() -> int:
                       file=sys.stderr)
                 continue
             cur = mon.report()
+            req = cur.get("MAGS", {}).get("rate_req_hz")
+            if args.rate is not None and req is not None and req != args.rate:
+                mon.send(b"r")  # one step per report: 1000 -> 200 -> 100 -> 50 -> 1000
             if args.raw:
                 print(format_report(cur), "\n", flush=True)
             else:

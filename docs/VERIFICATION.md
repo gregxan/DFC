@@ -92,7 +92,7 @@ Leave the magnetometer unconnected (or connect it; see "Expected values").
 | `TIM_NS` `crit` | **≤ 2000** | EX-3 |
 | `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 2000** | EX-7 (copy time excluded) |
 | `MAG` without a sensor | `fault=1`; `no_ack` (and `pid_fault`) rising ~5/s, `wrong_id` not rising; `cause=1`; `i2c_error`, `timeout` and `missed_tick` not rising; `MAGS recovered=0` | the 5 Hz re-probe (M-2a), with **no effect on any UART counter** |
-| `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s; `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
+| `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s (~`MAGS rate_hz` per second at other rates, M-3b); `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
 
 While `fault=1`, `MAG cause=` says why (Rev 2.17). The readable report
 spells it out:
@@ -367,6 +367,43 @@ OpenOCD `mww`. The modes are 0 = single cycle and 1 = pulse.
 2. **Transaction duration (M-8).** Measure from the tick (START) to the
    final STOP. Expected ~375 µs without a pulse (limit 400 µs) and ~445 µs
    with a SET or RESET (limit 450 µs).
+
+## Rate and noise comparison (M-3b, D-10, Rev 2.25)
+
+Use the `diag` build, with the board and sensor kept still and away from
+moving steel and cables carrying current.
+
+1. Read the start-up `Meas. time` line (D-8). The 200 Hz figure must be well
+   under 4.6 ms (expected about 3.8 ms). Otherwise 200 Hz will show
+   `not_ready`.
+2. For each rate, type `r` until the `Rate` line shows it (or run
+   `fwstatus.py --rate HZ`). Wait for one report to pass the change, then
+   record the `Noise` line over at least 10 reports.
+
+   | Rate | `valid` per report | `Noise` (datasheet) | `not_ready`, `gaps` |
+   |---|---|---|---|
+   | 1000 Hz | ~1000 | ~1.2 mG per axis | 0 |
+   | 200 Hz | ~200 | ~0.6 mG | 0 |
+   | 100 Hz | ~100 | ~0.4 mG | 0 |
+   | 50 Hz | ~50 | ~0.4 mG (same BW as 100 Hz) | 0 |
+
+3. A change causes no glitch: the report that spans it shows no new `gaps`,
+   no rise in `invalid`, and `not_ready` stays 0.
+4. In `MAG`, `i2c_error`, `timeout` and `missed_tick` stay 0 at every rate.
+   On the analyzer, the transaction carrying a change contains
+   `W(0x0A, BW)` before the trigger and lasts ≤ 540 µs (≤ 610 µs if it also
+   carries a pulse, M-8).
+5. With mode 1 (SET pulses) at 50 Hz, a pulse appears every
+   `sr_interval` samples, i.e. once a second at the default 50.
+
+The figures to compare are the measured ones. If noise falls with the
+rate as the datasheet says, the configuration holds. If 100 and 50 Hz are no
+quieter than 200 Hz, the floor is something else (supply, wiring,
+environment), and the faster rate can be kept.
+
+At rates below 1 kHz, the counts that this document gives "per second at
+1 kHz" (`valid`, and `i2c_error` with the sensor disconnected) scale with the
+rate.
 
 ## 1 kHz measurement completeness (M-3, M-9, Rev 2.8)
 

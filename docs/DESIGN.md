@@ -194,10 +194,68 @@ inserted before the trigger. That adds ~70 µs, for ~515 µs in total
 
 | Register | Value | Why |
 |---|---|---|
-| Internal Control 1 (0x0A) | `SW_RST` once at startup, then BW = 11 | Known state after an MCU-only reset. BW = 11 is the only 0.5 ms option, at 1.2 mG RMS. The inhibit bits stay 0: the channels run in parallel. |
+| Internal Control 1 (0x0A) | `SW_RST` once at startup, then the rate's BW (M-3b; BW = 11 at 1 kHz) | Known state after an MCU-only reset. BW = 11 is the only 0.5 ms option, at 1.2 mG RMS. The inhibit bits stay 0: the channels run in parallel. |
 | Internal Control 2 (0x0B) | 0x00 | Continuous mode, CM_Freq and periodic SET are off. They would run from the sensor's own oscillator and drift against the tick. |
 | Internal Control 0 (0x09) | TM_M, SET or RESET only | `Auto_SR_en` is not used: the datasheet gives 580 Hz max at BW = 11, consistent with two measurements per output (M-3a). INT, TM_T and OTP stay off. |
 | Internal Control 3 (0x0C) | 0x00 (reset default) | No self-test, I2C (not 3-wire SPI) |
+
+### Output rate (M-3b, Rev 2.25)
+
+The tick stays at 1 kHz: U-8 and U-15a need it. A sample transaction starts
+every N ticks, and the sensor's bandwidth sets the noise. Nothing is averaged
+in firmware.
+
+| `g_mag_rate_hz` | N | BW | Datasheet time | Available | Datasheet noise |
+|---|---|---|---|---|---|
+| 1000 | 1 | 11 | 0.5 ms | ~0.6 ms | 1.2 mG |
+| 200 | 5 | 01 | 4 ms | ~4.6 ms | 0.6 mG |
+| 100 | 10 | 00 | 8 ms | ~9.6 ms | 0.4 mG |
+| 50 | 20 | 00 | 8 ms | ~19.6 ms | 0.4 mG |
+
+"Available" is the time from the trigger (~0.45 ms after the tick) to the
+Status read N ticks later (~0.06 ms after that tick). A measurement that does
+not fit is caught by M-9 and counted as not ready. 200 Hz has the least
+margin. The bring-up figures (0.1 ms at BW 11, 7.5 ms at BW 00) suggest the
+datasheet times are upper bounds, and D-8 now also times BW 01.
+
+- **Schedule.** `s_next_tick` is the tick index of the next sample. In
+  `MAG_IDLE` a tick starts one only when `(int32_t)(tick - s_next_tick) >= 0`,
+  so a skipped tick (M-6a) does not stall sampling. Aborts and re-probes keep
+  their 1 ms handling. The M-16 timeout still fires on the next tick (~1 ms)
+  whatever the rate, since a transaction never takes more than ~0.6 ms.
+- **Changing rate.** The tick ISR reads `g_mag_rate_hz` when it starts a
+  sample. If that differs from the rate the sensor is set to
+  (`s_rate_applied`), the command list is rebuilt into `s_cmd_rate` with
+  `RESTART W(0x0A, BW)` after the read and before any pulse and the trigger.
+  So the sample read in that transaction (old rate) is unaffected, and the
+  measurement it triggers already uses the new BW. `s_rate_applied` is updated
+  only when the transaction completes. After an abort the next transaction
+  writes BW again. The list is 19 words at most. The command channel is
+  DREQ-paced, so it need not fit the 16-entry FIFO.
+- **Per-sample period.** Each sample stores `period_ticks` (the N of its
+  trigger). Consumers check gaps with `seq == last_seq + last_period`.
+  `mag_read_latest()` scales the M-17 stale limit by it. It fits in the
+  padding byte, so `mag_sample_t` stays 24 bytes.
+- **Re-probe.** `config_start()` writes the selected rate's BW, and the first
+  sample transaction follows N ticks after the configuration.
+- **M-2b at low rates.** At 200 Hz a power-cycled sensor (default BW 00,
+  8 ms) is still read too early and detected, but after 10 samples (~50 ms).
+  At 100/50 Hz the default BW is the configured one and it is not detected
+  (stated in M-2b).
+- **Not used.** BW 10 (no rate fits it), continuous mode (drift, M-3), and
+  averaging in firmware (by choice: the sensor's own filtering is used).
+  Auto_SR_en (M-3a) would double the measurement time. At 50 Hz, BW 00 with
+  auto SET/RESET might still fit (~16 ms of ~19.6 ms), which is a possible
+  later experiment.
+
+### Noise readout (D-10, Rev 2.25)
+
+`app_test.c` keeps the sum and sum of squares of each axis, in counts with
+the offset removed, over the valid samples it consumes. At each report
+`status.c` calls `app_mag_noise_take()`, which returns
+`sqrt(n·Σx² − (Σx)²) / n` per axis in µG and clears the sums. The sums are
+exact in 64 bits, and the main loop is the only user. Any movement of the
+board during the second adds to the figure.
 
 ### SET/RESET strategy (M-4, Rev 2.4; automatic mode removed in Rev 2.8)
 
@@ -498,6 +556,8 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
+| M-3b | `k_rates[]`, `rate_select()`, `mag_start()` (`s_cmd_rate`), `mag_tick_isr()` (`s_next_tick`), `config_start()`, `g_mag_rate_hz`, `MAG_RATE_DEFAULT_HZ`; console `r` in `status_poll()` |
+| D-10 | `app_mag_noise_take()` (`app_test.c`), `H_MAG_NOISE` and `MAGS noise_*` in `status.c` |
 | M-6, M-6a | `tick.c` |
 | M-7, M-8 | `mag_start()`, `build_cmds()` |
 | M-9 … M-14 | `publish()`, `mag_read_latest()` |

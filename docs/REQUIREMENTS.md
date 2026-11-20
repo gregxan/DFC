@@ -1,13 +1,13 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.24**. The changes since Revision 2 are listed in sections 11 to 34.
+**Revision 2.25**. The changes since Revision 2 are listed in sections 11 to 35.
 
 ## 1. Scope
 
 Firmware for a Seeed XIAO RP2350 that:
 
 - Moves data on two UARTs at 921,600 baud with the lowest achievable latency, to the numeric targets in section 4.5.
-- Samples an MMC5983MA magnetometer at 1 kHz over I2C.
+- Samples an MMC5983MA magnetometer over I2C at 1 kHz, or at 200, 100 or 50 Hz for lower noise (M-3b).
 - Exposes all data to a single bare-metal main loop without ever blocking it.
 - Builds, flashes, and debugs from a Windows host.
 
@@ -107,30 +107,48 @@ Firmware for a Seeed XIAO RP2350 that:
   - **M-2b** A sensor that loses power and returns answers at its default settings (8 ms measurements), so its samples are read before they finish (M-9, not ready). The firmware shall detect this and set the fault flag, so that the re-probe (M-2a) reconfigures the sensor. *(Added in Rev 2.16.)*
     - Each not-ready sample adds 2 to a score, and each ready sample subtracts 1 (never below 0). When the score reaches 20, the fault flag is set and a run-time fault is counted (D-1). The values are compile-time parameters; a threshold of 0 disables the check.
     - The first re-probe follows on the next tick, without waiting a full probe period.
-    - Expected timing: detection within about 13 ms of the sensor answering again, and valid samples about 5 ms after that.
+    - Expected timing at 1 kHz: detection within about 13 ms of the sensor answering again, and valid samples about 5 ms after that. The score counts samples, so at the slower rates (M-3b) detection takes proportionally longer (about 65 ms at 200 Hz).
+    - At 100 and 50 Hz the sensor's default bandwidth is the configured one, so a sensor that power-cycles keeps producing complete measurements and is not detected. Its samples stay valid, but the SET state and offset calibration (M-4b) may no longer match until the next RESET → SET cycle. *(Added in Rev 2.25.)*
     - Isolated not-ready samples decay away and never set the flag.
-- **M-3** The sensor shall be operated in single (triggered) measurement mode at 1 kHz. Register settings: *(Replaced in Rev 2.8.)*
-  - Internal Control 1: BW = 11 (0.5 ms measurement). It is the only bandwidth whose measurement time fits a 1 ms cycle, at the cost of 1.2 mG RMS noise. X-inhibit and YZ-inhibit stay 0: the channels are measured in parallel, so inhibiting them saves no time.
+- **M-3** The sensor shall be operated in single (triggered) measurement mode, one trigger per output sample, at the rate of M-3b. Register settings: *(Replaced in Rev 2.8; amended in Rev 2.25.)*
+  - Internal Control 1: BW as given by M-3b for the selected rate. At 1 kHz this is BW = 11 (0.5 ms measurement), the only bandwidth whose measurement time fits a 1 ms cycle, at the cost of 1.2 mG RMS noise. X-inhibit and YZ-inhibit stay 0: the channels are measured in parallel, so inhibiting them saves no time.
   - Internal Control 2 = 0x00: continuous mode, CM_Freq, periodic SET (Prd_set, En_prd_set) all off. Continuous mode runs from the sensor's own oscillator ("1000 Hz typical"). It would drift against the 1 ms tick, causing duplicated or skipped samples and losing the trigger timestamp (M-10). Periodic SET requires continuous mode.
   - Internal Control 0: Auto_SR_en, INT_meas_done_en, TM_T and OTP_Read are never set.
   - Internal Control 3 = 0x00 (self-test and 3-wire SPI off).
+- **M-3b** The output rate shall be selectable from 1000, 200, 100 and 50 Hz. Each rate uses the sensor's own bandwidth setting, with one triggered measurement per output sample. The firmware does not average samples. *(Added in Rev 2.25.)*
+
+  | Rate | Trigger every | BW | Measurement time (datasheet) | Time available (M-8) | Noise (datasheet, RMS) |
+  |---|---|---|---|---|---|
+  | 1000 Hz | 1 tick | 11 (800 Hz) | 0.5 ms | ~0.6 ms | 1.2 mG |
+  | 200 Hz | 5 ticks | 01 (200 Hz) | 4 ms | ~4.6 ms | 0.6 mG |
+  | 100 Hz | 10 ticks | 00 (100 Hz) | 8 ms | ~9.6 ms | 0.4 mG |
+  | 50 Hz | 20 ticks | 00 (100 Hz) | 8 ms | ~19.6 ms | 0.4 mG |
+
+  - The rate at startup is a build option (`MAG_RATE_DEFAULT_HZ`, default 1000). At run time it is set through a global variable, `g_mag_rate_hz`, in Hz. Diagnostic builds also step through the rates from the USB console (B-20).
+  - A change shall take effect at the next sample transaction, which writes the new BW (Internal Control 1) after its read and before its trigger write. The sample read in that transaction belongs to the old rate and is valid. If the transaction is aborted, the next one writes BW again.
+  - An unsupported value shall be ignored, and the previous rate remains in use.
+  - The re-probe configuration (M-2a) uses the rate selected at that time.
+  - BW = 10 (400 Hz, 2 ms) is not used: no rate leaves room for it (500 Hz would leave ~1.6 ms). At 50 Hz the noise is the same as at 100 Hz, because BW = 00 is the sensor's slowest setting.
+  - Continuous mode remains off at every rate (M-3).
 - **M-3a** Auto_SR_en shall not be used. The datasheet gives a maximum output rate of 580 Hz at BW = 11 outside continuous mode, consistent with two measurements per output when automatic SET/RESET is active, so it is not expected to sustain 1 kHz. *(Added in Rev 2.8.)*
 - **M-4** The sensor shall be conditioned with SET/RESET pulses. At startup, firmware shall perform one RESET → SET cycle, ending in SET so measurements have normal polarity. The ongoing strategy shall be selectable at run time through a global variable, `g_mag_sr_mode`. It is currently changed only from the debugger. *(Replaced in Rev 2.4; automatic mode removed in Rev 2.8.)*
   - **Single cycle** (`MAG_SR_INIT_ONLY` = 0, the initial value): no further pulses. Selecting this mode again at run time performs one more RESET → SET cycle: a RESET in one transaction, then a SET in the next.
   - **Pulse** (`MAG_SR_PULSE` = 1): a SET pulse is inserted into the transaction, before the trigger write, every `g_mag_sr_interval` samples. The default is 50. Values are clamped to 1–100, so a pulse occurs at least every 100 samples.
 
-  A change to either variable shall take effect at the next transaction (within 1 ms). An invalid mode value shall be ignored, and the previous mode remains in use. Leaving a mode partway through a RESET → SET cycle shall still complete the SET. The single-cycle mode provides no ongoing SET; re-selecting it re-calibrates the offset (M-4b).
+  A change to either variable shall take effect at the next sample transaction (within one sample period, M-3b). The pulse interval counts samples, so at 50 Hz a SET every 50 samples is once a second. An invalid mode value shall be ignored, and the previous mode remains in use. Leaving a mode partway through a RESET → SET cycle shall still complete the SET. The single-cycle mode provides no ongoing SET; re-selecting it re-calibrates the offset (M-4b).
 - **M-4b** Every RESET → SET cycle shall also calibrate the bridge offset, following the datasheet procedure (p. 18). *(Added in Rev 2.9.)*
   - Cycles occur at startup, when single-cycle mode is selected at run time, and after a successful re-probe.
   - Measure once after the RESET (−H + offset) and once after the SET (+H + offset). The offset is their per-axis mean, in the same signed counts as the converted field.
   - A calibration is used only if both measurements completed (Meas_M_Done set) and no abort intervened. Otherwise the previous offset is kept.
   - The offset and its validity flag are returned by the read-latest function (M-13). The main loop subtracts it from every axis. The firmware does not modify the raw sample bytes (M-10).
-  - The calibration assumes the field is steady over the ~2 ms between the two measurements.
+  - The calibration assumes the field is steady between the two measurements: ~2 ms at 1 kHz, two sample periods in general (40 ms at 50 Hz).
 - **M-5** Every write to Internal Control 0 (0x09) shall include any persistent control bits along with TM_M. With Auto_SR_en not used (M-3a), there are none, so each write carries only its own bit (TM_M, SET or RESET). *(Amended in Rev 2.8.)*
 
 ### 5.2 Sampling
 
-- **M-6** A hardware timer shall start one magnetometer transaction every 1 ms (1,000 Hz). The timer shall run for the life of the application, even if the magnetometer fault flag is set, because U-8 and U-15a depend on it.
+- **M-6** A hardware timer shall tick every 1 ms (1,000 Hz) and start one magnetometer sample transaction every N ticks, where N is the rate's tick count from M-3b (N = 1 at 1 kHz). The timer shall run for the life of the application at 1 kHz, whatever the magnetometer rate, and even if the magnetometer fault flag is set, because U-8 and U-15a depend on it. *(Amended in Rev 2.25.)*
+  - A sample transaction starts on the first tick at or after N ticks from the previous one, so a skipped tick (M-6a) delays it by at most one tick.
+  - Probe and configuration transactions (M-2a) are not tied to this schedule. After a configuration, the first sample transaction follows N ticks later.
 - **M-6a** The tick period shall be 1,000 µs ± 20 µs, with no cumulative drift (each tick is scheduled from the previous target time, not from the current time). If the next target is already in the past when the timer is re-armed, the schedule shall skip forward on the same grid. Each skipped tick is counted as a tick overrun (D-1), not as a magnetometer missed tick. *(Amended in Rev 2.11.)*
 - **M-7** Each transaction shall run entirely by DMA, using one channel to feed I2C command words and one to receive data. It consists of: *(Amended in Rev 2.8.)*
   - Reading Status (0x08), then 8 bytes from register 0x00: the 7 field bytes of the measurement triggered by the previous transaction and Tout (0x07, unused). Status is read first because, on the real part, reading the output registers clears Meas_M_Done (found at bring-up, Rev 2.21; the datasheet says the bit stays set until the next measurement). *(Amended in Rev 2.21.)*
@@ -141,7 +159,7 @@ Firmware for a Seeed XIAO RP2350 that:
   `START W(0x08) · RESTART R×1 · RESTART W(0x00) · RESTART R×8 · [RESTART W(0x09, SET|RESET)] · RESTART W(0x09, TM_M) · STOP`. *(Rev 2.21.)*
   The datasheet (MMC5983MA Rev A, p. 17) states that a data transfer "is terminated by a STOP condition or another START condition". Its example measurement sequence also chains read → START → write without a STOP. It also states that the sensor "initiate[s] a measurement" when it acknowledges the TM_M byte.
 - **M-7a** Before starting each magnetometer transaction (sample, probe or configuration), firmware shall resynchronise the DREQ credit counters of both magnetometer DMA channels (DBG_CTDREQ). An abort flushes the I2C TX and RX FIFOs, and draining leftover RX data reads a DMA-serviced FIFO. Either leaves a counter that no longer matches its FIFO (EX-9), which could let the data channel read an empty RX FIFO (corrupting a sample) or starve the command channel (a stall). *(Added in Rev 2.12.)*
-- **M-8** Each transaction shall complete within 470 µs of its tick, or 540 µs for a transaction that includes a SET or RESET pulse (M-4). Expected durations are about 445 µs and 515 µs. Status is read about 60 µs after the next tick, so a measurement finishing within 0.5 ms of the trigger (datasheet) is complete when checked; bring-up measured about 0.1 ms. A late measurement is caught by the M-9 check. Both figures are to be confirmed by measurement. *(Amended in Rev 2.4, Rev 2.8, Rev 2.21.)*
+- **M-8** Each transaction shall complete within 470 µs of its tick, or 540 µs for a transaction that includes a SET or RESET pulse (M-4) or a bandwidth write (M-3b), or 610 µs if it includes both. *(Bandwidth write added in Rev 2.25.)* Expected durations are about 445 µs and 515 µs. Status is read about 60 µs after the next tick, so a measurement finishing within 0.5 ms of the trigger (datasheet) is complete when checked; bring-up measured about 0.1 ms. A late measurement is caught by the M-9 check. Both figures are to be confirmed by measurement. *(Amended in Rev 2.4, Rev 2.8, Rev 2.21.)* At the slower rates (M-3b) the measurement has about N ms − 0.4 ms; the tightest is 200 Hz, ~4.6 ms for a 4 ms measurement. D-8 measures it.
 - **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid. A measurement triggered immediately after a RESET pulse has inverted polarity, and its sample shall also be marked invalid. *(Amended in Rev 2.4.)* A sample whose Status register shows Meas_M_Done = 0 was read before the measurement finished. It shall be marked invalid and counted as "not ready" (D-1). The datasheet says this bit "should be checked before reading the output". *(Amended in Rev 2.8.)*
   - Invalid samples shall still be published, so the main loop sees every event in order. *(Added in Rev 2.11.)*
   - Each sample carries a reason code: `OK` (valid), `NO_PRIOR` (first after startup or an abort), `AFTER_RESET` (measured right after a RESET pulse), or `NOT_READY` (Meas_M_Done clear). If several reasons apply, the first in the order `NO_PRIOR`, `NOT_READY`, `AFTER_RESET` is reported.
@@ -149,8 +167,9 @@ Firmware for a Seeed XIAO RP2350 that:
   - An application that needs the last valid value keeps its own copy.
 - **M-10** Each sample shall be stored as:
   - the 7 raw data bytes, plus the Status byte read with them (and the unused Tout byte), *(Status added in Rev 2.8)*
-  - a 64-bit microsecond timestamp of when that measurement was triggered. This is the time its trigger (TM_M) write completed, captured at the start of the completion interrupt (M-12) of the transaction that carried the trigger. The expected lag behind the actual trigger is about 3 µs plus interrupt latency. A sample with no prior trigger (M-9) carries the nominal time of the previous tick. *(Amended in Rev 2.6.)*
-  - a 32-bit sequence number: the index of the tick whose transaction triggered the measurement, so consecutive samples differ by 1,
+  - the sample period in ticks (N of M-3b) of the rate it was triggered at, *(added in Rev 2.25)*
+  - a 64-bit microsecond timestamp of when that measurement was triggered. This is the time its trigger (TM_M) write completed, captured at the start of the completion interrupt (M-12) of the transaction that carried the trigger. The expected lag behind the actual trigger is about 3 µs plus interrupt latency. A sample with no prior trigger (M-9) carries the nominal time one sample period before its tick. *(Amended in Rev 2.6, Rev 2.25.)*
+  - a 32-bit sequence number: the index of the tick whose transaction triggered the measurement, so consecutive samples differ by the sample period in ticks (1 at 1 kHz), *(amended in Rev 2.25)*
   - a valid flag and the reason code of M-9. *(Reason added in Rev 2.11.)*
 
   Conversion to 18-bit X/Y/Z values is performed by the main loop.
@@ -166,8 +185,8 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **M-15** On I2C abort (e.g. NACK), the I2C abort handler shall stop both magnetometer DMA channels, clear the abort condition, and increment the I2C error counter if the controller reports any bus-detected cause (e.g. NACK, arbitration loss). An abort whose only cause is the firmware's own timeout abort (M-16) is counted only as a timeout, not as an I2C error. An unexpected STOP that ends a transaction before both DMA channels have finished is also an I2C error. If the abort was caused by arbitration loss or by a timeout abort (M-16), the handler shall also start a bus clear (M-18) as part of completing the abort. The slot shall not be published, and sampling continues on the next tick. *(Amended in Rev 2.2, Rev 2.3.)*
 - **M-16** If a transaction is still in progress when the next tick fires, the timer handler shall skip that tick and increment the missed-tick counter. If no abort is already pending, it shall also initiate an abort of both DMA channels and the I2C transfer, without waiting for completion, and increment the timeout counter. The I2C controller's abort shall be requested only if the controller is active or has commands queued; if it is idle, stopping the DMA channels is sufficient. A later tick shall start a new transaction only once the channels, the I2C controller, and any bus clear in progress (M-18) are idle. Completing a bus clear shall not depend on the state of the I2C controller. *(Amended in Rev 2.2, Rev 2.15.)*
-- **M-16a** Valid samples shall resume within 4 ms of the tick on which a single hung transaction started. With a persistent bus fault, the abort shall repeat with no effect on UART traffic.
-- **M-17** The read-latest function shall report the sample as stale if its timestamp is more than 3 ms old.
+- **M-16a** Valid samples shall resume within 3 ms plus one sample period (4 ms at 1 kHz) of the tick on which a single hung transaction started. *(Amended in Rev 2.25.)* With a persistent bus fault, the abort shall repeat with no effect on UART traffic.
+- **M-17** The read-latest function shall report the sample as stale if its timestamp is more than three sample periods old, using the sample's own period: 3 ms at 1 kHz, 15 ms at 200 Hz, 30 ms at 100 Hz, 60 ms at 50 Hz. *(Amended in Rev 2.25.)*
 - **M-18** An I2C bus clear shall consist of nine open-drain SCL clocks, so a slave left mid-byte releases SDA. *(Added in Rev 2.2.)*
   - A bus clear started from an interrupt handler shall be non-blocking. It shall run without CPU involvement (e.g. a PIO state machine) and shall finish within 200 µs, so it completes before the next tick.
   - It shall not reconfigure, disable, or reset the I2C controller. It only lends the SCL pin to the clock generator and returns it to I2C afterwards.
@@ -197,7 +216,8 @@ Firmware for a Seeed XIAO RP2350 that:
 
   Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
 - **D-7** Diagnostic builds shall check the magnetometer wiring once at startup, before the I2C controller takes the pins, using no test equipment: each line's level with the internal pull-up (held low), each line's rise against the internal pull-down after being driven low (external pull-up present), SDA–SCL short, and an I2C address scan (0x08–0x77) with SDA/SCL as wired and swapped. The results and a one-line conclusion are reported over USB. Production builds shall not include it. *(Added in Rev 2.18.)*
-- **D-8** Diagnostic builds shall report the magnetometer's startup results (product ID, Status after the software reset, fault cause, calibration result) and run a measurement-timing experiment after startup: the time from TM_M to Meas_M_Done at 800 Hz and at the default bandwidth with STOP-terminated writes, the same after a bandwidth write followed by a repeated START, and Status read at the end of the 9-byte burst compared with Status read alone. *(Added in Rev 2.19.)*
+- **D-8** Diagnostic builds shall report the magnetometer's startup results (product ID, Status after the software reset, fault cause, calibration result) and run a measurement-timing experiment after startup: the time from TM_M to Meas_M_Done at 800 Hz and at the default bandwidth with STOP-terminated writes, the same after a bandwidth write followed by a repeated START, and Status read at the end of the 9-byte burst compared with Status read alone. *(Added in Rev 2.19.)* It also times a measurement at BW = 01 (200 Hz), for the 200 Hz rate's margin (M-8). It ends by restoring the selected rate's bandwidth. *(Amended in Rev 2.25.)*
+- **D-10** Diagnostic builds with a test application (`echo`, `pattern`) shall report, once per status report, the per-axis RMS deviation of the valid samples received since the previous report, in mG, and how many samples it covers. With the board kept still, this is the sensor noise at the selected rate (M-3b), so the rates can be compared on the bench. It is computed in the main loop from the converted field and does not change the samples. *(Added in Rev 2.25.)*
 - **D-9** Diagnostic builds shall capture hangs and crashes:
   - **Watchdog:** a 2 s watchdog, fed by the main loop, resets the board if the main loop stops. Before that, the main loop's position, the interrupt running (if any) and the tick count are kept in watchdog scratch registers 0–3.
   - **Faults:** a HardFault records the faulting PC, LR and CFSR there, then resets.
@@ -262,7 +282,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ## 9. Verification
 
-- **V-1** Both UARTs running saturated full-duplex at 921.6k, with the magnetometer at 1 kHz, for at least 10 minutes:
+- **V-1** Both UARTs running saturated full-duplex at 921.6k, with the magnetometer at 1 kHz (and, for Rev 2.25, once more at each of 200, 100 and 50 Hz), for at least 10 minutes:
   - zero framing errors,
   - zero RX overflows,
   - zero TX rejects,
@@ -278,7 +298,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **V-5a** The magnetometer timestamp (M-10) shall be compared, on a logic analyzer, with the ACK of the trigger byte on SDA/SCL. The measured lag shall be reported. Expected: about 3 µs typical, and under 20 µs maximum with all subsystems active. *(Added in Rev 2.6.)*
 - **V-6** Fault injection:
   - Disconnecting the magnetometer increments I2C errors without affecting UART traffic.
-  - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release.
+  - Shorting SDA to ground for 1 s increases the sum of I2C errors and timeouts by at least 300, causes zero UART errors, and valid samples resume within 4 ms of release (at 1 kHz).
   - Changing `g_mag_sr_mode` and `g_mag_sr_interval` from the debugger, while data flows, switches strategy within 1 ms. Each strategy produces the expected pulse pattern on the bus, and there are no UART errors or magnetometer sequence gaps. The only invalid sample is the one after each RESET. *(Added in Rev 2.4.)*
   - Removing and restoring the magnetometer's power while sampling (with the bus still connected) produces one run-time fault and one recovery. Valid samples resume within 50 ms of the sensor answering again, with no UART errors. *(Added in Rev 2.16.)*
   - Powering up with the magnetometer disconnected sets the fault flag, the no-answer count rises by about 5 per second, and the reported fault cause is "no answer" *(Amended in Rev 2.17)*. Connecting the sensor clears the fault flag within 250 ms, after which valid samples flow. There are no UART errors throughout. *(Added in Rev 2.7.)*
@@ -532,3 +552,17 @@ Found at bring-up with D-9: the diagnostic build reset with a HardFault in the U
 - **Amended B-20.** The `tud_task()` IRQ is fixed at SPARE_IRQ_5 (51) and given the same priority as the controller IRQ.
 - **Amended D-9.** In diagnostic builds a `panic()` records its message and first two arguments, then resets. The report prints the message.
 - **D-7 wiring check.** A sensor caught mid-read by an MCU reset can hold SDA low. The check now clocks SCL nine times and sends a STOP before deciding that SDA is held low.
+
+## 35. Revision 2.25 Changes
+
+At bring-up, lower sample rates gave less noise. This revision makes the rate selectable. The lower noise comes from the sensor's own slower bandwidth settings rather than from averaging in firmware.
+- **Added M-3b.** Rates of 1000, 200, 100 and 50 Hz, each with one triggered measurement per sample at BW 11, 01, 00 and 00. The datasheet noise is 1.2, 0.6, 0.4 and 0.4 mG RMS. The rate is set at build time (`MAG_RATE_DEFAULT_HZ`) and at run time through `g_mag_rate_hz`. The bandwidth write is part of the next sample transaction.
+- **Amended M-3, M-4, M-4b.** BW follows the rate. Mode changes take effect within one sample period, and the calibration spans two sample periods.
+- **Amended M-6.** The tick stays at 1 kHz for the UARTs. A sample transaction starts every N ticks.
+- **Amended M-8.** A transaction with a bandwidth write has the same limit as one with a pulse, and one with both has 610 µs. The time available for each rate's measurement is stated.
+- **Amended M-10.** Each sample carries its period in ticks. Consecutive sequence numbers differ by it.
+- **Amended M-16a, M-17.** The resume and stale limits scale with the sample period. They are unchanged at 1 kHz.
+- **Amended M-2b.** Detection is slower at lower rates. At 100 and 50 Hz a power-cycled sensor is not detected, because its default bandwidth is the configured one.
+- **Amended D-8, added D-10.** The start-up experiment also times BW = 01. Test-application diagnostic builds report the per-axis noise (RMS over each report) for comparing rates.
+- **Amended B-20 (diagnostic builds).** `r` on the USB console steps the rate 1000 → 200 → 100 → 50 → 1000 Hz. `fwstatus.py --rate HZ` sets it.
+- **Not changed:** the 1 kHz tick, UART timing, continuous mode (still off), and Auto_SR_en (still unused, M-3a). Production builds run at 1 kHz unless `MAG_RATE_DEFAULT_HZ` is set.
