@@ -47,7 +47,14 @@ section. Procedures not listed there have not been run.
 | Image whose updater never runs (`DFC_TEST_NO_UPDATER`): boots on trial, report shows ON TRIAL, script does not confirm | Pass |
 | ...the 16.7 s trial watchdog reboots it and the previous slot (A) comes back | Pass (after `f804588`: the diag reporter had fed the watchdog) |
 | ...a power cycle during the trial brings the previous slot back | Pass |
-| Normal update: confirmed through the new image's updater, permanent after a power cycle | Not yet reported |
+| Normal update: confirmed through the new image's updater, permanent after a power cycle | Pass |
+
+**Deliberate bypasses (Rev 2.25, `49f15f4`).**
+
+| Check | Result |
+|---|---|
+| Old pre-updater image with `--allow-no-info`: installed on trial, not confirmed, falls back to the current firmware | Pass |
+| Same image with `--allow-no-info --no-trial` and the typed key: permanent; recovered with `~` and drag-and-drop | Pass |
 
 All tools run on Windows (V-7). Install the Python dependency once:
 

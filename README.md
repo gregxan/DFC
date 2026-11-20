@@ -234,6 +234,13 @@ that contains `picotoolConfig.cmake` / `pioasmConfig.cmake`.
 
 ## Flashing
 
+**Day to day, flash new builds with the updater** (diag builds, over USB):
+`py tools\dfc_update.py COM13 --enter flash build\diag\firmware.uf2`. The
+running firmware's updater writes the build, and the new build's updater
+confirms it (see "Firmware updater" below). Use the BOOTSEL drive only for
+first-time setup, or to recover a board whose firmware has no working
+updater.
+
 ### First-time setup: A/B partition table (Rev 2.25, once per board)
 
 The flash holds two firmware slots, A and B, so a field update can write
