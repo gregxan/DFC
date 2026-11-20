@@ -226,7 +226,8 @@ def show_hello(p: bytes) -> "Info | None":
     link_name = {0: "UART0", 1: "UART1", 2: "USB"}.get(link, f"? ({link})")
     print(f"Updater: {board}, protocol {proto}, on {link_name}")
     print(f"  running from slot {slot_name}, chip RP2350 A{chip}")
-    print(f"  flash {flash // 1024} KB, slot {slot_size // 1024} KB, block {block} bytes")
+    lo = struct.unpack_from("<I", p, 100)[0] if len(p) >= 104 else block
+    print(f"  flash {flash // 1024} KB, slot {slot_size // 1024} KB, DATA frames {lo}..{block} bytes")
     print(f"  build {build}")
     info = parse_info(p, 64) if len(p) >= 96 else None
     if info:
@@ -314,7 +315,15 @@ def confirm_bypasses(args: argparse.Namespace, new: "Info | None") -> tuple[int,
     return bypass, key
 
 
-def flash(link: Link, image: bytes, bypass: int = 0, key: int = 0) -> int:
+def block_limits(hello: bytes) -> tuple[int, int]:
+    """(smallest, largest) DATA chunk the board accepts. Boards from before
+    small-block support advertise no minimum: 4096 only."""
+    largest = struct.unpack_from("<I", hello, 12)[0]
+    smallest = struct.unpack_from("<I", hello, 100)[0] if len(hello) >= 104 else largest
+    return smallest, largest
+
+
+def flash(link: Link, image: bytes, bypass: int = 0, key: int = 0, block: int = SECTOR) -> int:
     crc = zlib.crc32(image) & 0xFFFFFFFF
     if bypass:
         link.send(frame(CMD_BEGIN, struct.pack("<IIIQ", len(image), crc, bypass, key)))
@@ -328,10 +337,12 @@ def flash(link: Link, image: bytes, bypass: int = 0, key: int = 0) -> int:
                           "(older firmware?). Nothing was installed.")
     print(f"Writing {len(image)} bytes (CRC 0x{crc:08X}) to slot {'AB'[target]} "
           f"at flash offset 0x{offset:X} ({slot_size // 1024} KB slot)")
-    blocks = list(range(0, len(image), SECTOR))
+    # Chunks of `block` bytes; block divides 4096, so none crosses a sector.
+    blocks = list(range(0, len(image), block))
+    print(f"  {len(blocks)} DATA frames of up to {block} bytes")
     start = time.monotonic()
     for n, off in enumerate(blocks, 1):
-        payload = struct.pack("<I", off) + image[off:off + SECTOR]
+        payload = struct.pack("<I", off) + image[off:off + block]
         for attempt in range(3):
             link.send(frame(CMD_DATA, payload))
             try:
@@ -340,7 +351,8 @@ def flash(link: Link, image: bytes, bypass: int = 0, key: int = 0) -> int:
             except UpdateError as e:
                 if "frame CRC" not in str(e) or attempt == 2:
                     raise
-        print(f"\r  {n}/{len(blocks)} blocks", end="", flush=True)
+        if n == len(blocks) or n % max(1, len(blocks) // 100) == 0:
+            print(f"\r  {n}/{len(blocks)} frames", end="", flush=True)
     print(f"  ({time.monotonic() - start:.1f} s)")
     link.send(frame(CMD_FINISH))
     try:
@@ -412,6 +424,10 @@ def main() -> int:
                     help="flash: allow an older firmware version than the one running")
     ap.add_argument("--allow-older-updater", action="store_true",
                     help="flash: allow an image whose updater protocol is older than the running one")
+    ap.add_argument("--block-size", type=int, default=SECTOR, metavar="BYTES",
+                    help="flash: DATA frame payload, a power of two from the board's minimum (64) to 4096 "
+                         "(default 4096). Smaller frames mean shorter bursts on the link, e.g. for a "
+                         "pass-through device with a small buffer, at some cost in speed")
     g = ap.add_argument_group("bypasses (flash): each one skips a protection, prints a warning, and needs "
                               "a typed 'yes' (or --yes)")
     g.add_argument("--allow-no-info", action="store_true",
@@ -469,11 +485,16 @@ def main() -> int:
         if args.command == "flash":
             try:
                 link.send(frame(CMD_HELLO))
-                running = show_hello(expect(link, CMD_HELLO, "HELLO"))
+                hello = expect(link, CMD_HELLO, "HELLO")
+                running = show_hello(hello)
+                lo, hi = block_limits(hello)
+                b = args.block_size
+                if b & (b - 1) or not lo <= b <= hi:
+                    raise UpdateError(f"--block-size {b}: this board accepts powers of two from {lo} to {hi}")
                 if new_info is not None:
                     check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade,
                                    args.allow_unsupported_protocol)
-                target = flash(link, image, bypass, key)
+                target = flash(link, image, bypass, key, args.block_size)
             except UpdateError as e:
                 print("\nError:", e)
                 print("The running firmware is untouched. The board leaves updater mode after 90 s idle.")

@@ -24,10 +24,15 @@
  *                      bit 1 ALLOW_BELOW_FLOOR  install below the protocol floor
  *                      bit 2 NO_TRIAL           no trial boot: permanent at
  *                                               once; needs UPDATER_NO_TRIAL_KEY
- *   DATA   (0x11) u32 offset, data (4096 bytes; the last block may be
- *                    shorter) -> u32 offset. offset is a multiple of 4096.
- *                    Each sector is erased, programmed and read back. The
- *                    first sector is only kept in RAM until FINISH.
+ *   DATA   (0x11) u32 offset, data (UPD_MIN_BLOCK..4096 bytes) -> u32
+ *                    offset. A chunk may not cross a 4 KB sector boundary.
+ *                    Each sector is assembled in RAM from its chunks, in
+ *                    order: a chunk starts at the sector's start (which
+ *                    restarts it) or at the next byte expected, or resends
+ *                    bytes already received. When a sector is complete it
+ *                    is erased, programmed and read back. The first sector
+ *                    is only kept in RAM until FINISH. An out-of-order
+ *                    chunk gets UPD_ERR_OFFSET with the offset expected.
  *   FINISH (0x12) -> checks that every block arrived and that the CRC of
  *                    the whole image matches. Only then does it write the
  *                    first sector (the image's start block, so a partial
@@ -325,6 +330,8 @@ enum {
 
 #define SECTOR 4096u
 #define MAX_SECTORS 512u /* 2 MB: bitmap of received blocks */
+#define UPD_MIN_BLOCK 64u /* smallest DATA chunk the host may use (advertised in HELLO) */
+#define ASM_NONE 0xFFFFFFFFu
 
 /* Bootrom flash operation on physical flash offsets ("storage" addresses),
  * checked against the partition table's permissions, so it cannot touch
@@ -442,7 +449,7 @@ static const upd_port_t k_usb_port = {usb_init, usb_read, usb_write, usb_connect
 static const upd_port_t *s_port;
 static updater_link_t s_link;
 static uint8_t s_rx[UPD_MAX_PAYLOAD];
-static uint8_t s_tx[100];
+static uint8_t s_tx[104];
 static bool s_trial; /* booted on trial: explicit_buy still pending */
 
 static void send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
@@ -489,7 +496,7 @@ static void reply_hello(void) {
     s_tx[3] = rp2350_chip_version();
     put32(&s_tx[4], PICO_FLASH_SIZE_BYTES);
     put32(&s_tx[8], UPD_SLOT_BYTES);
-    put32(&s_tx[12], 4096u); /* largest data block (later steps) */
+    put32(&s_tx[12], SECTOR); /* largest DATA chunk */
     memcpy(&s_tx[16], UPD_BOARD_ID, sizeof UPD_BOARD_ID - 1u);
     size_t bl = strlen(g_build_id);
     memcpy(&s_tx[32], g_build_id, bl < 32u ? bl : 32u);
@@ -498,7 +505,8 @@ static void reply_hello(void) {
     s_tx[96] = s_trial ? 1u : 0u;
     s_tx[97] = bi.tbyb_and_update_info;
     s_tx[98] = bi.boot_type;
-    send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 100u);
+    put32(&s_tx[100], UPD_MIN_BLOCK); /* smallest DATA chunk (absent: 4096 only) */
+    send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 104u);
 }
 
 static void __attribute__((noreturn)) reboot_to_app(void) {
@@ -519,6 +527,8 @@ static struct {
     uint32_t crc;         /* expected image CRC-32   */
     uint32_t sectors;
     uint32_t bypass;      /* UPD_BEGIN_* the host asked for and passed  */
+    uint32_t asm_index;   /* sector being assembled, or ASM_NONE        */
+    uint32_t asm_fill;    /* bytes of it received, in order             */
     uint8_t got[MAX_SECTORS / 8u];
 } s_up;
 
@@ -579,6 +589,8 @@ static void do_begin(uint16_t len) {
     s_up.crc = get32(&s_rx[4]);
     s_up.sectors = (size + SECTOR - 1u) / SECTOR;
     s_up.bypass = bypass;
+    s_up.asm_index = ASM_NONE;
+    s_up.asm_fill = 0u;
     memset(s_up.got, 0, sizeof s_up.got);
     memset(s_sector0, 0xFF, sizeof s_sector0);
     uint8_t b[16];
@@ -623,27 +635,47 @@ static void do_data(uint16_t len) {
     }
     uint32_t offset = get32(&s_rx[0]);
     uint32_t n = (uint32_t)len - 4u;
-    if (offset % SECTOR != 0u || offset >= s_up.size) {
+    if (offset >= s_up.size) {
         send_error_detail(UPD_ERR_OFFSET, offset);
         return;
     }
-    uint32_t want = s_up.size - offset < SECTOR ? s_up.size - offset : SECTOR;
-    if (n != want) {
-        send_error_detail(UPD_ERR_LENGTH, want);
+    uint32_t index = offset / SECTOR;
+    uint32_t within = offset % SECTOR;
+    uint32_t sec_len = s_up.size - index * SECTOR < SECTOR ? s_up.size - index * SECTOR : SECTOR;
+    if (n > sec_len - within) {
+        send_error_detail(UPD_ERR_LENGTH, sec_len - within); /* crosses the sector or the end */
         return;
     }
-    uint32_t index = offset / SECTOR;
-    uint8_t *data = (index == 0u) ? s_sector0 : s_buf;
-    memset(data, 0xFF, SECTOR); /* pad a short last block with erased bytes */
-    memcpy(data, &s_rx[4], n);
-    if (index != 0u) {
-        static uint8_t copy[SECTOR] __attribute__((aligned(4)));
-        memcpy(copy, data, SECTOR);
-        if (write_sector(index, copy) != 0) {
-            return;
-        }
+    static uint8_t s_asm[SECTOR] __attribute__((aligned(4))); /* sectors 1.. being assembled */
+    uint8_t *buf = (index == 0u) ? s_sector0 : s_asm;
+    if (within == 0u) {
+        /* Start (or restart) this sector; any other half-received sector
+         * is abandoned and will show as missing at FINISH. */
+        s_up.asm_index = index;
+        s_up.asm_fill = 0u;
+        memset(buf, 0xFF, SECTOR); /* a short last sector is padded with erased bytes */
+    } else if (s_up.asm_index != index || within > s_up.asm_fill) {
+        uint32_t expect = (s_up.asm_index == ASM_NONE) ? offset - within
+                                                         : s_up.asm_index * SECTOR + s_up.asm_fill;
+        send_error_detail(UPD_ERR_OFFSET, expect);
+        return;
     }
-    s_up.got[index / 8u] = (uint8_t)(s_up.got[index / 8u] | (1u << (index % 8u)));
+    memcpy(&buf[within], &s_rx[4], n);
+    if (within + n > s_up.asm_fill) {
+        s_up.asm_fill = within + n;
+    }
+    if (s_up.asm_fill == sec_len) {
+        if (index != 0u) {
+            static uint8_t copy[SECTOR] __attribute__((aligned(4)));
+            memcpy(copy, s_asm, SECTOR);
+            if (write_sector(index, copy) != 0) {
+                s_up.asm_index = ASM_NONE;
+                return;
+            }
+        }
+        s_up.got[index / 8u] = (uint8_t)(s_up.got[index / 8u] | (1u << (index % 8u)));
+        s_up.asm_index = ASM_NONE;
+    }
     uint8_t b[4];
     put32(b, offset);
     send_frame(UPD_CMD_DATA | 0x80u, b, sizeof b);

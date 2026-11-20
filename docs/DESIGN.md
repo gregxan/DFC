@@ -523,6 +523,22 @@ image is never bootable and the running firmware is untouched.
 - Raise `UPDATER_PROTOCOL_FLOOR` once the tools stop supporting an older
   protocol, so no unit can be put back on it.
 
+## 4b2. DATA frame size (Rev 2.25)
+
+DATA chunks may be any size from `UPD_MIN_BLOCK` (64) to 4096 bytes, as
+long as none crosses a 4 KB sector boundary. The script uses powers of two
+(`--block-size`, default 4096). The board assembles each sector in RAM from
+its chunks, in order: a chunk at the sector's start (re)starts it, a chunk at
+the next expected byte extends it, and a resend of received bytes overwrites
+them. When the sector is complete it is erased, written and read back. An
+out-of-order chunk is refused with the expected offset. HELLO advertises the
+smallest and largest chunk; older boards advertise only 4096.
+
+At 921600 baud, a 4096-byte frame is a ~45 ms burst and a 1024-byte frame
+~11 ms. A pass-through device between the host and the DFC needs to buffer
+at least one frame. Stop-and-wait means nothing arrives while the board
+writes flash. A frame stalled for 500 ms mid-way is dropped.
+
 ## 4c. Trial boot and confirm (Rev 2.25, updater step 5)
 
 1. At FINISH the updater sets the try-before-you-buy (TBYB) bit in the image
