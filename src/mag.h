@@ -143,6 +143,32 @@ typedef struct {
 } mag_boot_t;
 
 const mag_boot_t *mag_boot(void);
+
+/* Bench diagnostic (diagnostic builds): why the magnetometer cannot start
+ * a new transaction after an abort (M-16). Updated on every tick that finds
+ * the hardware not idle; ticks = consecutive such ticks (0 once idle). */
+#define MAG_STUCK_BUS_CLEAR 0x001u  /* PIO bus clear has not finished       */
+#define MAG_STUCK_DMA_ABORT 0x002u  /* DMA CHAN_ABORT still pending          */
+#define MAG_STUCK_DMA_CMD 0x004u    /* command DMA channel busy              */
+#define MAG_STUCK_DMA_DATA 0x008u   /* data DMA channel busy                 */
+#define MAG_STUCK_IC_ABORT 0x010u   /* IC_ENABLE.ABORT still set             */
+#define MAG_STUCK_MST_ACT 0x020u    /* controller reports master activity    */
+#define MAG_STUCK_TX_NOT_EMPTY 0x040u /* controller TX FIFO not empty        */
+#define MAG_STUCK_SCL_LOW 0x080u    /* SCL pin reads low                     */
+#define MAG_STUCK_SDA_LOW 0x100u    /* SDA pin reads low                     */
+#define MAG_STUCK_IC_DISABLED 0x200u /* IC_ENABLE.ENABLE clear               */
+typedef struct {
+    uint32_t flags;     /* MAG_STUCK_* at the latest stuck tick           */
+    uint32_t ticks;     /* consecutive stuck ticks, 0 when not stuck      */
+    uint32_t max_ticks; /* longest run since boot                         */
+    uint32_t episodes;  /* stuck runs longer than 10 ticks                */
+    uint32_t abrt_src;  /* IC_TX_ABRT_SOURCE of the latest abort          */
+    uint32_t txflr;     /* IC_TXFLR at the latest stuck tick              */
+    uint32_t status;    /* IC_STATUS at the latest stuck tick             */
+    uint8_t state;      /* internal state (2 busy, 3 aborting, 4 aborted) */
+} mag_stuck_t;
+
+const mag_stuck_t *mag_stuck(void);
 #endif
 
 /* True while the sensor is not confirmed and configured: after a failed

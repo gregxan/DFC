@@ -324,6 +324,71 @@ static bool __not_in_flash_func(bus_clear_done)(void) {
 }
 #endif
 
+#if APP_USB_STATUS
+static mag_stuck_t s_stuck;
+
+const mag_stuck_t *mag_stuck(void) {
+    return &s_stuck;
+}
+
+/* Record why hw_idle() is false (tick ISR, bench diagnostic). */
+static void __not_in_flash_func(stuck_record)(void) {
+    i2c_hw_t *hw = i2c_get_hw(i2c1);
+    uint32_t f = 0u;
+#if MAG_BUS_CLEAR
+    if (s_bc_running) {
+        f |= MAG_STUCK_BUS_CLEAR;
+    }
+#endif
+    if (dma_hw->abort & s_dma_mask) {
+        f |= MAG_STUCK_DMA_ABORT;
+    }
+    if (dma_hw->ch[s_dma_cmd].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) {
+        f |= MAG_STUCK_DMA_CMD;
+    }
+    if (dma_hw->ch[s_dma_data].ctrl_trig & DMA_CH0_CTRL_TRIG_BUSY_BITS) {
+        f |= MAG_STUCK_DMA_DATA;
+    }
+    uint32_t en = hw->enable;
+    if (en & I2C_IC_ENABLE_ABORT_BITS) {
+        f |= MAG_STUCK_IC_ABORT;
+    }
+    if (!(en & I2C_IC_ENABLE_ENABLE_BITS)) {
+        f |= MAG_STUCK_IC_DISABLED;
+    }
+    uint32_t st = hw->status;
+    if (st & I2C_IC_STATUS_MST_ACTIVITY_BITS) {
+        f |= MAG_STUCK_MST_ACT;
+    }
+    if (!(st & I2C_IC_STATUS_TFE_BITS)) {
+        f |= MAG_STUCK_TX_NOT_EMPTY;
+    }
+    if (!gpio_get(MAG_SCL_PIN)) {
+        f |= MAG_STUCK_SCL_LOW;
+    }
+    if (!gpio_get(MAG_SDA_PIN)) {
+        f |= MAG_STUCK_SDA_LOW;
+    }
+    s_stuck.flags = f;
+    s_stuck.status = st;
+    s_stuck.txflr = hw->txflr;
+    s_stuck.state = (uint8_t)s_state;
+    if (++s_stuck.ticks > s_stuck.max_ticks) {
+        s_stuck.max_ticks = s_stuck.ticks;
+    }
+    if (s_stuck.ticks == 10u) {
+        s_stuck.episodes++;
+    }
+}
+#define STUCK_RECORD() stuck_record()
+#define STUCK_CLEAR() (s_stuck.ticks = 0u)
+#define STUCK_ABRT(src) (s_stuck.abrt_src = (src))
+#else
+#define STUCK_RECORD() ((void)0)
+#define STUCK_CLEAR() ((void)0)
+#define STUCK_ABRT(src) ((void)0)
+#endif
+
 /* Both DMA channels and the I2C controller idle (M-16). Non-blocking. */
 static bool __not_in_flash_func(hw_idle)(void) {
 #if MAG_BUS_CLEAR
@@ -597,6 +662,7 @@ static void __not_in_flash_func(i2c_isr)(void) {
          * FIFO before the flush is released. */
         mag_dma_abort();
         uint32_t src = hw->tx_abrt_source;
+        STUCK_ABRT(src);
         (void)hw->clr_tx_abrt;       /* releases the TX FIFO flush     */
         (void)hw->clr_stop_det;      /* the abort's STOP is not completion */
         bool user = (src & I2C_IC_TX_ABRT_SOURCE_ABRT_USER_ABRT_BITS) != 0u;
@@ -734,6 +800,7 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
     case MAG_ABORTING:
     case MAG_ABORTED:
         if (hw_idle()) {
+            STUCK_CLEAR();
             s_trig_ok = false;
             if (sampling) {
                 mag_start(tick); /* M-9: this sample will be invalid */
@@ -744,6 +811,7 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
                 s_state = MAG_FAULT;
             }
         } else {
+            STUCK_RECORD();
             if (sampling) {
                 diag_inc(DIAG_MAG_MISSED_TICK);
             }

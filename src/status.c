@@ -149,13 +149,19 @@ static int format_line(unsigned line) {
         return snprintf(s_buf, n, "MAGS sr_mode=%" PRIu32 " sr_interval=%" PRIu32 " recovered=%" PRIu32
                         " not_ready=%" PRIu32 " runtime_fault=%" PRIu32 " x=%" PRId32 " y=%" PRId32
                         " z=%" PRId32 " rate_hz=%" PRIu32 " rate_req_hz=%" PRIu32 " bw=%u"
+                        " stuck_flags=0x%03" PRIX32 " stuck_ticks=%" PRIu32 " stuck_max=%" PRIu32
+                        " stuck_runs=%" PRIu32 " stuck_state=%u stuck_txflr=%" PRIu32 " stuck_status=0x%02" PRIX32
+                        " abrt_src=0x%05" PRIX32
 #if APP_MODE != APP_MODE_USER
                         " noise_n=%" PRIu32 " nx_ug=%" PRIu32 " ny_ug=%" PRIu32 " nz_ug=%" PRIu32
 #endif
                         "\r\n",
                         g_mag_sr_mode, g_mag_sr_interval, s_total[DIAG_MAG_RECOVERED],
                         s_total[DIAG_MAG_NOT_READY], s_total[DIAG_MAG_RUNTIME_FAULT], s_xyz[0], s_xyz[1],
-                        s_xyz[2], mag_rate_hz(), g_mag_rate_hz, (unsigned)mag_rate_bw(mag_rate_hz())
+                        s_xyz[2], mag_rate_hz(), g_mag_rate_hz, (unsigned)mag_rate_bw(mag_rate_hz()),
+                        mag_stuck()->flags, mag_stuck()->ticks, mag_stuck()->max_ticks, mag_stuck()->episodes,
+                        (unsigned)mag_stuck()->state, mag_stuck()->txflr, mag_stuck()->status,
+                        mag_stuck()->abrt_src
 #if APP_MODE != APP_MODE_USER
                         , s_noise_n, s_noise_ug[0], s_noise_ug[1], s_noise_ug[2]
 #endif
@@ -694,7 +700,26 @@ static int format_human(unsigned line) {
                  cell(c, sizeof c, s_total[DIAG_MAG_MISSED_TICK], s_delta[DIAG_MAG_MISSED_TICK]));
         snprintf(it[3], sizeof it[3], "bus clears %" PRIu32, s_total[DIAG_MAG_BUS_CLEAR]);
         const char *const p[] = {it[0], it[1], it[2], it[3]};
-        return items(0, "  Bus         ", p, 4u);
+        int len = items(0, "  Bus         ", p, 4u);
+        const mag_stuck_t *k = mag_stuck(); /* bench diagnostic */
+        if (k->max_ticks > 1u) {
+            static const char *const k_why[] = {"bus clear", "DMA abort", "cmd DMA", "data DMA", "IC abort",
+                                                "master active", "TX FIFO", "SCL low", "SDA low", "I2C off"};
+            char w[96];
+            int m = 0;
+            for (unsigned i = 0; i < 10u && m >= 0 && (unsigned)m < sizeof w; i++) {
+                if (k->flags & (1u << i)) {
+                    m += snprintf(w + m, sizeof w - (unsigned)m, "%s%s", m ? ", " : "", k_why[i]);
+                }
+            }
+            char tt[224];
+            snprintf(tt, sizeof tt, "%s: waited %" PRIu32 " ms (max %" PRIu32 ", %" PRIu32 " runs > 10 ms) on %s;"
+                     " state %u, TXFLR %" PRIu32 ", status 0x%02" PRIX32 ", abort 0x%05" PRIX32,
+                     k->ticks ? "STUCK NOW" : "Last stall", k->ticks ? k->ticks : k->max_ticks, k->max_ticks,
+                     k->episodes, m > 0 ? w : "nothing", (unsigned)k->state, k->txflr, k->status, k->abrt_src);
+            len = wrap(len, LABEL, 14u, tt);
+        }
+        return len;
     }
     case H_MAG_HEALTH: {
         char it[5][44];
