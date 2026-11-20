@@ -88,6 +88,12 @@ static void __not_in_flash_func(rx_overflow)(link_t *l, link_id_t id) {
     diag_hwm(&g_diag_rx_hwm[id], RX_SIZE);
 }
 
+/* API time minus copy time, never below 0. Both are measured with
+ * interrupt time removed, so small accounting errors must not wrap. */
+static inline uint32_t sub_sat(uint32_t a, uint32_t b) {
+    return a > b ? a - b : 0u;
+}
+
 size_t __not_in_flash_func(link_rx_available)(link_id_t id) {
     const link_t *l = &s_links[id];
     uint32_t unread = rx_total_now(l) - l->rx_read_total;
@@ -129,11 +135,11 @@ size_t __not_in_flash_func(link_read)(link_id_t id, uint8_t *dst, size_t max) {
      * RX_SIZE bytes past it have been written. */
     if (rx_total_now(l) - l->rx_read_total > RX_SIZE) {
         rx_overflow(l, id);
-        diag_max(DIAG_T_API_READ, diag_span_cycles(t0) - copy);
+        diag_max(DIAG_T_API_READ, sub_sat(diag_span_cycles(t0), copy));
         return 0;
     }
     l->rx_read_total += n;
-    diag_max(DIAG_T_API_READ, diag_span_cycles(t0) - copy);
+    diag_max(DIAG_T_API_READ, sub_sat(diag_span_cycles(t0), copy));
     return n;
 }
 
@@ -259,7 +265,7 @@ bool __not_in_flash_func(link_write)(link_id_t id, const uint8_t *src, size_t le
     }
     cs_exit(cs);
 
-    diag_max(DIAG_T_API_WRITE, diag_span_cycles(t0) - copy);
+    diag_max(DIAG_T_API_WRITE, sub_sat(diag_span_cycles(t0), copy));
     return true;
 }
 

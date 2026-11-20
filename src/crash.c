@@ -32,7 +32,14 @@ void crash_capture(void) {
             s_last.pc = watchdog_hw->scratch[1];
             s_last.lr = watchdog_hw->scratch[2];
             s_last.cfsr = watchdog_hw->scratch[3];
-        } else if (kind == CRASH_ARMED && (reason & WATCHDOG_REASON_TIMER_BITS)) {
+        } else if (kind == CRASH_ARMED && (reason & WATCHDOG_REASON_TIMER_BITS) &&
+                   watchdog_hw->scratch[2] - watchdog_hw->scratch[3] <= 10000u) {
+            /* Our watchdog fires 2 s after the main loop's last feed, so a
+             * real hang shows the tick at most ~2000 ms past it. A larger
+             * gap means someone else rebooted through the watchdog, with
+             * our record still armed: the bootrom after a BOOTSEL (button)
+             * reflash, which also leaves scratch[2] changed. Bench, Rev
+             * 2.25: reported 268435172 ms. Not a hang; ignored. */
             s_last.kind = CRASH_KIND_WATCHDOG;
             s_last.irq = watchdog_hw->scratch[1];
             s_last.isr_tick = watchdog_hw->scratch[2];
