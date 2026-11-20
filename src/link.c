@@ -202,6 +202,14 @@ static inline void __not_in_flash_func(tx_start)(link_t *l) {
     ch->al1_transfer_count_trig = n;
 }
 
+uint32_t link_rx_bytes(link_id_t id) {
+    return rx_total_now(&s_links[id]);
+}
+
+uint32_t link_tx_bytes(link_id_t id) {
+    return s_links[id].tx_tail;
+}
+
 size_t __not_in_flash_func(link_tx_free)(link_id_t id) {
     link_t *l = &s_links[id];
     cs_t cs = cs_enter();

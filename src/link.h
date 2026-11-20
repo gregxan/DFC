@@ -46,6 +46,12 @@ bool link_write(link_id_t id, const uint8_t *src, size_t len);
 /* Free space in the TX ring. */
 size_t link_tx_free(link_id_t id);
 
+/* Bytes received (written into the RX ring by DMA) and transmitted (handed
+ * to the UART TX FIFO) since start-up. Both wrap at 2^32 (~13 h at full
+ * rate); take differences. Main loop only. */
+uint32_t link_rx_bytes(link_id_t id);
+uint32_t link_tx_bytes(link_id_t id);
+
 /* Called from the 1 ms tick ISR only: U-8 bookkeeping, U-15a re-enable. */
 void link_tick_isr(void);
 

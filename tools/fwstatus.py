@@ -272,6 +272,21 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     for key, label in (("rx_hwm", "RX high-water"), ("tx_hwm", "TX high-water")):
         lines.append(f"  {label:<14}{g('L0', key):>14}{g('L1', key):>14}")
     lines.append(f"  {'TX interrupts':<14}{g('L0', 'tx_irq'):>14}{g('L1', 'tx_irq'):>14}")
+    if "rx_bytes" in cur.get("L0", {}):
+        secs = (g("STAT", "t_ms") - prev.get("STAT", {}).get("t_ms", 0)) / 1000.0 if prev else 0.0
+
+        def rate(link: str) -> str:
+            if not secs:
+                return "-"
+            r = (d(link, "rx_bytes") & 0xFFFFFFFF) / secs / 1000
+            t = (d(link, "tx_bytes") & 0xFFFFFFFF) / secs / 1000
+            return f"{r:.1f}/{t:.1f}"
+
+        def total(link: str) -> str:
+            return f"{g(link, 'rx_bytes') / 1e6:.1f}/{g(link, 'tx_bytes') / 1e6:.1f}"
+
+        lines.append(f"  {'RX/TX kB/s':<14}{rate('L0'):>14}{rate('L1'):>14}   (line rate 92.2)")
+        lines.append(f"  {'RX/TX MB':<14}{total('L0'):>14}{total('L1'):>14}")
 
     # Magnetometer
     lines.append("")

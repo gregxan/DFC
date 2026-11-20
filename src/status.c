@@ -18,6 +18,7 @@
 
 #include "crash.h"
 #include "diag.h"
+#include "link.h"
 #include "mag.h"
 #include "wirecheck.h"
 
@@ -115,14 +116,14 @@ static int format_line(unsigned line) {
 #if APP_MODE != APP_MODE_USER
                         " pattern_err=%" PRIu32
 #endif
-                        " tx_irq=%" PRIu32 "\r\n",
+                        " tx_irq=%" PRIu32 " rx_bytes=%" PRIu32 " tx_bytes=%" PRIu32 "\r\n",
                         k, s_total[b + DIAG_L0_RX_OVERFLOW], s_total[b + DIAG_L0_TX_REJECT],
                         s_total[b + DIAG_L0_FRAMING], s_total[b + DIAG_L0_BREAK], s_total[b + DIAG_L0_OVERRUN],
                         g_diag_rx_hwm[k], g_diag_tx_hwm[k],
 #if APP_MODE != APP_MODE_USER
                         g_app_rx_pattern_errors[k],
 #endif
-                        g_diag_tx_irq[k]);
+                        g_diag_tx_irq[k], link_rx_bytes((link_id_t)k), link_tx_bytes((link_id_t)k));
     }
     case 3:
         return snprintf(s_buf, n, "MAG fault=%u i2c_error=%" PRIu32 " missed_tick=%" PRIu32 " timeout=%" PRIu32
@@ -228,6 +229,9 @@ static int format_line(unsigned line) {
 
 /* ------------------------------------------------------ readable format */
 
+/* Bytes per report period (~1 s), per UART. */
+static uint32_t s_prev_rx[2], s_prev_tx[2], s_d_rx[2], s_d_tx[2];
+
 #if APP_MODE != APP_MODE_USER
 static uint32_t s_prev_valid, s_prev_gaps, s_d_valid, s_d_gaps;
 static uint32_t s_prev_pattern[2], s_d_pattern[2];
@@ -248,6 +252,8 @@ enum {
 #endif
     H_QUEUE,
     H_TX_IRQ,
+    H_BYTES_RATE,
+    H_BYTES_TOTAL,
     H_BLANK1,
     H_MAG_STATE,
     H_MAG_RATE,
@@ -622,6 +628,20 @@ static int format_human(unsigned line) {
         snprintf(a, sizeof a, "%" PRIu32 " / %" PRIu32, g_diag_rx_hwm[0], g_diag_tx_hwm[0]);
         snprintf(b, sizeof b, "%" PRIu32 " / %" PRIu32, g_diag_rx_hwm[1], g_diag_tx_hwm[1]);
         return snprintf(s_buf, n, "  %-18s%14s%16s\r\n", "Peak RX / TX bytes", a, b);
+    case H_BYTES_RATE: /* 921600 baud, 8N1 = 92.16 kB/s per direction */
+        snprintf(a, sizeof a, "%" PRIu32 ".%02" PRIu32 " / %" PRIu32 ".%02" PRIu32, s_d_rx[0] / 1000u,
+                 (s_d_rx[0] % 1000u) / 10u, s_d_tx[0] / 1000u, (s_d_tx[0] % 1000u) / 10u);
+        snprintf(b, sizeof b, "%" PRIu32 ".%02" PRIu32 " / %" PRIu32 ".%02" PRIu32, s_d_rx[1] / 1000u,
+                 (s_d_rx[1] % 1000u) / 10u, s_d_tx[1] / 1000u, (s_d_tx[1] % 1000u) / 10u);
+        return snprintf(s_buf, n, "  %-18s%14s%16s\r\n", "RX / TX kB/s", a, b);
+    case H_BYTES_TOTAL: {
+        uint32_t v[4] = {link_rx_bytes(LINK_0), link_tx_bytes(LINK_0), link_rx_bytes(LINK_1), link_tx_bytes(LINK_1)};
+        snprintf(a, sizeof a, "%" PRIu32 ".%01" PRIu32 " / %" PRIu32 ".%01" PRIu32, v[0] / 1000000u,
+                 (v[0] % 1000000u) / 100000u, v[1] / 1000000u, (v[1] % 1000000u) / 100000u);
+        snprintf(b, sizeof b, "%" PRIu32 ".%01" PRIu32 " / %" PRIu32 ".%01" PRIu32, v[2] / 1000000u,
+                 (v[2] % 1000000u) / 100000u, v[3] / 1000000u, (v[3] % 1000000u) / 100000u);
+        return snprintf(s_buf, n, "  %-18s%14s%16s\r\n", "RX / TX MB total", a, b);
+    }
     case H_TX_IRQ:
         return snprintf(s_buf, n, "  %-18s%14" PRIu32 "%16" PRIu32 "\r\n", "TX interrupts", g_diag_tx_irq[0],
                         g_diag_tx_irq[1]);
@@ -1001,6 +1021,13 @@ void status_poll(void) {
         for (unsigned i = 0; i < DIAG_COUNT; i++) {
             s_total[i] += snap[i];
             s_delta[i] = snap[i];
+        }
+        for (unsigned k = 0; k < 2u; k++) {
+            uint32_t rx = link_rx_bytes((link_id_t)k), tx = link_tx_bytes((link_id_t)k);
+            s_d_rx[k] = rx - s_prev_rx[k];
+            s_d_tx[k] = tx - s_prev_tx[k];
+            s_prev_rx[k] = rx;
+            s_prev_tx[k] = tx;
         }
 #if APP_MODE != APP_MODE_USER
         uint32_t v = g_app_mag_valid, gp = g_app_mag_gaps;
