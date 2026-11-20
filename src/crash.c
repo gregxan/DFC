@@ -17,6 +17,11 @@
 
 static crash_t s_last;
 
+/* Rev 2.25: feed only a watchdog this code armed. During a trial boot the
+ * running watchdog is the bootrom's 16.7 s one, and feeding it would stop
+ * the fallback to the previous firmware (found on the bench). */
+static bool s_armed;
+
 void crash_capture(void) {
     uint32_t s0 = watchdog_hw->scratch[0];
     uint32_t reason = watchdog_hw->reason;
@@ -59,16 +64,20 @@ void crash_capture(void) {
 void crash_arm(void) {
     crash_crumb(CRUMB_IDLE);
     watchdog_enable(WATCHDOG_MS, true); /* paused while a debugger halts the core */
+    s_armed = true;
 }
 
 void crash_feed(void) {
-    watchdog_update();
+    if (s_armed) {
+        watchdog_update();
+    }
     uint32_t t = tick_count();
     watchdog_hw->scratch[3] = t;
     gpio_put(PICO_DEFAULT_LED_PIN, ((t >> 8) & 1u) != 0u); /* ~2 Hz blink */
 }
 
 void crash_disarm(void) {
+    s_armed = false;
     watchdog_disable();
     watchdog_hw->scratch[0] = 0u;
 }
