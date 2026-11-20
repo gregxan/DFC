@@ -166,14 +166,23 @@ enum {
 
 /* Bootrom flash operation on physical flash offsets ("storage" addresses),
  * checked against the partition table's permissions, so it cannot touch
- * the partition table itself. Called directly, without the SDK's lockout:
+ * the partition table itself. Called directly, without the SDK's
+ * flash_safe_execute() lockout (the bootrom lock is still taken):
  * the whole image runs from RAM (copy_to_ram), so nothing fetches from
  * flash while the bootrom has it out of XIP mode, interrupts included. */
 static int flash_op(uint32_t op, uint32_t offset, uint32_t n, uint8_t *buf) {
     rom_flash_op_fn f = (rom_flash_op_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_OP);
     cflash_flags_t fl = {(op << CFLASH_OP_LSB) | (CFLASH_ASPACE_VALUE_STORAGE << CFLASH_ASPACE_LSB) |
                          (CFLASH_SECLEVEL_VALUE_SECURE << CFLASH_SECLEVEL_LSB)};
-    return f(fl, XIP_BASE + offset, n, buf);
+    /* The SDK enables the bootrom's hardware locks at start-up, so the
+     * flash operation must hold the flash lock (else it returns
+     * BOOTROM_ERROR_LOCK_REQUIRED, -19; bench, Rev 2.25). */
+    if (!bootrom_try_acquire_lock(BOOTROM_LOCK_FLASH_OP)) {
+        return BOOTROM_ERROR_LOCK_REQUIRED;
+    }
+    int r = f(fl, XIP_BASE + offset, n, buf);
+    bootrom_release_lock(BOOTROM_LOCK_FLASH_OP);
+    return r;
 }
 
 static uint8_t s_work[4096] __attribute__((aligned(4))); /* bootrom work area */
