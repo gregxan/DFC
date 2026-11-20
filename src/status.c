@@ -23,7 +23,7 @@ extern volatile bool g_app_baud_ok;
 
 #if APP_MODE == APP_MODE_USER
 extern volatile uint32_t g_epoch_start_max_us;
-#define N_LINES 10u /* adds EPOCH and PROF */
+#define N_LINES 11u /* adds EPOCH and PROF */
 #else
 /* Test application (app_test.c) results. */
 extern volatile uint32_t g_app_mag_gaps;
@@ -31,7 +31,7 @@ extern volatile uint32_t g_app_mag_valid;
 extern volatile uint32_t g_app_mag_invalid;
 extern volatile uint32_t g_app_mag_stale;
 extern volatile uint32_t g_app_rx_pattern_errors[2];
-#define N_LINES 8u
+#define N_LINES 9u
 #endif
 
 #define STATUS_PERIOD_US 1000000u
@@ -147,13 +147,22 @@ static int format_line(unsigned line) {
                         (unsigned)wirecheck_found(1u, (uint8_t)MAG_I2C_ADDR),
                         w->n_found[0] ? (unsigned)w->found[0][0] : 0u, w->n_found[1] ? (unsigned)w->found[1][0] : 0u);
     }
+    case 7: { /* Rev 2.19: start-up results and measurement timing */
+        const mag_boot_t *bt = mag_boot();
+        return snprintf(s_buf, n, "BOOT ran=%u id=0x%02X status=0x%02X cause=%u cal_ok=%u cal_status=0x%02X"
+                        " t_fast_us=%u t_slow_us=%u t_rs_us=%u burst_status=0x%02X direct_status=0x%02X\r\n",
+                        (unsigned)bt->ran, (unsigned)bt->id, (unsigned)bt->status, (unsigned)bt->cause,
+                        (unsigned)bt->cal_ok, (unsigned)bt->cal_status, (unsigned)bt->t_fast_us,
+                        (unsigned)bt->t_slow_us, (unsigned)bt->t_rs_us, (unsigned)bt->burst_status,
+                        (unsigned)bt->direct_status);
+    }
 #if APP_MODE == APP_MODE_USER
-    case 8: /* EX-8, D-4: 1 ms epoch work time */
+    case 9: /* EX-8, D-4: 1 ms epoch work time */
         return snprintf(s_buf, n, "EPOCH last_us=%" PRIu32 " max_us=%" PRIu32 " avg_us=%" PRIu32
                         " overrun=%" PRIu32 " start_max_us=%" PRIu32 " count=%" PRIu32 "\r\n",
                         us(g_prof[PROF_EPOCH].last), us(g_prof[PROF_EPOCH].max), us(prof_avg(PROF_EPOCH)),
                         s_total[DIAG_EPOCH_OVERRUN], g_epoch_start_max_us, (uint32_t)g_prof[PROF_EPOCH].count);
-    case 9: { /* D-6: sections, as last/max/avg in us */
+    case 10: { /* D-6: sections, as last/max/avg in us */
         int len = snprintf(s_buf, n, "PROF");
         for (unsigned i = 1; i < PROF_COUNT && len > 0 && (unsigned)len < n; i++) {
             len += snprintf(s_buf + len, n - (unsigned)len, " %s=%" PRIu32 "/%" PRIu32 "/%" PRIu32, g_prof_name[i],
@@ -208,6 +217,9 @@ enum {
     H_MAG_CAL,
     H_WIRE,
     H_WIRE_VERDICT,
+    H_BOOT,
+    H_BOOT_TIME,
+    H_BOOT_VERDICT,
     H_BLANK2,
     H_TIM_HEAD,
     H_TIM_ISR,
@@ -218,6 +230,42 @@ enum {
     H_ATTENTION,
     H_COUNT
 };
+
+/* Measurement time for the start-up experiment (Rev 2.19). */
+static const char *ms_text(char *b, size_t n, uint16_t us_val) {
+    if (us_val == 0u) {
+        snprintf(b, n, "error");
+    } else if (us_val == MAG_BOOT_NEVER) {
+        snprintf(b, n, "never (>20 ms)");
+    } else {
+        snprintf(b, n, "%u.%02u ms", us_val / 1000u, (us_val % 1000u) / 10u);
+    }
+    return b;
+}
+
+static const char *boot_verdict(const mag_boot_t *bt) {
+    if (!bt->ran) {
+        return "not run (sensor did not answer with ID 0x30 at start-up)";
+    }
+    bool fast = bt->t_fast_us != 0u && bt->t_fast_us < 2000u;
+    bool slow_ok = bt->t_slow_us != 0u && bt->t_slow_us != MAG_BOOT_NEVER;
+    if (bt->t_fast_us == MAG_BOOT_NEVER && bt->t_slow_us == MAG_BOOT_NEVER) {
+        return "measurements never finish: the TM_M trigger is not taking effect";
+    }
+    if (!fast && slow_ok) {
+        return "800 Hz setting not taking effect even with STOP-ended writes";
+    }
+    if (fast && (bt->direct_status & MMC_STATUS_MEAS_M_DONE) && !(bt->burst_status & MMC_STATUS_MEAS_M_DONE)) {
+        return "Status reads wrong at the end of the 9-byte burst: measurements are fine, the ready check is not";
+    }
+    if (fast && (bt->t_rs_us == MAG_BOOT_NEVER || bt->t_rs_us >= 2000u)) {
+        return "writes followed by a repeated START are ignored: the DMA configuration needs a STOP after each write";
+    }
+    if (!(bt->status & MMC_STATUS_OTP_RD_DONE)) {
+        return "OTP_Rd_Done was clear after the software reset (start-up check failed); timing otherwise OK";
+    }
+    return "sensor timing OK";
+}
 
 /* "123" or "123 (+4)" */
 static const char *cell(char *b, size_t n, uint32_t total, uint32_t delta) {
@@ -409,6 +457,27 @@ static int format_human(unsigned line) {
     }
     case H_WIRE_VERDICT:
         return snprintf(s_buf, n, "               -> %s\r\n", wirecheck_verdict());
+    case H_BOOT: { /* Rev 2.19 */
+        const mag_boot_t *bt = mag_boot();
+        static const char *const k_cause[] = {"OK", "no answer", "wrong ID", "bus error", "OTP not loaded",
+                                              "config failed", "not ready"};
+        return snprintf(s_buf, n, "  Start-up     ID 0x%02X   status 0x%02X (OTP %s)   result: %s   calibration: %s"
+                                  " (status 0x%02X)\r\n",
+                        (unsigned)bt->id, (unsigned)bt->status,
+                        (bt->status & MMC_STATUS_OTP_RD_DONE) ? "loaded" : "NOT loaded",
+                        k_cause[bt->cause < 7u ? bt->cause : 0u], bt->cal_ok ? "OK" : "failed",
+                        (unsigned)bt->cal_status);
+    }
+    case H_BOOT_TIME: {
+        const mag_boot_t *bt = mag_boot();
+        return snprintf(s_buf, n, "  Meas. time   800 Hz %s   100 Hz %s   800 Hz set before a repeated START %s"
+                                  "   Status burst/direct 0x%02X/0x%02X\r\n",
+                        ms_text(a, sizeof a, bt->t_fast_us), ms_text(b, sizeof b, bt->t_slow_us),
+                        ms_text(c, sizeof c, bt->t_rs_us), (unsigned)bt->burst_status,
+                        (unsigned)bt->direct_status);
+    }
+    case H_BOOT_VERDICT:
+        return snprintf(s_buf, n, "               -> %s\r\n", boot_verdict(mag_boot()));
     case H_TIM_HEAD:
         return snprintf(s_buf, n, "TIMING (worst case since boot)\r\n");
     case H_TIM_ISR:

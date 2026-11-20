@@ -707,17 +707,33 @@ static void init_bus_fail(void) {
 /* Start-up only (blocking allowed): trigger one measurement, wait for it,
  * read the field and Status. Returns false on a bus error or if
  * Meas_M_Done is not set. */
-static bool blocking_measure(int32_t xyz[3]) {
+#if APP_USB_STATUS
+static mag_boot_t s_boot;
+
+const mag_boot_t *mag_boot(void) {
+    return &s_boot;
+}
+#endif
+
+/* 9-byte burst read of 0x00..0x08 (blocking). */
+static bool burst_read(uint8_t b[MMC_READ_BYTES]) {
     uint8_t reg = MMC_REG_XOUT0;
+    return i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, &reg, 1, true, 5000) == 1 &&
+           i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, b, MMC_READ_BYTES, false, 5000) == (int)MMC_READ_BYTES;
+}
+
+static bool blocking_measure(int32_t xyz[3]) {
     uint8_t b[MMC_READ_BYTES];
     if (!reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
         return false;
     }
     sleep_ms(2); /* 0.5 ms measurement at BW = 11, with margin */
-    if (i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, &reg, 1, true, 5000) != 1 ||
-        i2c_read_timeout_us(MAG_I2C, MAG_I2C_ADDR, b, MMC_READ_BYTES, false, 5000) != (int)MMC_READ_BYTES) {
+    if (!burst_read(b)) {
         return false;
     }
+#if APP_USB_STATUS
+    s_boot.cal_status = b[MMC_READ_BYTES - 1u];
+#endif
     if (!(b[MMC_READ_BYTES - 1u] & MMC_STATUS_MEAS_M_DONE)) {
         return false;
     }
@@ -770,6 +786,63 @@ static void startup_bus_clear(void) {
 }
 #endif
 
+#if APP_USB_STATUS
+/* Rev 2.19: time one measurement by polling Status on its own. */
+static uint16_t time_measurement(void) {
+    uint64_t t0 = time_us_64();
+    for (;;) {
+        uint8_t st = 0;
+        if (!reg_read(MMC_REG_STATUS, &st)) {
+            return 0u;
+        }
+        uint64_t dt = time_us_64() - t0;
+        if (st & MMC_STATUS_MEAS_M_DONE) {
+            return dt < 1u ? 1u : (uint16_t)dt;
+        }
+        if (dt > 20000u) {
+            return MAG_BOOT_NEVER;
+        }
+        busy_wait_us(50);
+    }
+}
+
+/* Rev 2.19: measurement-timing experiment (diagnostic builds only). Shows
+ * whether the bandwidth setting takes effect, whether a register write
+ * followed by a repeated START (as in the DMA configuration) takes effect,
+ * and whether Status reads correctly at the end of the 9-byte burst. */
+static void boot_experiment(void) {
+    uint8_t b[MMC_READ_BYTES];
+    /* 1. Default bandwidth, every write ended by STOP: expect ~8 ms. */
+    if (reg_write(MMC_REG_CTRL1, 0u) && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+        s_boot.t_slow_us = time_measurement();
+    }
+    sleep_ms(10);
+    /* 2. 800 Hz, every write ended by STOP: expect ~0.5 ms. Then compare
+     * Status from the burst with Status read on its own. */
+    if (reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ) && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+        s_boot.t_fast_us = time_measurement();
+        if (burst_read(b)) {
+            s_boot.burst_status = b[MMC_READ_BYTES - 1u];
+        }
+        (void)reg_read(MMC_REG_STATUS, &s_boot.direct_status);
+    }
+    sleep_ms(10);
+    /* 3. Back to the default, then 800 Hz written WITHOUT a STOP; the TM_M
+     * write that follows starts with a repeated START, as the DMA
+     * configuration does. ~0.5 ms = such writes take effect; ~8 ms = not. */
+    if (reg_write(MMC_REG_CTRL1, 0u)) {
+        uint8_t w[2] = {MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ};
+        if (i2c_write_timeout_us(MAG_I2C, MAG_I2C_ADDR, w, 2, true, 5000) == 2 &&
+            reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+            s_boot.t_rs_us = time_measurement();
+        }
+    }
+    sleep_ms(10);
+    (void)reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ); /* restore */
+    s_boot.ran = true;
+}
+#endif
+
 bool mag_init(void) {
     sleep_ms(10); /* MMC5983MA power-on time */
 
@@ -799,7 +872,11 @@ bool mag_init(void) {
     uint8_t st = 0;
     /* Rev 2.17: each failure records its cause and is counted once. */
     bool ok = true;
-    if (!reg_read(MMC_REG_PRODUCT_ID, &id)) {
+    bool id_read = reg_read(MMC_REG_PRODUCT_ID, &id);
+#if APP_USB_STATUS
+    s_boot.id = id_read ? id : 0u;
+#endif
+    if (!id_read) {
         init_bus_fail();
         ok = false;
     } else if (id != MMC_PRODUCT_ID) {
@@ -814,6 +891,9 @@ bool mag_init(void) {
         s_cause = MAG_CAUSE_OTP_NOT_LOADED;
         ok = false;
     }
+#if APP_USB_STATUS
+    s_boot.status = st;
+#endif
     /* M-3: 800 Hz bandwidth; continuous mode off. */
     bool cfg = ok && reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ);
     cfg = cfg && reg_write(MMC_REG_CTRL2, 0u);
@@ -842,6 +922,13 @@ bool mag_init(void) {
     if (!ok && s_cause == MAG_CAUSE_NONE) {
         s_cause = MAG_CAUSE_CONFIG_FAILED; /* the RESET or SET write failed */
     }
+#if APP_USB_STATUS
+    s_boot.cal_ok = cal;
+    s_boot.cause = s_cause;
+    if (id_read && id == MMC_PRODUCT_ID) {
+        boot_experiment();
+    }
+#endif
     if (cal) {
         for (unsigned i = 0; i < 3u; i++) {
             s_offset[i] = (m_set[i] + m_reset[i]) / 2;

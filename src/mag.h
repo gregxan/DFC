@@ -91,6 +91,29 @@ mag_fault_cause_t mag_fault_cause(void);
 /* Product-ID byte of the latest MAG_CAUSE_WRONG_ID failure. */
 uint8_t mag_fault_id(void);
 
+#if APP_USB_STATUS
+/* Rev 2.19 (diagnostic builds): start-up results and a measurement-timing
+ * experiment, run once with blocking I2C after the normal start-up.
+ * Times are us from the TM_M write to Meas_M_Done (Status read directly);
+ * MAG_BOOT_NEVER = not done within 20 ms, 0 = I2C error / not run. */
+#define MAG_BOOT_NEVER 0xFFFFu
+typedef struct {
+    bool ran;            /* product ID read OK, experiment run              */
+    uint8_t id;          /* product-ID byte at start-up (0 if no answer)     */
+    uint8_t status;      /* Status after SW_RST (OTP_Rd_Done = bit 4)        */
+    uint8_t cause;       /* mag_fault_cause_t at the end of start-up         */
+    bool cal_ok;         /* start-up offset calibration succeeded            */
+    uint8_t cal_status;  /* Status byte of the last start-up burst read      */
+    uint16_t t_fast_us;  /* BW = 800 Hz, each write ended by STOP            */
+    uint16_t t_slow_us;  /* BW = 100 Hz (default), each write ended by STOP  */
+    uint16_t t_rs_us;    /* BW = 800 Hz written, then TM_M after a repeated START */
+    uint8_t burst_status;  /* Status from a 9-byte burst after a finished measurement */
+    uint8_t direct_status; /* Status read on its own at the same time       */
+} mag_boot_t;
+
+const mag_boot_t *mag_boot(void);
+#endif
+
 /* True while the sensor is not confirmed and configured: after a failed
  * start-up check (M-2), or at run time after persistent not-ready samples
  * (M-2b), until a re-probe succeeds (M-2a). */

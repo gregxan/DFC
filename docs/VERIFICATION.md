@@ -136,6 +136,21 @@ shows it under the magnetometer:
 The check runs only at start-up. After rewiring (with the USB unplugged),
 plug back in, or press **R**, and reconnect the terminal.
 
+### Magnetometer start-up and timing check (Rev 2.19)
+
+Below the wiring check, diagnostic builds show what happened at start-up
+and how long real measurements take:
+
+```
+  Start-up     ID 0x30   status 0x10 (OTP loaded)   result: OK   calibration: OK (status 0x01)
+  Meas. time   800 Hz 0.52 ms   100 Hz 8.10 ms   800 Hz set before a repeated START 0.52 ms   Status burst/direct 0x01/0x01
+               -> sensor timing OK
+```
+
+Expected: about 0.5 ms at 800 Hz, about 8 ms at 100 Hz, the repeated-START
+case the same as 800 Hz, and bit 0 set in both Status values. The
+conclusion line names the first thing that differs.
+
 ### Optional fault checks (same wiring)
 
 - **Break and line errors.** Unplug the jumper from one RX pin and briefly

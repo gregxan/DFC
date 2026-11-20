@@ -3,7 +3,7 @@
 The firmware prints a readable report by default, for any serial terminal.
 This tool sends 'm' when it connects to switch the firmware to compact
 machine lines, which it parses and shows as a dashboard. In machine
-format, each second the firmware emits eight lines:
+format, each second the firmware emits nine lines:
 
     STAT seq=.. mode=.. t_ms=.. baud0=.. baud1=.. baud_ok=.. loop_max_us=.. status_max_us=.. tick_overrun=..
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
@@ -12,6 +12,7 @@ format, each second the firmware emits eight lines:
     MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=..
     CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
     WIRE ran=.. sda_low=.. scl_low=.. sda_pullup=.. scl_pullup=.. shorted=.. found=.. mag=.. mag_swapped=.. ...
+    BOOT ran=.. id=0x.. status=0x.. cause=.. cal_ok=.. t_fast_us=.. t_slow_us=.. t_rs_us=.. burst_status=0x.. ...
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
 
 User application builds (diag-user) add:
@@ -45,7 +46,7 @@ import serial  # pyserial
 
 def parse_line(line: str) -> tuple[str, dict[str, int]] | None:
     parts = line.strip().split()
-    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "WIRE", "TIM_NS", "EPOCH", "PROF"):
+    if not parts or parts[0] not in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "WIRE", "BOOT", "TIM_NS", "EPOCH", "PROF"):
         return None
     values: dict[str, int] = {}
     for p in parts[1:]:
@@ -154,7 +155,7 @@ def delta(after: dict[str, dict[str, int]], before: dict[str, dict[str, int]], g
 
 def format_report(s: dict[str, dict[str, int]]) -> str:
     out = []
-    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "WIRE", "TIM_NS", "EPOCH", "PROF"):
+    for g in ("STAT", "L0", "L1", "MAG", "MAGS", "CAL", "WIRE", "BOOT", "TIM_NS", "EPOCH", "PROF"):
         if g in s:
             out.append(g + " " + " ".join(f"{k}={v}" for k, v in s[g].items()))
     return "\n".join(out)
@@ -292,6 +293,14 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     lines.append(f"  not ready {count('MAGS', 'not_ready')}   saturated {count('CAL', 'saturated', False)}")
     if g("WIRE", "ran"):
         lines.append("  wiring (boot check)  " + _wire_text(cur.get("WIRE", {})))
+    if "BOOT" in cur:
+        b = cur["BOOT"]
+        def t(v: int) -> str:
+            return "error" if v == 0 else ("never" if v == 0xFFFF else f"{v / 1000:.2f} ms")
+        lines.append(f"  start-up  ID 0x{b.get('id', 0):02X}  status 0x{b.get('status', 0):02X}  "
+                     f"calibration {'OK' if b.get('cal_ok') else 'failed'}   meas. time 800 Hz {t(b.get('t_fast_us', 0))}"
+                     f", 100 Hz {t(b.get('t_slow_us', 0))}, after repeated START {t(b.get('t_rs_us', 0))}"
+                     f", Status burst/direct 0x{b.get('burst_status', 0):02X}/0x{b.get('direct_status', 0):02X}")
     if not fault:
         for key, label in (("i2c_error", "I2C errors"), ("timeout", "timeouts"), ("missed_tick", "missed ticks")):
             if d("MAG", key):
