@@ -745,6 +745,14 @@ reset still brings the old image back.
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
+| F-1 … F-4 | `partition_table.json`, `CMakeLists.txt` (pt.uf2, E10 block, slot-size check); §4a |
+| F-5, F-6 | `g_updater_info`, `keep_info()`, `info_at()`, `scan_chunk()` (`updater.c`); `DFC_FW_VERSION`; `UPDATER_PROTOCOL`, `UPDATER_PROTOCOL_FLOOR` (`updater.h`); §4b |
+| F-7 … F-10 | `updater_request()`, `set_boot_flag()`, `updater_check_boot()`, `updater_trigger_scan()`, `updater_run()`, `k_ports[]`; `!` in `status_poll()`; `check_trigger()` (`app_test.c`); §4b3 |
+| F-11 … F-13 | `parse_byte()`, `handle()`, `do_begin()`, `do_data()`, `reply_hello()`; §4b2 |
+| F-14 … F-17 | `flash_op()`, `partition_location()`, `write_sector()`, `do_finish()`; `tools/dfc_update.py` (`check_versions()`, `find_info()`) |
+| F-18 … F-20 | `set_tbyb()`, `flash_update_boot()`, `do_confirm()`, `updater_trial_pending()`; `crash_arm()`/`crash_feed()` gating in `main.c`/`crash.c`; §4c |
+| F-21, F-22 | BEGIN flags in `do_begin()`/`do_finish()`; `confirm_bypasses()` (`dfc_update.py`); `UPDATER_NO_TRIAL_KEY` |
+| F-23 | link interface: DESIGN §4b2; `--block-size` |
 | M-3b | `k_rates[]`, `rate_select()`, `mag_start()` (`s_cmd_rate`), `mag_tick_isr()` (`s_next_tick`), `config_start()`, `g_mag_rate_hz`, `MAG_RATE_DEFAULT_HZ`; console `r` in `status_poll()` |
 | D-10 | `app_mag_noise_take()` (`app_test.c`), `H_MAG_NOISE` and `MAGS noise_*` in `status.c` |
 | M-6, M-6a | `tick.c` |

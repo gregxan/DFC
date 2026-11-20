@@ -1,7 +1,7 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.25
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.26
 ([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
@@ -15,7 +15,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 
 | Document | Contents |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.25), the baseline for this firmware |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.26), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7, including a board-only loopback self-test |
 
@@ -323,7 +323,7 @@ UART-related interrupt (B-20).
   setting lasts until the next reset. To change the start-up rate, including
   in release builds, set `MAG_RATE_DEFAULT_HZ` (see `src/config.h`), or set
   `g_mag_rate_hz` from the application.
-- **Firmware updater (in progress, Rev 2.25).** Type `!` and the board
+- **Firmware updater (REQUIREMENTS section 6a).** Type `!` and the board
   reboots into its updater on this USB port. The COM port closes and comes
   back. The updater blinks the LED fast and waits 90 s for
   `tools\dfc_update.py`, then boots the firmware again. To update the

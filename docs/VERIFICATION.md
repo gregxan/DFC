@@ -88,6 +88,15 @@ py -m pip install -r tools/requirements.txt
 4. Note the chip revision shown (A2 needs the E10 block; A3 and later ignore
    it).
 
+## Firmware update (V-8 … V-11, Rev 2.26)
+
+| Requirement | Procedure |
+|---|---|
+| V-8 | "A/B partition table" below |
+| V-9 | "Updater over UART0 / UART1" below, the USB steps in README ("Firmware updater"), and the bench results above |
+| V-10 | trial checks in the bench results above; repeat over UART with `--no-confirm` and a `DFC_TEST_NO_UPDATER` image |
+| V-11 | bypass checks in the bench results above |
+
 ## Updater over UART0 / UART1 (Rev 2.25, step 6)
 
 Needs a 3.3 V USB-serial adapter: adapter TX → D7 (UART0 RX), adapter RX →

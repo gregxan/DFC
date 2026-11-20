@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.25**. The changes since Revision 2 are listed in sections 11 to 35.
+**Revision 2.26**. The changes since Revision 2 are listed in sections 11 to 36.
 
 ## 1. Scope
 
@@ -9,6 +9,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - Moves data on two UARTs at 921,600 baud with the lowest achievable latency, to the numeric targets in section 4.5.
 - Samples an MMC5983MA magnetometer over I2C at 1 kHz, or at 200, 100 or 50 Hz for lower noise (M-3b).
 - Exposes all data to a single bare-metal main loop without ever blocking it.
+- Can be updated in the field over either UART, with A/B firmware slots, a trial boot and automatic fallback (section 6a).
 - Builds, flashes, and debugs from a Windows host.
 
 ## 2. Hardware
@@ -212,7 +213,8 @@ Firmware for a Seeed XIAO RP2350 that:
   - the I2C bus clear at startup and on completing an arbitration-loss or timeout abort (M-2, M-15, M-18);
   - re-probing and re-configuring the magnetometer at 5 Hz while its fault flag is set (M-2a, Rev 2.7);
   - setting the magnetometer fault flag on persistent not-ready samples, which leads to that re-probe (M-2b, Rev 2.16);
-  - resynchronising the RX read position after overflow (U-9).
+  - resynchronising the RX read position after overflow (U-9);
+  - rebooting into the updater at the application's request, and the updater's own reboots (idle timeout, after an update, trial fallback) (F-7, F-10, F-20). *(Added in Rev 2.26.)*
 
   Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
 - **D-7** Diagnostic builds shall check the magnetometer wiring once at startup, before the I2C controller takes the pins, using no test equipment: each line's level with the internal pull-up (held low), each line's rise against the internal pull-down after being driven low (external pull-up present), SDA–SCL short, and an I2C address scan (0x08–0x77) with SDA/SCL as wired and swapped. The results and a one-line conclusion are reported over USB. Production builds shall not include it. *(Added in Rev 2.18.)*
@@ -225,13 +227,131 @@ Firmware for a Seeed XIAO RP2350 that:
   - **Heartbeat:** the user LED blinks while the main loop runs.
 
   This is a diagnostic exception to D-5. Production builds never reset themselves. *(Added in Rev 2.23.)*
+  - The watchdog shall be fed only once this capture has armed it, and shall not be armed during a trial boot (F-20). Otherwise feeding would hold off the bootrom's trial watchdog. A watchdog reset with an implausible tick gap (over 10 s) shall not be reported as a hang: that is a BOOTSEL reflash rebooting through the watchdog. *(Added in Rev 2.26.)*
 - **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
+
+## 6a. Firmware Update
+
+*(Added in Rev 2.26. Design: DESIGN.md sections 4a–4c. Host tool: `tools/dfc_update.py`.)*
+
+### 6a.1 Flash layout and provisioning
+
+- **F-1** The 2 MB flash shall be divided by a partition table (`partition_table.json`): the table at 0 KB (8 KB), slot A (partition 0) at 8 KB, slot B (partition 1, linked to A as an A/B pair) at 1020 KB, each 1012 KB and accepting the `rp2350-arm-s` UF2 family. The last 16 KB shall stay unpartitioned. The build shall produce the table as `pt.uf2` next to `firmware.uf2`.
+- **F-2** The same image shall run from either slot. The build shall fail if `firmware.bin` exceeds one slot.
+- **F-3** Every `firmware.uf2` shall start with the RP2350-E10 workaround block, aimed at the last flash sector, which is unpartitioned. On A3 and later chips the block is ignored.
+- **F-4** A unit shall be provisioned once over the USB BOOTSEL drive: `pt.uf2`, then `firmware.uf2`. On blank slots the first image goes into slot B. An image copied to the BOOTSEL drive shall not be a trial image (F-18): it is permanent at its first boot, and the bootrom erases the other slot's first sector. After provisioning, updates shall use the updater.
+
+### 6a.2 Image identification and versions
+
+- **F-5** Every image shall carry a 32-byte updater info block: a 64-bit magic, the block format, the updater protocol, the firmware version (major.minor.patch), the protocol floor, and a check word over the rest. It shall be kept in every image regardless of what else the linker removes. It shall be found by a 4-byte-step scan across sector boundaries.
+- **F-6** Version rules:
+  - `DFC_FW_VERSION` (CMake) shall be raised for every release.
+  - `UPDATER_PROTOCOL` shall be raised whenever the host protocol changes in a way older tools cannot drive.
+  - `UPDATER_PROTOCOL_FLOOR` shall be raised once the tools no longer support an older protocol.
+
+### 6a.3 Entering the updater
+
+- **F-7** The updater shall be entered only by a reboot requested through `updater_request(link, key)`. The function shall check the 64-bit request key (`UPDATER_REQUEST_KEY`) and the link (UART0, UART1, or USB in diagnostic builds only).
+  - **Wrong key or link:** it returns false, counts a rejected call, and changes nothing.
+  - **Right key and link:** it writes the boot flag, disarms the diagnostic watchdog, and reboots. It does not return.
+- **F-8** Boot flag:
+  - It shall be held in POWMAN scratch registers 0–3: a separate 64-bit boot key, the link, and a check word.
+  - It shall be read and cleared first thing in `main()`, whatever it holds.
+  - Only a flag valid in every bit shall start the updater; anything else boots normally.
+  - A power cycle or the RESET button clears it.
+- **F-9** Triggers:
+  - **Diagnostic USB console:** the `!` key.
+  - **Generic trigger message:** `DFC!UPDT` followed by the request key, little-endian (16 bytes), recognised by `updater_trigger_scan()`. The test applications shall act on it on both UARTs.
+  - **User application:** an application-defined message carrying the request key, passed to `updater_request()`. `app_user.c` shows the call. Without such an entry a deployed unit cannot be updated.
+- **F-10** In updater mode:
+  - The updater shall listen on UART0 and UART1 (921,600 baud 8N1, polled, independent of the link drivers) and, in diagnostic builds, on USB.
+  - It shall serve the first port that delivers a valid frame.
+  - Plain-text status lines shall go only to USB.
+  - After 90 s without a valid command, it shall reboot into the current firmware.
+  - The fast LED blink shows updater mode.
+
+### 6a.4 Protocol
+
+- **F-11** Framing:
+  - **Frame:** `0xA5 0x5A`, command (1 byte), payload length (2 bytes, little-endian), payload, then a CRC-32 (zlib/IEEE) of command, length and payload.
+  - **Replies:** a reply sets bit 7 of the command. An error reply is 0xFF with a code byte and a 32-bit detail. The REBOOT reply is also 0xFF, with an empty payload.
+  - **Robustness:** bytes outside frames shall be ignored. A frame stalled for 500 ms partway shall be dropped.
+  - **Flow:** the host shall wait for each reply before sending the next frame (stop-and-wait).
+- **F-12** Commands:
+  - **HELLO:** protocol, link in use, running slot, chip revision, flash and slot size, DATA size limits, board ID, build ID, the running image's info block, and the trial state.
+  - **BEGIN:** image size and CRC, with optional bypass flags and key (F-21).
+  - **DATA:** an offset and data.
+  - **FINISH.**
+  - **CONFIRM:** during a trial only.
+  - **REBOOT.**
+  - During a trial only HELLO, CONFIRM and REBOOT shall be accepted.
+- **F-13** DATA payloads shall be accepted from 64 to 4096 bytes. A payload shall not cross a 4 KB sector. Each sector shall be assembled in order: a payload at the sector start (re)starts it, one at the next expected byte extends it, and a resend overwrites. An out-of-order payload shall be refused with the expected offset. HELLO advertises the limits.
+
+### 6a.5 Writing and checking
+
+- **F-14** The updater shall write only the slot that is not running, through the bootrom's flash operation in storage addressing, which enforces the partition table's permissions. BEGIN shall erase the target's first sector at once.
+- **F-15** Each complete sector shall be erased, programmed and read back. A read-back mismatch shall be refused.
+- **F-16** The image's first sector shall be held in RAM and written last, at FINISH, and only once all of the following hold:
+  - every sector has arrived;
+  - the CRC of the whole image matches;
+  - the image has a valid info block;
+  - its updater protocol is not below this firmware's floor.
+
+  A refused image therefore never becomes bootable, and the running firmware is untouched.
+- **F-17** The host tool shall refuse, before sending anything:
+  - an image without an info block;
+  - an image whose updater protocol it does not support;
+  - unless overridden (F-21): an image whose updater protocol or firmware version is older than the running one.
+
+  It shall report the image's and the running versions.
+
+### 6a.6 Trial boot, confirm and fallback
+
+- **F-18** At FINISH, the updater shall set the try-before-you-buy flag in the image type of the copy it writes. An image whose start block has a hash or signature shall be refused, since patching it would break it. The updater shall then set the boot flag for the same link and do a flash update boot of the new slot.
+- **F-19** The new image shall come up in its own updater, under the bootrom's fixed 16.7 s watchdog. The host shall then:
+  - check HELLO: the slot just written, on trial, and the same info block as the image sent;
+  - send CONFIRM.
+
+  CONFIRM shall make the image permanent (`explicit_buy()`, which erases the old slot's first sector) and reboot into the application.
+- **F-20** Fallback:
+  - Without CONFIRM, the watchdog shall reboot the board, and the bootrom shall boot the previous firmware.
+  - The application shall never confirm itself.
+  - Diagnostic builds shall not arm or feed their watchdog while a buy is pending.
+  - A user application **should** not arm or feed a watchdog while `updater_trial_pending()` is true. If it does, an unconfirmed image stays up until the next reset, which still restores the previous firmware.
+
+### 6a.7 Deliberate bypasses
+
+- **F-21** Each protection may be switched off only deliberately, with its own host option:
+
+  | Option | Switches off |
+  |---|---|
+  | `--allow-no-info` | the info block requirement (host and board) |
+  | `--allow-unsupported-protocol` | the host's protocol support check |
+  | `--allow-below-floor` | the board's protocol floor |
+  | `--allow-older-updater` | the older updater protocol check |
+  | `--allow-downgrade` | the older firmware version check |
+  | `--no-trial` | trial boot, confirm and fallback |
+
+  The host shall list every protection switched off and require a typed `yes` (or `--yes`). Board-side bypasses shall travel as BEGIN flags. The board shall refuse unknown flags and echo the flags it accepted, and the host shall stop if the echo differs. A host that sends no flags gets every protection.
+- **F-22** `--no-trial` shall need the 64-bit no-trial key (`UPDATER_NO_TRIAL_KEY`), typed by the user (or given on the command line) and checked by the board in every bit before it writes a permanent image.
+
+### 6a.8 Link interface
+
+- **F-23** A device between the host and the DFC (pass-through) shall:
+  - **Content:** pass all 256 byte values unchanged, with no flow control and no inserted or removed bytes.
+  - **Throughput:** sustain bursts of one frame at the full line rate (92.16 kB/s at 921,600 baud). A 4096-byte DATA frame is 4109 bytes, or smaller with `--block-size`.
+  - **Gaps:** not hold bytes for 500 ms or more within a frame.
+  - **Reboots:** keep passing data while the DFC reboots (the link is idle for about a second), including during the 16.7 s trial window.
+
+  Latency between frames only lengthens the update.
+- **F-24** The secrets (request key, boot key, no-trial key) are 64-bit constants in `updater.h`, `updater.c` and the host tool. They guard against accidental use, not against an attacker. Authenticated updates would need signed images (RP2350 secure boot) and are not provided.
 
 ## 7. Resources
 
 - **R-1** DMA channels: 6 of 16. UART0 RX, UART0 TX, UART1 RX, UART1 TX, I2C command, I2C data.
 - **R-2** RAM: about 24 KB for queues with default sizes, plus magnetometer slots and counters.
 - **R-3** Peripheral clock shall remain 150 MHz, or baud accuracy shall be re-verified if changed.
+- **R-4** Flash: one image shall fit a 1012 KB slot (F-1, F-2). At Rev 2.26 a diagnostic image is about 82 KB and a release image about 25 KB. *(Added in Rev 2.26.)*
 
 ## 8. Build and Toolchain
 
@@ -261,7 +381,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 8.4 Flashing and Debugging
 
-- **B-15** Flashing shall be supported by copying the UF2 to the board's BOOTSEL drive, which needs no driver.
+- **B-15** Flashing shall be supported by copying the UF2 to the board's BOOTSEL drive, which needs no driver. With the A/B partition table, the UF2 goes into the slot that is not running and is permanent (F-4). For routine flashing the updater is preferred, and BOOTSEL is kept for provisioning and recovery. *(Amended in Rev 2.26.)*
 - **B-16** picotool flashing shall be supported. If Windows doesn't bind the RP2350 BOOTSEL interface automatically, installing the WinUSB driver (e.g. with Zadig) shall be documented.
 - **B-17** SWD debugging shall be supported with a CMSIS-DAP probe (e.g. Raspberry Pi Debug Probe) and the Raspberry Pi OpenOCD fork. It shall be launchable from VS Code using the checked-in launch.json.
 
@@ -272,10 +392,18 @@ Firmware for a Seeed XIAO RP2350 that:
 - **B-20** USB serial shall be disabled in production builds. If enabled for debugging, it uses the built-in Windows USB serial driver (shows up as a COM port), and its interrupt priority shall be below all UART-related interrupts.
   - Both USB interrupts shall have that priority: the USB controller IRQ and the IRQ in which the SDK runs `tud_task()`. The SDK assumes neither can preempt the other. *(Added in Rev 2.24.)*
   - In diagnostic builds, receiving `~` on the USB console shall reboot the board into the USB bootloader (BOOTSEL) for reflashing, about 100 ms later so a notice reaches the terminal. *(Added in Rev 2.20.)*
+  - Diagnostic console keys: `m` machine format, `h` readable format, `r` magnetometer rate (M-3b), `~` BOOTSEL, `!` the updater on this port (F-9). *(Added in Rev 2.26.)*
 - **B-21** Release builds shall use `CMAKE_BUILD_TYPE=Release` with `-g`.
 - **B-22** Compiler warnings shall include `-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion`. B-22, B-23 and B-24 apply to every C source compiled into the image, including the Pico SDK's (B-25). *(Amended in Rev 2.5.)*
 - **B-23** Stack usage shall be checked with `-fstack-usage` and `-Wstack-usage=1024`.
 - **B-24** The C standard shall be C11 (`-std=c11`).
+- **B-26** The build shall also:
+  - generate `pt.uf2` from `partition_table.json` (F-1);
+  - check the image against the slot size (F-2);
+  - regenerate a build ID (date and time) on every build, shown in the diagnostic report and in HELLO;
+  - take the firmware version from `DFC_FW_VERSION` (F-6).
+
+  `DFC_TEST_NO_UPDATER` (off by default) builds an image whose updater never runs, for testing F-20 only. It shall never be shipped. *(Added in Rev 2.26.)*
 - **B-25** Exceptions to B-22 … B-24 are permitted only for third-party (SDK) sources. Each exception shall apply to a single file, relax as little as possible, carry a written justification, and be listed in one place in the build definition. The list shall be reviewed whenever the SDK pin (B-9) changes. Exceptions in Rev 2.5: *(Added in Rev 2.5.)*
   - `pico_runtime_init/runtime_init.c`: compiled with `asm=__asm` defined, because it uses the GNU keyword `asm` once. The file remains strict C11 and no warning is relaxed.
   - `pico_stdio_usb/stdio_usb.c` (diagnostic USB builds only): `-Wsign-conversion` is reported but not treated as an error, because of one warning in SDK 2.2.0.
@@ -307,6 +435,29 @@ Firmware for a Seeed XIAO RP2350 that:
   - Resetting the MCU (e.g. from the debugger) while magnetometer transactions are running, repeated at least 100 times, never leaves the magnetometer fault flag set after boot. *(Added in Rev 2.2.)*
   - Holding one UART's RX line low, or leaving it disconnected, causes no data loss on the other UART and no magnetometer sequence gaps.
   - Deliberately stalling the main loop produces RX overflow counts and high-water marks consistent with the queue size.
+- **V-8** A/B layout (F-1 … F-4): install `pt.uf2` and `firmware.uf2` over BOOTSEL. The first image boots from slot B. Further copies alternate slots and stay selected after a power cycle. *(Added in Rev 2.26.)*
+- **V-9** Updating (F-7 … F-17), over USB and over UART0 (and UART1 once wired):
+  - Enter, HELLO and REBOOT work.
+  - A full update completes at DATA sizes 4096, 1024, 256 and 64.
+  - An update interrupted midway leaves the previous firmware running.
+  - An image without an info block is refused, by the host and (with the host check bypassed) by the board.
+  - The 90 s idle timeout returns to the firmware.
+  - A power cycle in updater mode boots the firmware.
+
+  Record the update times. *(Added in Rev 2.26.)*
+- **V-10** Trial (F-18 … F-20):
+  - A normal update is confirmed and stays after a power cycle.
+  - `--no-confirm` falls back within about 17 s.
+  - A `DFC_TEST_NO_UPDATER` image falls back by itself.
+  - A power cycle during a trial restores the previous firmware.
+
+  *(Added in Rev 2.26.)*
+- **V-11** Bypasses (F-21, F-22):
+  - A wrong no-trial key is refused before anything is sent.
+  - With the key, an image without an updater installs permanently, and is recovered over BOOTSEL.
+  - With `--allow-no-info` alone, it falls back.
+
+  The host side can be pre-checked against `tools/sim_board.py`. *(Added in Rev 2.26.)*
 - **V-7** All verification tools (logic analyzer software, serial terminals, test scripts) shall run on Windows. Test scripts shall be written in Python.
 
 ## 10. Revision 2 Changes
@@ -569,10 +720,28 @@ At bring-up, lower sample rates gave less noise. This revision makes the rate se
 - **Amended M-18 (bench finding).** After SCL was disconnected and reconnected, sampling never resumed. Missed ticks, timeouts, bus clears and stale counts rose without end. The run-time bus clear now ends with a STOP, as the start-up clear already did. Diagnostic builds also report what the magnetometer is waiting on when it cannot restart.
 - **Known limitation (bench, accepted).** A sensor whose VDD is connected only after boot, with SDA/SCL already connected, does not come online through the re-probe (M-2a), but an MCU reset brings it up. Partly powered through the I2C lines, it needs the software reset that only start-up (M-2) sends. This is not handled. Power the sensor with the board.
 - **Amended EX-7 (bench).** The limit is now 3 µs, up from 2. Measured worst cases under pattern-mode load (both UARTs transmitting at line rate, magnetometer at 1 kHz): link_write 2.6 µs, mag_read_latest 2.05 µs. The excess is most likely interrupt entry and exit overhead (~0.3–0.5 µs per interrupt) that the exclusion cannot remove, rather than the calls themselves.
-- **Firmware updater (in progress, no requirement IDs yet).** Step 2: a boot flag in POWMAN scratch 0–3 (64-bit key, link, check word, cleared at once on boot), `updater_request(link, key)`, the diag `!` key, and an updater mode on USB with HELLO, REBOOT and a 90 s idle timeout. Step 3 adds BEGIN, DATA and FINISH:
+- **Firmware updater (in progress at the time; specified in Rev 2.26, section 6a).** Step 2: a boot flag in POWMAN scratch 0–3 (64-bit key, link, check word, cleared at once on boot), `updater_request(link, key)`, the diag `!` key, and an updater mode on USB with HELLO, REBOOT and a 90 s idle timeout. Step 3 adds BEGIN, DATA and FINISH:
   - The image goes into the slot that is not running, through the bootrom's partition-checked flash operation.
   - Each 4 KB block is erased, programmed and read back.
   - The image's first sector is written last, and only after every block arrived and the whole-image CRC matched, so a partial image is never bootable.
   - The board then does a flash update boot into the new slot. Trial boot and confirm follow in step 5.
 - Build ID (date and time) on the Firmware line and in HELLO. `updater_request()` reboots the board at the application's request. That is not a recovery action under D-5.
 - **Not changed:** the 1 kHz tick, UART timing, continuous mode (still off), and Auto_SR_en (still unused, M-3a). Production builds run at 1 kHz unless `MAG_RATE_DEFAULT_HZ` is set.
+
+## 36. Revision 2.26 Changes
+
+The firmware updater, built and bench-tested during Rev 2.25, is now specified.
+- **Added section 6a, F-1 … F-24:**
+  - A/B flash layout and provisioning.
+  - The updater info block and version rules.
+  - Entry by reboot only: request key, boot flag, triggers.
+  - The protocol, with selectable DATA sizes.
+  - Writing and checks, with the first sector written last.
+  - Trial boot, confirm through the new image's own updater, and automatic fallback.
+  - Deliberate, keyed bypasses.
+  - The interface a pass-through device on the link must meet.
+- **Added R-4** (flash per slot), **B-26** (pt.uf2, slot-size check, build ID, firmware version, test-only `DFC_TEST_NO_UPDATER`), and **V-8 … V-11**.
+- **Amended D-5:** reboots for the updater are normal operation.
+- **Amended B-15:** BOOTSEL images go into the inactive slot and are permanent; the updater is preferred for routine flashing.
+- **Amended B-20 and D-9:** the diagnostic console's keys are listed. The watchdog is fed only when armed and is not armed during a trial. An implausible watchdog record is not reported as a hang.
+- **Not covered:** authenticated (signed) updates (F-24).
