@@ -435,9 +435,13 @@ bus in two places:
   sends START + STOP. It blocks for ~110 µs, which is allowed before the
   main loop. This covers an MCU reset or reflash that interrupted a read.
 - **After an arbitration-loss or timeout abort (M-15, M-16).** The I2C ISR
-  hands SCL to a PIO state machine. The state machine sends 9 open-drain
-  clocks (~100 µs) and pushes a word when it's done. The next tick sees
-  that word, gives SCL back to I2C and starts the transaction. That START
+  hands SDA and SCL to a PIO state machine. It sends 9 open-drain clocks,
+  then a STOP (~125 µs), and pushes a word when it's done. The next tick
+  sees that word, gives both pins back to I2C and starts the transaction.
+  The STOP was added in Rev 2.25. On the bench, reconnecting SCL mid-transfer
+  made the controller lose arbitration. It then waited for a STOP before
+  starting again, and clocks alone never produced one. Every transaction then
+  hung, and the result was a permanent abort and bus-clear loop. That START
   resets the sensor. No CPU time is used while it runs. NACK aborts
   (sensor absent) don't trigger a clear, because they can't leave SDA
   stuck.

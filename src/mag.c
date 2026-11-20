@@ -305,6 +305,7 @@ static void __not_in_flash_func(bus_clear_start)(void) {
         return;
     }
     s_bc_running = true;
+    gpio_set_function(MAG_SDA_PIN, (gpio_function_t)pio_get_funcsel(s_pio));
     gpio_set_function(MAG_SCL_PIN, (gpio_function_t)pio_get_funcsel(s_pio));
     pio_sm_put(s_pio, s_sm, 0u);
     diag_inc(DIAG_MAG_BUS_CLEAR);
@@ -318,6 +319,7 @@ static bool __not_in_flash_func(bus_clear_done)(void) {
         return false;
     }
     (void)pio_sm_get(s_pio, s_sm);
+    gpio_set_function(MAG_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(MAG_SCL_PIN, GPIO_FUNC_I2C);
     s_bc_running = false;
     return true;
@@ -1213,12 +1215,14 @@ bool mag_init(void) {
     s_sm = (uint)pio_claim_unused_sm(s_pio, true);
     uint offset = (uint)pio_add_program(s_pio, &i2c_bus_clear_program);
     pio_sm_config pc = i2c_bus_clear_program_get_default_config(offset);
-    sm_config_set_set_pins(&pc, MAG_SCL_PIN, 1);
+    /* SET pins: bit 0 = SDA, bit 1 = SCL (STOP after the clocks, Rev 2.25). */
+    _Static_assert(MAG_SCL_PIN == MAG_SDA_PIN + 1u, "bus clear needs SCL = SDA + 1");
+    sm_config_set_set_pins(&pc, MAG_SDA_PIN, 2);
     sm_config_set_in_pins(&pc, MAG_SCL_PIN);
     sm_config_set_clkdiv_int_frac8(&pc, 24u, 0u);
     pio_sm_init(s_pio, s_sm, offset, &pc);
-    pio_sm_set_pins_with_mask(s_pio, s_sm, 0u, 1u << MAG_SCL_PIN);
-    pio_sm_set_pindirs_with_mask(s_pio, s_sm, 0u, 1u << MAG_SCL_PIN);
+    pio_sm_set_pins_with_mask(s_pio, s_sm, 0u, (1u << MAG_SCL_PIN) | (1u << MAG_SDA_PIN));
+    pio_sm_set_pindirs_with_mask(s_pio, s_sm, 0u, (1u << MAG_SCL_PIN) | (1u << MAG_SDA_PIN));
     pio_sm_set_enabled(s_pio, s_sm, true);
     s_bc_running = false;
 #endif
