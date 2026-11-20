@@ -541,13 +541,15 @@ writes flash. A frame stalled for 500 ms mid-way is dropped.
 
 ## 4b3. Ports and entry over the UARTs (Rev 2.25, updater step 6)
 
-- **Ports.** The updater opens UART0 and UART1 (polled, 921600 8N1, RX
-  pull-ups, independent of `link.c` and its DMA), plus the USB console in
-  diag builds. Each port has its own frame parser. Before a port is chosen,
-  frames may carry at most 32 payload bytes (HELLO, BEGIN, CONFIRM, REBOOT),
-  so each parser needs only a small buffer. The first port to deliver a
-  valid frame is chosen; from then on only it is served, and HELLO reports
-  it. Plain-text status lines go only to USB, never onto a UART.
+- **Ports.** UART0 and UART1 are polled, 921600 8N1, with RX pull-ups, and
+  independent of `link.c` and its DMA. The USB console is a port too, in
+  diag builds. The updater serves **only the link that requested it**: the
+  link in the boot flag. A request from UART0 ignores UART1 (and USB), and
+  the other way round. The other ports are not even initialised, so nothing
+  they receive is read. The trial boot after an update comes back on the
+  same link, as the updater writes that link into the boot flag. HELLO
+  reports the link. Plain-text status lines go only to USB, never onto a
+  UART.
 - **Why polling is enough.** The protocol is stop-and-wait, so nothing
   arrives while the updater writes flash or replies. A byte with a framing
   error, break or overrun is dropped, and the frame CRC catches it.

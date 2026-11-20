@@ -139,6 +139,9 @@ frames × (wire time + ~50 ms flash per 4 KB + delay per reply).
 5. With the USB console open during an update: the USB console shows no
    text, and HELLO over the UART still reports `on UART0`.
 6. UART1 (back pads D12/D11), once wired: repeat 1–2. **Pass:** `on UART1`.
+7. Link lock (UART1 wired): enter from UART0, then send HELLO on UART1
+   (`dfc_update.py <UART1 port> --uart`). **Pass:** no answer on UART1, while
+   UART0 still answers. Repeat the other way round.
 
 Before testing on the board, the host side can be checked against the
 simulator (Linux): run `tools/sim_board.py` and the same commands, pointed at

@@ -389,9 +389,10 @@ static uint32_t crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
 
 /* ---------------------------------------------------------------- ports -- */
 
-/* One byte-stream port. Step 6: UART0 and UART1 (all builds), and the USB
- * console (diagnostic builds). The updater listens on every port and serves
- * the first one that delivers a valid frame. */
+/* One byte-stream port: UART0 and UART1 (all builds), and the USB console
+ * (diagnostic builds). The updater serves only the port of the link that
+ * requested it (the link in the boot flag); the others are not even
+ * initialised, so nothing they receive is read. */
 typedef struct {
     updater_link_t link;
     void (*init)(void);
@@ -941,11 +942,7 @@ static void say(const char *s) {
     }
 }
 
-/* Frame parser, one per port. Until a port is chosen, a port's frames may
- * carry at most PRELOCK_MAX payload bytes (HELLO, BEGIN, CONFIRM, REBOOT),
- * so each port needs only a small buffer; after that the chosen port parses
- * into s_rx and the others are ignored. */
-#define PRELOCK_MAX 32u
+/* Frame parser for the one port served. */
 typedef struct {
     enum { WAIT_SOF0, WAIT_SOF1, HEADER, PAYLOAD, CRC } st;
     uint8_t hdr[3];
@@ -953,19 +950,18 @@ typedef struct {
     unsigned got;
     uint16_t len;
     uint64_t frame_until;
-    uint8_t small[PRELOCK_MAX];
 } parser_t;
 
 static parser_t s_parse[PORT_COUNT];
 
 /* Feed one byte. Returns true when a complete frame with a good CRC is in
  * s_rx (cmd in p->hdr[0], length p->len). */
-static bool parse_byte(parser_t *p, uint8_t b, bool locked, uint64_t now) {
+static bool parse_byte(parser_t *p, uint8_t b, uint64_t now) {
     if (p->st != WAIT_SOF0 && now >= p->frame_until) {
         p->st = WAIT_SOF0; /* frame stalled: resynchronise */
     }
-    uint8_t *dst = locked ? s_rx : p->small;
-    uint32_t max = locked ? UPD_MAX_PAYLOAD : PRELOCK_MAX;
+    uint8_t *dst = s_rx;
+    uint32_t max = UPD_MAX_PAYLOAD;
     switch (p->st) {
     case WAIT_SOF0:
         if (b == UPD_SOF0) {
@@ -983,9 +979,7 @@ static bool parse_byte(parser_t *p, uint8_t b, bool locked, uint64_t now) {
             p->len = (uint16_t)(p->hdr[1] | (p->hdr[2] << 8));
             p->got = 0;
             if (p->len > max) {
-                if (locked) {
-                    send_error(UPD_ERR_LENGTH);
-                }
+                send_error(UPD_ERR_LENGTH);
                 p->st = WAIT_SOF0;
             } else {
                 p->st = (p->len != 0u) ? PAYLOAD : CRC;
@@ -1010,14 +1004,9 @@ static bool parse_byte(parser_t *p, uint8_t b, bool locked, uint64_t now) {
                             ((uint32_t)p->crcb[3] << 24);
             uint32_t crc = crc32_update(crc32_update(0u, p->hdr, 3u), dst, p->len);
             if (crc != want) {
-                if (locked) {
-                    send_error(UPD_ERR_CRC); /* the host resends */
-                }
+                send_error(UPD_ERR_CRC); /* the host resends */
                 return false;
             }
-        }
-        if (!locked) {
-            memcpy(s_rx, p->small, p->len);
         }
         return true;
     default:
@@ -1027,17 +1016,25 @@ static bool parse_byte(parser_t *p, uint8_t b, bool locked, uint64_t now) {
 }
 
 static void __attribute__((noreturn)) updater_run(updater_link_t link) {
-    s_link = link; /* requested link; HELLO reports the one actually used */
+    s_link = link; /* the only link served; HELLO reports it */
     s_port = NULL;
     s_trial = updater_trial_pending();
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
+    /* Serve only the requesting link: a request from UART0 ignores UART1 (and
+     * USB), and the other way round. The trial boot after an update comes
+     * back on the same link, because the boot flag carries it. */
+    int locked = -1;
     for (unsigned i = 0; i < PORT_COUNT; i++) {
-        k_ports[i]->init();
         memset(&s_parse[i], 0, sizeof s_parse[i]);
+        if (k_ports[i]->link == link) {
+            locked = (int)i;
+        }
     }
-
-    int locked = -1; /* index of the port in use, once one delivered a valid frame */
+    if (locked >= 0) {
+        s_port = k_ports[locked];
+        s_port->init();
+    }
 #if APP_USB_STATUS
     bool greeted = false; /* the USB banner has been shown (or the host spoke) */
 #endif
@@ -1052,39 +1049,29 @@ static void __attribute__((noreturn)) updater_run(updater_link_t link) {
             reboot_to_app();
         }
 #if APP_USB_STATUS
-        if (!greeted && locked < 0 && k_usb_port.connected()) {
+        if (!greeted && s_port == &k_usb_port && k_usb_port.connected()) {
             greeted = true;
-            s_port = &k_usb_port;
-            say("\r\nDFC updater: waiting for the host (tools/dfc_update.py) on USB, UART0 or UART1. "
+            say("\r\nDFC updater: waiting for the host (tools/dfc_update.py) on this USB port. "
                 "Reboots into the firmware after 90 s without a command.\r\n");
-            s_port = NULL;
         }
 #endif
-        for (unsigned i = 0; i < PORT_COUNT; i++) {
-            if (locked >= 0 && (unsigned)locked != i) {
+        if (locked < 0) {
+            continue; /* no port for this link in this build: wait for the timeout */
+        }
+        /* Drain what the port has (bounded: the UART FIFO is 32 deep). */
+        for (unsigned k = 0; k < 64u; k++) {
+            int c = s_port->read();
+            if (c < 0) {
+                break;
+            }
+            if (!parse_byte(&s_parse[locked], (uint8_t)c, now)) {
                 continue;
             }
-            const upd_port_t *port = k_ports[i];
-            /* Drain what this port has (bounded: the UART FIFO is 32 deep). */
-            for (unsigned k = 0; k < 64u; k++) {
-                int c = port->read();
-                if (c < 0) {
-                    break;
-                }
-                if (!parse_byte(&s_parse[i], (uint8_t)c, locked >= 0, now)) {
-                    continue;
-                }
-                if (locked < 0) {
-                    locked = (int)i; /* first valid frame: this is the host's port */
-                    s_port = port;
-                    s_link = port->link;
-                }
 #if APP_USB_STATUS
-                greeted = true; /* no more text once the host talks */
+            greeted = true; /* no more text once the host talks */
 #endif
-                if (handle(s_parse[i].hdr[0], s_parse[i].len)) {
-                    idle_until = time_us_64() + (uint64_t)UPDATER_IDLE_TIMEOUT_S * 1000000u;
-                }
+            if (handle(s_parse[locked].hdr[0], s_parse[locked].len)) {
+                idle_until = time_us_64() + (uint64_t)UPDATER_IDLE_TIMEOUT_S * 1000000u;
             }
         }
     }

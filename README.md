@@ -354,8 +354,8 @@ UART-related interrupt (B-20).
   ```
   `--enter` sends the trigger, 20 consecutive `!`. The user application
   (`app_user.c`) and the test builds react to it on both UARTs. Replace it in
-  `app_user.c` if your protocol has its own "enter updater" message. The updater listens on UART0, UART1 and, in diag builds,
-  USB, and serves whichever port speaks first. `--baud` (default 921600)
+  `app_user.c` if your protocol has its own "enter updater" message. The updater serves only the link that requested it:
+  entered from UART0 it ignores UART1, and the other way round. `--baud` (default 921600)
   must match the link. `--block-size` shortens bursts for a pass-through
   device. `tools/sim_board.py` simulates a board over a pty, for testing the
   script on Linux.

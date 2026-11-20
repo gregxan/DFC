@@ -264,8 +264,8 @@ Firmware for a Seeed XIAO RP2350 that:
   - **Generic trigger:** 20 consecutive `!` characters on a UART, recognised by `updater_trigger_scan()`. The user application and the test applications shall act on it on both UARTs, calling `updater_request(link, UPDATER_REQUEST_KEY)`. The run carries no key, so any stream containing it enters the updater, which writes nothing and returns to the firmware after 90 s without a host (F-10).
   - **User application:** it may replace the generic trigger with its own "enter updater" message, calling `updater_request()` with the request key. Without some entry a deployed unit cannot be updated.
 - **F-10** In updater mode:
-  - The updater shall listen on UART0 and UART1 (921,600 baud 8N1, polled, independent of the link drivers) and, in diagnostic builds, on USB.
-  - It shall serve the first port that delivers a valid frame.
+  - The updater shall serve only the link that requested it (the link in the boot flag): UART0, UART1 (921,600 baud 8N1, polled, independent of the link drivers), or USB in diagnostic builds. The other links shall be ignored entirely. A request from UART0 ignores UART1, and the other way round.
+  - The trial boot after an update shall come back on the same link.
   - Plain-text status lines shall go only to USB.
   - After 90 s without a valid command, it shall reboot into the current firmware.
   - The fast LED blink shows updater mode.
@@ -743,5 +743,6 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 - **Added R-4** (flash per slot), **B-26** (pt.uf2, slot-size check, build ID, firmware version, test-only `DFC_TEST_NO_UPDATER`), and **V-8 … V-11**.
 - **Amended D-5:** reboots for the updater are normal operation.
 - **Amended B-15:** BOOTSEL images go into the inactive slot and are permanent; the updater is preferred for routine flashing.
+- **F-10 (bench request):** the updater serves only the requesting link. It was "the first port that delivers a valid frame".
 - **Amended B-20 and D-9:** the diagnostic console's keys are listed. The watchdog is fed only when armed and is not armed during a trial. An implausible watchdog record is not reported as a hang.
 - **Not covered:** authenticated (signed) updates (F-24).
