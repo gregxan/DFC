@@ -449,6 +449,40 @@ bus in two places:
 Neither path touches the I2C controller's configuration. Every clear is
 counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 
+## 4a. Flash layout: A/B slots (Rev 2.25, step 1 of the UART updater)
+
+`partition_table.json` divides the 2 MB flash:
+
+| Offset | Size | Use |
+|---|---|---|
+| 0 K | 8 K | partition table (bootrom) |
+| 8 K | 1012 K | slot A, partition 0 |
+| 1020 K | 1012 K | slot B, partition 1, linked to A |
+| 2032 K | 16 K | unpartitioned: the RP2350-E10 block (last sector), later settings |
+
+- **One image for both slots.** The bootrom maps the booted partition to the
+  start of the XIP window, so the image is linked and built as before.
+  Copy-to-RAM start-up is unchanged.
+- **Slot choice (datasheet 5.1.7, 5.1.16).** At a normal boot the higher
+  image version wins. A UF2 copied to the BOOTSEL drive goes into the slot
+  that is not booting, and the bootrom then does a flash update boot of it.
+  Launching a valid non-TBYB image in a flash update boot erases the first
+  sector of the other slot, so the new image stays selected. Versions do not
+  matter yet. The updater (later steps) uses the same flash update boot, with
+  try-before-you-buy: a 16.7 s fixed watchdog, then `explicit_buy()`, which
+  erases the other slot's first sector.
+- **RP2350-E10 (A2 bootrom).** UF2 drag-and-drop fails when a partition table
+  is present unless the UF2 starts with an absolute-family block aimed at the
+  end of flash. `PICOTOOL_EXTRA_UF2_ARGS` adds it to every `firmware.uf2`,
+  aimed at 0x101FFF00 (the last sector, unpartitioned). A3 and later ignore
+  it. `pt.uf2` (absolute family) cannot carry it, so on A2 the table is
+  installed only on a board without one.
+- **Build checks.** `pt.uf2` is regenerated when the JSON changes. A post-build
+  step fails the build if `firmware.bin` exceeds one slot.
+- **Diag report.** The **Firmware** line shows the slot, the boot type and
+  the chip revision, from the bootrom's boot info. STAT has `slot=`,
+  `boot_type=`, `tbyb=` and `chip_rev=`.
+
 ## 5. Resources (R-1 … R-3)
 
 | Resource | Use |

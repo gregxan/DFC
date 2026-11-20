@@ -62,7 +62,36 @@ static int s_len; /* length of the line in s_buf; 0 = none pending */
 static int s_off; /* bytes of it already handed to USB */
 static uint32_t s_seq;
 
+/* Rev 2.25: which A/B slot this image booted from, and how (bootrom boot
+ * info, read once at start-up). partition: 0 = A, 1 = B, -1 = none (no
+ * partition table: image at the start of flash). */
+static boot_info_t s_boot_info;
+static bool s_boot_info_ok;
+
+static const char *slot_name(void) {
+    if (!s_boot_info_ok) {
+        return "unknown";
+    }
+    switch (s_boot_info.partition) {
+    case 0:
+        return "A";
+    case 1:
+        return "B";
+    case -1:
+        return "- (no partition table, see README)";
+    default:
+        return "other";
+    }
+}
+
+static const char *boot_type_name(void) {
+    static const char *const k[] = {"normal", "?", "BOOTSEL", "RAM image", "flash update"};
+    unsigned t = s_boot_info.boot_type & 0x7Fu; /* bit 7: chained boot */
+    return (s_boot_info_ok && t < 5u) ? k[t] : "?";
+}
+
 void status_init(void) {
+    s_boot_info_ok = rom_get_boot_info(&s_boot_info) != 0;
     stdio_init_all();
     /* B-20: USB below every UART-related interrupt, and below ours. */
     irq_set_priority(USBCTRL_IRQ, IRQ_PRIO_USB);
@@ -103,10 +132,13 @@ static int format_line(unsigned line) {
     switch (line) {
     case 0:
         return snprintf(s_buf, n, "STAT seq=%" PRIu32 " mode=%u t_ms=%" PRIu32 " baud0=%" PRIu32 " baud1=%" PRIu32
-                        " baud_ok=%u loop_max_us=%" PRIu32 " status_max_us=%" PRIu32 " tick_overrun=%" PRIu32 "\r\n",
+                        " baud_ok=%u loop_max_us=%" PRIu32 " status_max_us=%" PRIu32 " tick_overrun=%" PRIu32
+                        " slot=%d boot_type=%u tbyb=0x%02X chip_rev=%u\r\n",
                         s_seq, (unsigned)APP_MODE, (uint32_t)(time_us_64() / 1000u), g_diag_actual_baud[0], g_diag_actual_baud[1],
                         (unsigned)g_app_baud_ok, diag_cycles_to_us(g_diag_max_cycles[DIAG_T_LOOP]),
-                        diag_cycles_to_us(g_diag_max_cycles[DIAG_T_STATUS]), s_total[DIAG_TICK_OVERRUN]);
+                        diag_cycles_to_us(g_diag_max_cycles[DIAG_T_STATUS]), s_total[DIAG_TICK_OVERRUN],
+                        s_boot_info_ok ? (int)s_boot_info.partition : -9, (unsigned)s_boot_info.boot_type,
+                        (unsigned)s_boot_info.tbyb_and_update_info, (unsigned)rp2350_chip_version());
     case 1:
     case 2: {
         unsigned k = line - 1u;
@@ -604,8 +636,13 @@ static int format_human(unsigned line) {
     case H_BAUD:
         return snprintf(s_buf, n, "Baud          UART0 %" PRIu32 "   UART1 %" PRIu32 "   %s\r\n", g_diag_actual_baud[0],
                         g_diag_actual_baud[1], g_app_baud_ok ? "OK" : "OUT OF TOLERANCE");
-    case H_RESET:
-        return reset_text(0);
+    case H_RESET: {
+        /* Rev 2.25: A/B slot (H_RESET is followed by it). */
+        int len = put(0, "Firmware      slot %s (%s boot), chip RP2350 A%u", slot_name(), boot_type_name(),
+                      (unsigned)rp2350_chip_version());
+        len = put(len, "\r\n");
+        return reset_text(len);
+    }
     case H_UART_HEAD:
         return snprintf(s_buf, n, "\r\nUART%30s%16s\r\n", "UART0", "UART1");
     case H_RX_OVERFLOW:

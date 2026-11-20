@@ -27,6 +27,19 @@ All tools run on Windows (V-7). Install the Python dependency once:
 py -m pip install -r tools/requirements.txt
 ```
 
+## A/B partition table (Rev 2.25, updater step 1)
+
+1. Install the table and firmware as in README, "First-time setup".
+2. **Pass:**
+   - **Firmware** reads `slot B (flash update boot)` right after the copy.
+   - After pressing R it reads `slot B (normal boot)`. The rest of the report
+     is as before.
+3. Copy the same `firmware.uf2` again. **Firmware** reads `slot A (flash
+   update boot)`, then `slot A (normal boot)` after R, and also after a power
+   cycle: the old slot was invalidated.
+4. Note the chip revision shown (A2 needs the E10 block; A3 and later ignore
+   it).
+
 ## Test setup
 
 - Two USB-UART adapters, 3.3 V logic, capable of 921,600 baud. Connect one

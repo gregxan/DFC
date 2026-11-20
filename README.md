@@ -24,6 +24,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 ```
 CMakeLists.txt          build definition (B-6 … B-24)
 CMakePresets.json       release / diag / diag-pattern / debug presets (B-7)
+partition_table.json    A/B firmware slots; built into pt.uf2 (Rev 2.25)
 cmake/host_tools.cmake  finds the toolchain, picotool and pioasm (B-2, B-4)
 lib/pico-sdk/           Pico SDK 2.2.0, git submodule (B-9)
 src/link.[ch]           UART links: RX DMA ring, TX DMA queue, line errors
@@ -233,9 +234,38 @@ that contains `picotoolConfig.cmake` / `pioasmConfig.cmake`.
 
 ## Flashing
 
+### First-time setup: A/B partition table (Rev 2.25, once per board)
+
+The flash holds two firmware slots, A and B, so a field update can write
+one while the other keeps running (and fall back if the new image fails).
+The layout is in `partition_table.json`: a table at 0 K, slot A at 8 K, slot B
+at 1020 K, 1012 KB each, and 16 KB left unpartitioned at the end. Every build
+writes `pt.uf2` next to `firmware.uf2`.
+
+1. Hold **B**, tap **R**, release **B**. Copy `pt.uf2` to the `RP2350` drive.
+   The table replaces the start of flash, so the old firmware no longer
+   boots. The board comes back as the `RP2350` drive.
+2. Copy `firmware.uf2` to the drive. On a blank pair it goes into slot B (the
+   bootrom fills B first).
+3. The diag report's **Firmware** line shows the slot: `slot B (flash update
+   boot)` right after a copy, `slot B (normal boot)` after a reset. Without
+   the table it says `no partition table`.
+
+After that, flash as below. Each `firmware.uf2` copied to the drive goes into
+the slot that is not running, boots from there, and the bootrom erases the
+start of the old slot, so the new image stays selected. Slots therefore
+alternate A, B, A... from one flash to the next.
+
+On an RP2350 **A2** chip (the diag report shows the revision), copy `pt.uf2`
+only to a board that has no partition table yet. Replacing an existing table
+there needs picotool (RP2350-E10). Every `firmware.uf2` carries the E10
+workaround block, so later copies work on all revisions.
+
 - **BOOTSEL drive (B-15, no driver needed).** Hold **B** (BOOT), tap **R**
   (RESET) and release B. Copy `firmware.uf2` to the `RP2350` drive.
-- **picotool (B-16).** Put the board in BOOTSEL as above, then run:
+- **picotool (B-16).** Not yet checked with the A/B partition table;
+  the BOOTSEL drive is the tested route. Put the board in BOOTSEL as above,
+  then run:
   ```bash
   picotool load -x build\release\firmware.uf2
   ```

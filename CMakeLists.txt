@@ -156,4 +156,45 @@ set_source_files_properties(
 # B-21: Release keeps debug information.
 target_compile_options(firmware PRIVATE $<$<CONFIG:Release>:-g>)
 
+# ---------------------------------------------------------------------------
+# Rev 2.25: A/B firmware slots (partition_table.json, 2 MB flash).
+#   0K      partition table (bootrom, 8 KB)
+#   8K      slot A (partition 0), 1012 KB
+#   1020K   slot B (partition 1), 1012 KB, linked to A
+#   2032K   16 KB unpartitioned: the RP2350-E10 block, and room for settings
+# The same firmware image runs from either slot (the bootrom maps the slot
+# it boots to the start of the XIP window). A UF2 dragged onto the BOOTSEL
+# drive goes into the slot that is not booting. The bootrom then boots it
+# (flash update boot) and erases the old slot's first sector, so the new
+# image stays selected.
+# pt.uf2 is built next to firmware.uf2. Copy it once per board, before the
+# first firmware.uf2 (README, "First-time setup").
+# ---------------------------------------------------------------------------
+# RP2350-E10: the A2 bootrom mishandles UF2 drag-and-drop when a partition
+# table is present, unless the UF2 starts with an absolute-family block
+# aimed at the end of flash. A3 and later ignore that block. Here it is
+# aimed at the last sector of the 2 MB part, which is unpartitioned.
+set(DFC_E10_BLOCK 0x101fff00)
+set_target_properties(firmware PROPERTIES PICOTOOL_EXTRA_UF2_ARGS "--abs-block;${DFC_E10_BLOCK}")
+
 pico_add_extra_outputs(firmware)
+
+set(DFC_PT_JSON ${CMAKE_CURRENT_LIST_DIR}/partition_table.json)
+set(DFC_PT_UF2 ${CMAKE_CURRENT_BINARY_DIR}/pt.uf2)
+# pt.uf2 is in the absolute family, so it carries no E10 block. --abs-block
+# only checks that the E10 sector is outside every partition. On an A2 chip,
+# install pt.uf2 on a board that has no partition table yet (first-time
+# setup); replacing an existing table there needs picotool, not drag-and-drop.
+add_custom_command(
+    OUTPUT ${DFC_PT_UF2}
+    COMMAND picotool partition create --quiet ${DFC_PT_JSON} ${DFC_PT_UF2} --abs-block ${DFC_E10_BLOCK}
+    DEPENDS ${DFC_PT_JSON}
+    COMMENT "Partition table: pt.uf2"
+    VERBATIM)
+add_custom_target(partition_table ALL DEPENDS ${DFC_PT_UF2})
+
+# The image must fit one slot (1012 KB, partition_table.json).
+add_custom_command(TARGET firmware POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DBIN=$<TARGET_FILE_DIR:firmware>/firmware.bin -DLIMIT=1036288
+            -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_slot_size.cmake
+    VERBATIM)
