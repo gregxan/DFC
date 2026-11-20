@@ -286,7 +286,7 @@ def flash(link: Link, image: bytes) -> int:
     return target
 
 
-def confirm(port: str, target: int, new: Info, started: float) -> bool:
+def confirm(port: str, target: int, new: Info | None, started: float) -> bool:
     """The new image boots on trial into its own updater. Check it is the
     image just sent, then CONFIRM before the bootrom's trial watchdog fires.
     Returns False (and does not confirm) if anything is off: the board then
@@ -315,7 +315,7 @@ def confirm(port: str, target: int, new: Info, started: float) -> bool:
             problems.append(f"it runs from slot {p[2]}, not the slot just written ({target})")
         if not (len(p) >= 97 and p[96]):
             problems.append("it is not on trial")
-        if running is None or running.version != new.version or running.protocol != new.protocol:
+        if new is None or running is None or running.version != new.version or running.protocol != new.protocol:
             problems.append("its updater info differs from the image sent")
         if problems:
             print("Not confirming: " + "; ".join(problems) + ".")
@@ -344,6 +344,9 @@ def main() -> int:
                     help="flash: allow an older firmware version than the one running")
     ap.add_argument("--allow-older-updater", action="store_true",
                     help="flash: allow an image whose updater protocol is older than the running one")
+    ap.add_argument("--skip-host-checks", action="store_true",
+                    help="TEST ONLY: send the image even if it has no updater info block or fails the "
+                         "version checks, to check that the board itself refuses it")
     ap.add_argument("--no-confirm", action="store_true",
                     help="flash: write and trial-boot the image but do not confirm it (tests the fallback)")
     ap.add_argument("--enter", action="store_true",
@@ -356,15 +359,21 @@ def main() -> int:
         try:
             image = load_uf2(args.file)
             new_info = find_info(image)
-            if new_info is None:
-                raise UpdateError(f"{args.file} has no updater info block: not a DFC image with an updater "
-                                  "(or one from before Rev 2.25). Refusing it.")
-            if new_info.protocol not in SUPPORTED_PROTOCOLS:
-                check_versions(new_info, None, False, False)  # raises
+            if not args.skip_host_checks:
+                if new_info is None:
+                    raise UpdateError(f"{args.file} has no updater info block: not a DFC image with an updater "
+                                      "(or one from before Rev 2.25). Refusing it.")
+                if new_info.protocol not in SUPPORTED_PROTOCOLS:
+                    check_versions(new_info, None, False, False)  # raises
         except (OSError, UpdateError) as e:
             print("Error:", e)
             return 1
-        print(f"Image: firmware {new_info.version_text}, updater protocol {new_info.protocol}, {len(image)} bytes")
+        if new_info:
+            print(f"Image: firmware {new_info.version_text}, updater protocol {new_info.protocol}, {len(image)} bytes")
+        else:
+            print(f"Image: NO updater info block, {len(image)} bytes")
+        if args.skip_host_checks:
+            print("--skip-host-checks: the script's checks are off; the board's own checks still apply.")
 
     if args.enter:
         link = Link(args.port)
@@ -380,7 +389,8 @@ def main() -> int:
             try:
                 link.send(frame(CMD_HELLO))
                 running = show_hello(expect(link, CMD_HELLO, "HELLO"))
-                check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade)
+                if not args.skip_host_checks:
+                    check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade)
                 target = flash(link, image)
             except UpdateError as e:
                 print("\nError:", e)
