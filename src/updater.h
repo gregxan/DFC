@@ -39,7 +39,7 @@ typedef enum {
 /* The key a caller must pass to updater_request(). It only guards against
  * accidental calls: anything built with this header can use it. The boot
  * flag uses a separate key, which only updater.c knows. */
-#define UPDATER_REQUEST_KEY 0xF511608FAA39ADB9ull
+#define UPDATER_REQUEST_KEY 0xDFCF1A54B007AB1Eull /* "DFC FLASH BOOTABLE" */
 
 /* Updater protocol version. Raise it whenever the host protocol changes in
  * a way older tools cannot drive. It goes into every image's updater info
