@@ -173,9 +173,9 @@ registers clears Meas_M_Done, so a burst that ends at Status always reads
 with controller overheads (M-8: ≤ 470 µs). When the SET/RESET strategy calls for
 a pulse (see below), an extra `RESTART 0x30W 0x09 SET` (or `RESET`) is
 inserted before the trigger. That adds ~70 µs, for ~515 µs in total
-(M-8: ≤ 540 µs with a pulse). The 0.5 ms measurement then ends ≲ 950 µs
-after the tick, before the next read reaches the data registers at
-~1050 µs. The repeated STARTs follow the datasheet (p. 17; M-7).
+(M-8: ≤ 540 µs with a pulse). A 0.5 ms measurement (datasheet) then ends
+≲ 1015 µs after the tick, before the next transaction reads Status at
+~1060 µs; bring-up measured ~0.1 ms, which leaves ~400 µs. The repeated STARTs follow the datasheet (p. 17; M-7).
 
 - Command DMA channel: `s_cmd` → `IC_DATA_CMD`, 32-bit, DREQ = I2C TX.
 - Data DMA channel: `IC_DATA_CMD` → `slots[!latest].raw`, 8-bit, 9
