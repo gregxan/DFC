@@ -60,6 +60,16 @@ else()
     list(APPEND APP_SOURCES src/app_test.c)
 endif()
 
+# Rev 2.25: build_id.c (date and time of this build), regenerated on every
+# build: the extra, never-created output makes the command always run.
+set(DFC_BUILD_ID_C ${CMAKE_CURRENT_BINARY_DIR}/build_id.c)
+add_custom_command(
+    OUTPUT ${DFC_BUILD_ID_C} ${CMAKE_CURRENT_BINARY_DIR}/build_id.always
+    COMMAND ${CMAKE_COMMAND} -DOUT=${DFC_BUILD_ID_C} -P ${CMAKE_CURRENT_LIST_DIR}/cmake/gen_build_id.cmake
+    COMMENT "Build ID"
+    VERBATIM)
+list(APPEND APP_SOURCES ${DFC_BUILD_ID_C})
+
 add_executable(firmware ${APP_SOURCES})
 
 pico_generate_pio_header(firmware ${CMAKE_CURRENT_LIST_DIR}/src/i2c_bus_clear.pio)

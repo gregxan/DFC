@@ -10,11 +10,27 @@
  * outside a frame are ignored, so the updater can print plain-text status
  * lines for a person at a terminal, and the host just skips them.
  *
- * Step 2 commands:
+ * Commands:
  *   HELLO  (0x01) -> HELLO reply: protocol version, link, running slot,
  *                    chip revision, flash and slot size, largest block,
  *                    board ID, build ID.
+ *   BEGIN  (0x10) u32 size, u32 crc32 of the image -> u8 target slot,
+ *                    u32 target flash offset, u32 slot size. The target is
+ *                    the slot that is not running. Its first sector is
+ *                    erased at once.
+ *   DATA   (0x11) u32 offset, data (4096 bytes; the last block may be
+ *                    shorter) -> u32 offset. offset is a multiple of 4096.
+ *                    Each sector is erased, programmed and read back. The
+ *                    first sector is only kept in RAM until FINISH.
+ *   FINISH (0x12) -> checks that every block arrived and that the CRC of
+ *                    the whole image matches. Only then does it write the
+ *                    first sector (the image's start block, so a partial
+ *                    image never becomes bootable), reply, and do a flash
+ *                    update boot of the new slot. The bootrom then erases
+ *                    the old slot's first sector (step 3: no trial boot yet).
  *   REBOOT (0x7F) -> reply, then reboot into the current firmware.
+ * Blocks may be sent again (each write starts with an erase); send them in
+ * any order.
  */
 #include "updater.h"
 
@@ -23,11 +39,13 @@
 
 #include "hardware/gpio.h"
 #include "hardware/structs/powman.h"
+#include "boot/picobin.h"
 #include "boot/picoboot_constants.h"
 #include "pico/bootrom.h"
 #include "pico/platform.h"
 #include "pico/time.h"
 
+#include "build_id.h"
 #include "config.h"
 
 #if APP_USB_STATUS
@@ -113,14 +131,26 @@ void updater_check_boot(void) {
 
 enum {
     UPD_CMD_HELLO = 0x01,
+    UPD_CMD_BEGIN = 0x10,
+    UPD_CMD_DATA = 0x11,
+    UPD_CMD_FINISH = 0x12,
     UPD_CMD_REBOOT = 0x7F,
     UPD_RSP_ERROR = 0xFF,
 };
 
+/* Error reply payload: u8 code, then (optional) u32 detail. */
 enum {
-    UPD_ERR_CRC = 1,
+    UPD_ERR_CRC = 1,         /* frame CRC wrong: send it again              */
     UPD_ERR_UNKNOWN_CMD = 2,
-    UPD_ERR_LENGTH = 3,
+    UPD_ERR_LENGTH = 3,      /* payload length wrong for the command        */
+    UPD_ERR_NO_PT = 4,       /* no A/B partition table, or not booted from A/B */
+    UPD_ERR_STATE = 5,       /* DATA or FINISH without a BEGIN              */
+    UPD_ERR_OFFSET = 6,      /* offset not a multiple of 4096, or past the end */
+    UPD_ERR_FLASH = 7,       /* bootrom flash operation failed (detail: code) */
+    UPD_ERR_VERIFY = 8,      /* read-back differs from the data written     */
+    UPD_ERR_IMAGE_CRC = 9,   /* whole-image CRC wrong (detail: CRC computed) */
+    UPD_ERR_MISSING = 10,    /* FINISH before every block arrived (detail: first missing offset) */
+    UPD_ERR_TOO_BIG = 11,    /* image larger than the slot (detail: slot size) */
 };
 
 #define UPD_BOARD_ID "DFC-XIAO-RP2350"
@@ -128,6 +158,44 @@ enum {
 #define PICO_FLASH_SIZE_BYTES (2u * 1024u * 1024u)
 #endif
 #define UPD_SLOT_BYTES (1012u * 1024u) /* partition_table.json */
+
+/* ---------------------------------------------------------------- flash -- */
+
+#define SECTOR 4096u
+#define MAX_SECTORS 512u /* 2 MB: bitmap of received blocks */
+
+/* Bootrom flash operation on physical flash offsets ("storage" addresses),
+ * checked against the partition table's permissions, so it cannot touch
+ * the partition table itself. Called directly, without the SDK's lockout:
+ * the whole image runs from RAM (copy_to_ram), so nothing fetches from
+ * flash while the bootrom has it out of XIP mode, interrupts included. */
+static int flash_op(uint32_t op, uint32_t offset, uint32_t n, uint8_t *buf) {
+    rom_flash_op_fn f = (rom_flash_op_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_OP);
+    cflash_flags_t fl = {(op << CFLASH_OP_LSB) | (CFLASH_ASPACE_VALUE_STORAGE << CFLASH_ASPACE_LSB) |
+                         (CFLASH_SECLEVEL_VALUE_SECURE << CFLASH_SECLEVEL_LSB)};
+    return f(fl, XIP_BASE + offset, n, buf);
+}
+
+static uint8_t s_work[4096] __attribute__((aligned(4))); /* bootrom work area */
+
+/* Flash offset and size of partition n, from the bootrom's partition table. */
+static bool partition_location(unsigned n, uint32_t *offset, uint32_t *size) {
+    (void)rom_load_partition_table(s_work, sizeof s_work, false);
+    uint32_t info[3];
+    int r = rom_get_partition_table_info(info, 3u, PT_INFO_PARTITION_LOCATION_AND_FLAGS | PT_INFO_SINGLE_PARTITION |
+                                                       (n << 24));
+    if (r != 3 || !(info[0] & PT_INFO_PARTITION_LOCATION_AND_FLAGS)) {
+        return false;
+    }
+    uint32_t first = (info[1] & PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_BITS) >> PICOBIN_PARTITION_LOCATION_FIRST_SECTOR_LSB;
+    uint32_t last = (info[1] & PICOBIN_PARTITION_LOCATION_LAST_SECTOR_BITS) >> PICOBIN_PARTITION_LOCATION_LAST_SECTOR_LSB;
+    if (last < first) {
+        return false;
+    }
+    *offset = first * SECTOR;
+    *size = (last + 1u - first) * SECTOR;
+    return true;
+}
 
 static uint32_t crc32_update(uint32_t crc, const uint8_t *p, size_t n) {
     crc = ~crc;
@@ -217,15 +285,25 @@ static void send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     s_port->write(c, sizeof c);
 }
 
-static void send_error(uint8_t code) {
-    send_frame(UPD_RSP_ERROR, &code, 1u);
-}
-
 static void put32(uint8_t *p, uint32_t v) {
     p[0] = (uint8_t)v;
     p[1] = (uint8_t)(v >> 8);
     p[2] = (uint8_t)(v >> 16);
     p[3] = (uint8_t)(v >> 24);
+}
+
+static uint32_t get32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static void send_error_detail(uint8_t code, uint32_t detail) {
+    uint8_t b[5] = {code};
+    put32(&b[1], detail);
+    send_frame(UPD_RSP_ERROR, b, sizeof b);
+}
+
+static void send_error(uint8_t code) {
+    send_error_detail(code, 0u);
 }
 
 static void reply_hello(void) {
@@ -240,8 +318,8 @@ static void reply_hello(void) {
     put32(&s_tx[8], UPD_SLOT_BYTES);
     put32(&s_tx[12], 4096u); /* largest data block (later steps) */
     memcpy(&s_tx[16], UPD_BOARD_ID, sizeof UPD_BOARD_ID - 1u);
-    static const char k_build[] = __DATE__ " " __TIME__;
-    memcpy(&s_tx[32], k_build, sizeof k_build - 1u < 32u ? sizeof k_build - 1u : 32u);
+    size_t bl = strlen(g_build_id);
+    memcpy(&s_tx[32], g_build_id, bl < 32u ? bl : 32u);
     send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 64u);
 }
 
@@ -252,12 +330,195 @@ static void __attribute__((noreturn)) reboot_to_app(void) {
     }
 }
 
+/* ----------------------------------------------------------- the update -- */
+
+static struct {
+    bool active;
+    unsigned target;      /* partition being written */
+    uint32_t offset;      /* its flash offset        */
+    uint32_t slot_size;
+    uint32_t size;        /* image size              */
+    uint32_t crc;         /* expected image CRC-32   */
+    uint32_t sectors;
+    uint8_t got[MAX_SECTORS / 8u];
+} s_up;
+
+static uint8_t s_sector0[SECTOR] __attribute__((aligned(4))); /* written last */
+static uint8_t s_buf[SECTOR] __attribute__((aligned(4)));
+
+static bool running_partition(unsigned *p) {
+    boot_info_t bi;
+    if (!rom_get_boot_info(&bi) || (bi.partition != 0 && bi.partition != 1)) {
+        return false;
+    }
+    *p = (unsigned)bi.partition;
+    return true;
+}
+
+static void do_begin(uint16_t len) {
+    if (len != 8u) {
+        send_error(UPD_ERR_LENGTH);
+        return;
+    }
+    s_up.active = false;
+    unsigned run;
+    uint32_t off;
+    uint32_t sz;
+    if (!running_partition(&run) || !partition_location(run ^ 1u, &off, &sz)) {
+        send_error(UPD_ERR_NO_PT);
+        return;
+    }
+    uint32_t size = get32(&s_rx[0]);
+    if (size == 0u || size > sz || (size + SECTOR - 1u) / SECTOR > MAX_SECTORS) {
+        send_error_detail(UPD_ERR_TOO_BIG, sz);
+        return;
+    }
+    /* Erase the target's first sector now, so whatever it held stops being
+     * a bootable image for the whole of the update. */
+    int r = flash_op(CFLASH_OP_VALUE_ERASE, off, SECTOR, NULL);
+    if (r != 0) {
+        send_error_detail(UPD_ERR_FLASH, (uint32_t)r);
+        return;
+    }
+    s_up.active = true;
+    s_up.target = run ^ 1u;
+    s_up.offset = off;
+    s_up.slot_size = sz;
+    s_up.size = size;
+    s_up.crc = get32(&s_rx[4]);
+    s_up.sectors = (size + SECTOR - 1u) / SECTOR;
+    memset(s_up.got, 0, sizeof s_up.got);
+    memset(s_sector0, 0xFF, sizeof s_sector0);
+    uint8_t b[12];
+    b[0] = (uint8_t)s_up.target;
+    b[1] = b[2] = b[3] = 0u;
+    put32(&b[4], off);
+    put32(&b[8], sz);
+    send_frame(UPD_CMD_BEGIN | 0x80u, b, sizeof b);
+}
+
+/* Erase, program and verify one sector of the target slot. */
+static int write_sector(uint32_t index, const uint8_t *data) {
+    uint32_t at = s_up.offset + index * SECTOR;
+    int r = flash_op(CFLASH_OP_VALUE_ERASE, at, SECTOR, NULL);
+    if (r == 0) {
+        memcpy(s_buf, data, SECTOR);
+        r = flash_op(CFLASH_OP_VALUE_PROGRAM, at, SECTOR, s_buf);
+    }
+    if (r == 0) {
+        r = flash_op(CFLASH_OP_VALUE_READ, at, SECTOR, s_buf);
+    }
+    if (r != 0) {
+        send_error_detail(UPD_ERR_FLASH, (uint32_t)r);
+        return -1;
+    }
+    if (memcmp(s_buf, data, SECTOR) != 0) {
+        send_error_detail(UPD_ERR_VERIFY, index * SECTOR);
+        return -1;
+    }
+    return 0;
+}
+
+static void do_data(uint16_t len) {
+    if (!s_up.active) {
+        send_error(UPD_ERR_STATE);
+        return;
+    }
+    if (len < 5u) {
+        send_error(UPD_ERR_LENGTH);
+        return;
+    }
+    uint32_t offset = get32(&s_rx[0]);
+    uint32_t n = (uint32_t)len - 4u;
+    if (offset % SECTOR != 0u || offset >= s_up.size) {
+        send_error_detail(UPD_ERR_OFFSET, offset);
+        return;
+    }
+    uint32_t want = s_up.size - offset < SECTOR ? s_up.size - offset : SECTOR;
+    if (n != want) {
+        send_error_detail(UPD_ERR_LENGTH, want);
+        return;
+    }
+    uint32_t index = offset / SECTOR;
+    uint8_t *data = (index == 0u) ? s_sector0 : s_buf;
+    memset(data, 0xFF, SECTOR); /* pad a short last block with erased bytes */
+    memcpy(data, &s_rx[4], n);
+    if (index != 0u) {
+        static uint8_t copy[SECTOR] __attribute__((aligned(4)));
+        memcpy(copy, data, SECTOR);
+        if (write_sector(index, copy) != 0) {
+            return;
+        }
+    }
+    s_up.got[index / 8u] = (uint8_t)(s_up.got[index / 8u] | (1u << (index % 8u)));
+    uint8_t b[4];
+    put32(b, offset);
+    send_frame(UPD_CMD_DATA | 0x80u, b, sizeof b);
+}
+
+static void __attribute__((noreturn)) flash_update_boot(uint32_t offset) {
+    rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE | REBOOT2_FLAG_NO_RETURN_ON_SUCCESS, 10, XIP_BASE + offset, 0);
+    for (;;) {
+        tight_loop_contents();
+    }
+}
+
+static void do_finish(void) {
+    if (!s_up.active) {
+        send_error(UPD_ERR_STATE);
+        return;
+    }
+    for (uint32_t i = 0; i < s_up.sectors; i++) {
+        if (!(s_up.got[i / 8u] & (1u << (i % 8u)))) {
+            send_error_detail(UPD_ERR_MISSING, i * SECTOR);
+            return;
+        }
+    }
+    /* CRC of the image as it will be: sector 0 from RAM, the rest read
+     * back from flash. */
+    uint32_t first = s_up.size < SECTOR ? s_up.size : SECTOR;
+    uint32_t crc = crc32_update(0u, s_sector0, first);
+    for (uint32_t i = 1; i < s_up.sectors; i++) {
+        int r = flash_op(CFLASH_OP_VALUE_READ, s_up.offset + i * SECTOR, SECTOR, s_buf);
+        if (r != 0) {
+            send_error_detail(UPD_ERR_FLASH, (uint32_t)r);
+            return;
+        }
+        uint32_t n = s_up.size - i * SECTOR < SECTOR ? s_up.size - i * SECTOR : SECTOR;
+        crc = crc32_update(crc, s_buf, n);
+    }
+    if (crc != s_up.crc) {
+        send_error_detail(UPD_ERR_IMAGE_CRC, crc);
+        return;
+    }
+    /* Everything else is in place and checked: now the start block. */
+    static uint8_t copy[SECTOR] __attribute__((aligned(4)));
+    memcpy(copy, s_sector0, SECTOR);
+    if (write_sector(0u, copy) != 0) {
+        return;
+    }
+    uint8_t b[4];
+    put32(b, crc);
+    send_frame(UPD_CMD_FINISH | 0x80u, b, sizeof b);
+    sleep_ms(300); /* let the reply reach the host before the port goes */
+    s_up.active = false;
+    flash_update_boot(s_up.offset);
+}
+
 /* Returns true if the frame was valid (resets the idle timeout). */
 static bool handle(uint8_t cmd, uint16_t len) {
-    (void)len;
     switch (cmd) {
     case UPD_CMD_HELLO:
         reply_hello();
+        return true;
+    case UPD_CMD_BEGIN:
+        do_begin(len);
+        return true;
+    case UPD_CMD_DATA:
+        do_data(len);
+        return true;
+    case UPD_CMD_FINISH:
+        do_finish();
         return true;
     case UPD_CMD_REBOOT:
         send_frame(UPD_CMD_REBOOT | 0x80u, NULL, 0u);

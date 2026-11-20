@@ -1,4 +1,4 @@
-"""Host side of the DFC firmware updater (Rev 2.25, work in progress: step 2).
+"""Host side of the DFC firmware updater (Rev 2.25, work in progress: step 3).
 
 The board's updater mode is entered by rebooting into it:
   - diag builds: '!' on the USB console (this script sends it with --enter);
@@ -13,12 +13,14 @@ In updater mode the board speaks a framed protocol on that link
 with the zlib CRC-32 of cmd, len and payload. Replies set bit 7 of cmd.
 After 90 s without a command the board reboots into its firmware.
 
-Step 2 commands:
-    py tools\\dfc_update.py COM13 --enter          # '!' then HELLO
-    py tools\\dfc_update.py COM13                  # HELLO (already in updater mode)
-    py tools\\dfc_update.py COM13 reboot           # leave updater mode now
+Commands:
+    py tools\\dfc_update.py COM13 --enter                    # '!' then HELLO
+    py tools\\dfc_update.py COM13                            # HELLO (already in updater mode)
+    py tools\\dfc_update.py COM13 --enter flash firmware.uf2 # update the firmware
+    py tools\\dfc_update.py COM13 reboot                     # leave updater mode now
 
-Flashing a .uf2 comes in a later step.
+flash writes the image into the slot that is not running, checks it, and the
+board then boots it (step 3: no trial boot or confirm yet).
 """
 
 from __future__ import annotations
@@ -37,9 +39,57 @@ except ImportError:  # pragma: no cover
 
 SOF = b"\xA5\x5A"
 CMD_HELLO = 0x01
+CMD_BEGIN = 0x10
+CMD_DATA = 0x11
+CMD_FINISH = 0x12
 CMD_REBOOT = 0x7F
 RSP_ERROR = 0xFF
-ERRORS = {1: "CRC error", 2: "unknown command", 3: "bad length"}
+ERRORS = {
+    1: "frame CRC error", 2: "unknown command", 3: "bad length", 4: "no A/B partition table",
+    5: "no update in progress", 6: "bad offset", 7: "flash operation failed", 8: "read-back verify failed",
+    9: "image CRC mismatch", 10: "block missing", 11: "image too big for the slot",
+}
+SECTOR = 4096
+FAMILY_RP2350_ARM_S = 0xE48BFF59
+UF2_MAGIC = (0x0A324655, 0x9E5D5157, 0x0AB16F30)
+UF2_FLAG_NOT_MAIN_FLASH = 0x00000001
+UF2_FLAG_FAMILY = 0x00002000
+XIP_BASE = 0x10000000
+
+
+class UpdateError(Exception):
+    pass
+
+
+def load_uf2(path: str, slot_limit: int = 1012 * 1024) -> bytes:
+    """The RP2350 Arm image from a .uf2, as a flat binary from XIP_BASE.
+    Other families (the RP2350-E10 absolute block) are skipped."""
+    data = open(path, "rb").read()
+    if len(data) % 512:
+        raise UpdateError(f"{path}: not a UF2 file (size is not a multiple of 512)")
+    chunks: dict[int, bytes] = {}
+    for i in range(0, len(data), 512):
+        m0, m1, flags, addr, size, _bno, _nb, fam = struct.unpack_from("<8I", data, i)
+        (m_end,) = struct.unpack_from("<I", data, i + 508)
+        if (m0, m1, m_end) != UF2_MAGIC:
+            raise UpdateError(f"{path}: bad UF2 block at offset {i}")
+        if flags & UF2_FLAG_NOT_MAIN_FLASH or not flags & UF2_FLAG_FAMILY or fam != FAMILY_RP2350_ARM_S:
+            continue
+        if size > 476:
+            raise UpdateError(f"{path}: UF2 block payload too large")
+        chunks[addr] = data[i + 32:i + 32 + size]
+    if not chunks:
+        raise UpdateError(f"{path}: no RP2350 Arm (rp2350-arm-s) blocks")
+    lo = min(chunks)
+    hi = max(a + len(c) for a, c in chunks.items())
+    if lo != XIP_BASE:
+        raise UpdateError(f"{path}: image starts at 0x{lo:08X}, expected 0x{XIP_BASE:08X}")
+    if hi - lo > slot_limit:
+        raise UpdateError(f"{path}: image is {hi - lo} bytes, a slot holds {slot_limit}")
+    img = bytearray(b"\xff" * (hi - lo))
+    for a, c in chunks.items():
+        img[a - lo:a - lo + len(c)] = c
+    return bytes(img)
 
 
 def frame(cmd: int, payload: bytes = b"") -> bytes:
@@ -130,13 +180,63 @@ def show_hello(p: bytes) -> None:
     print(f"  build {build}")
 
 
+def expect(link: Link, want: int, what: str, timeout: float = 5.0) -> bytes:
+    cmd, payload = link.reply(timeout)
+    if cmd == RSP_ERROR:
+        code = payload[0]
+        detail = struct.unpack_from("<I", payload, 1)[0] if len(payload) >= 5 else 0
+        raise UpdateError(f"{what}: {ERRORS.get(code, f'error {code}')} (detail 0x{detail:X})")
+    if cmd != want | 0x80:
+        raise UpdateError(f"{what}: unexpected reply 0x{cmd:02X}")
+    return payload
+
+
+def flash(link: Link, image: bytes) -> None:
+    crc = zlib.crc32(image) & 0xFFFFFFFF
+    link.send(frame(CMD_BEGIN, struct.pack("<II", len(image), crc)))
+    r = expect(link, CMD_BEGIN, "BEGIN")
+    target, (offset, slot_size) = r[0], struct.unpack_from("<II", r, 4)
+    print(f"Writing {len(image)} bytes (CRC 0x{crc:08X}) to slot {'AB'[target]} "
+          f"at flash offset 0x{offset:X} ({slot_size // 1024} KB slot)")
+    blocks = list(range(0, len(image), SECTOR))
+    start = time.monotonic()
+    for n, off in enumerate(blocks, 1):
+        payload = struct.pack("<I", off) + image[off:off + SECTOR]
+        for attempt in range(3):
+            link.send(frame(CMD_DATA, payload))
+            try:
+                expect(link, CMD_DATA, f"block at 0x{off:X}")
+                break
+            except UpdateError as e:
+                if "frame CRC" not in str(e) or attempt == 2:
+                    raise
+        print(f"\r  {n}/{len(blocks)} blocks", end="", flush=True)
+    print(f"  ({time.monotonic() - start:.1f} s)")
+    link.send(frame(CMD_FINISH))
+    try:
+        r = expect(link, CMD_FINISH, "FINISH", timeout=10.0)
+        print(f"Image verified on the board (CRC 0x{struct.unpack_from('<I', r)[0]:08X}); booting it.")
+    except serial.SerialException:
+        print("Board rebooted before its FINISH reply was read; check the result below.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("port", help="COM port of the board, e.g. COM13")
-    ap.add_argument("command", nargs="?", default="hello", choices=("hello", "reboot"))
+    ap.add_argument("command", nargs="?", default="hello", choices=("hello", "flash", "reboot"))
+    ap.add_argument("file", nargs="?", help="flash: the .uf2 to write (e.g. build\\diag\\firmware.uf2)")
     ap.add_argument("--enter", action="store_true",
                     help="first send '!' on the diag USB console to reboot into updater mode")
     args = ap.parse_args()
+    image = b""
+    if args.command == "flash":
+        if not args.file:
+            ap.error("flash needs a .uf2 file")
+        try:
+            image = load_uf2(args.file)
+        except (OSError, UpdateError) as e:
+            print("Error:", e)
+            return 1
 
     if args.enter:
         link = Link(args.port)
@@ -148,7 +248,23 @@ def main() -> int:
 
     link = Link(args.port)
     try:
-        if args.command == "hello":
+        if args.command == "flash":
+            try:
+                flash(link, image)
+            except UpdateError as e:
+                print("\nError:", e)
+                print("The running firmware is untouched. The board leaves updater mode after 90 s idle.")
+                return 1
+            link.close()
+            print(f"Waiting for {args.port} to come back...")
+            try:
+                wait_for_port(args.port, gone_first=True, timeout=20.0)
+                print("Back. Open the terminal: the Firmware line shows the new slot, "
+                      "'flash update boot', and the new build time.")
+            except TimeoutError as e:
+                print(e)
+                return 1
+        elif args.command == "hello":
             link.send(frame(CMD_HELLO))
             cmd, payload = link.reply()
             if cmd == RSP_ERROR:

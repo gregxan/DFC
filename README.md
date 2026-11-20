@@ -319,11 +319,13 @@ UART-related interrupt (B-20).
 - **Firmware updater (in progress, Rev 2.25).** Type `!` and the board
   reboots into its updater on this USB port. The COM port closes and comes
   back. The updater blinks the LED fast and waits 90 s for
-  `tools\dfc_update.py`, then boots the firmware again. So far it only answers
-  `hello` and `reboot`; flashing a `.uf2` comes later:
+  `tools\dfc_update.py`, then boots the firmware again. To update the
+  firmware over this port (it goes into the slot that is not running, is
+  checked, then booted):
   ```bash
-  py tools\dfc_update.py COM13 --enter
+  py tools\dfc_update.py COM13 --enter flash build\diag\firmware.uf2
   ```
+  Not yet: trial boot with automatic fallback, and updates over UART0/UART1.
 - **Hang and crash capture.** In diagnostic builds the yellow LED blinks
   while the firmware runs. If it ever stops for 2 s, a watchdog resets the
   board, and the report's **Last reset** line says where it was stuck, or

@@ -20,6 +20,7 @@
 #include "diag.h"
 #include "link.h"
 #include "mag.h"
+#include "build_id.h"
 #include "updater.h"
 #include "wirecheck.h"
 
@@ -640,8 +641,8 @@ static int format_human(unsigned line) {
                         g_diag_actual_baud[1], g_app_baud_ok ? "OK" : "OUT OF TOLERANCE");
     case H_RESET: {
         /* Rev 2.25: A/B slot (H_RESET is followed by it). */
-        int len = put(0, "Firmware      slot %s (%s boot), chip RP2350 A%u", slot_name(), boot_type_name(),
-                      (unsigned)rp2350_chip_version());
+        int len = put(0, "Firmware      slot %s (%s boot), chip RP2350 A%u, built %.16s", slot_name(),
+                      boot_type_name(), (unsigned)rp2350_chip_version(), g_build_id);
         len = put(len, "\r\n");
         return reset_text(len);
     }
