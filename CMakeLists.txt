@@ -24,6 +24,18 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/pico_sdk_import.cmake)
 
 project(xiao_dual_uart_mag C CXX ASM)
 
+# Rev 2.25: firmware version, major.minor.patch. It goes into the updater
+# info block in every image (src/updater.c); tools/dfc_update.py refuses to
+# install an older version unless told to (--allow-downgrade). Raise it for
+# every release.
+set(DFC_FW_VERSION "0.1.0" CACHE STRING "Firmware version (major.minor.patch)")
+if(NOT DFC_FW_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    message(FATAL_ERROR "DFC_FW_VERSION must be major.minor.patch, got '${DFC_FW_VERSION}'")
+endif()
+set(DFC_FW_MAJOR ${CMAKE_MATCH_1})
+set(DFC_FW_MINOR ${CMAKE_MATCH_2})
+set(DFC_FW_PATCH ${CMAKE_MATCH_3})
+
 # B-24 (Rev 2.5): every C source in the image, SDK included, is strict C11.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -98,6 +110,9 @@ elseif(APP_MODE STREQUAL "user")
 else()
     message(FATAL_ERROR "APP_MODE must be 'user', 'echo' or 'pattern'")
 endif()
+
+target_compile_definitions(firmware PRIVATE
+    DFC_FW_MAJOR=${DFC_FW_MAJOR} DFC_FW_MINOR=${DFC_FW_MINOR} DFC_FW_PATCH=${DFC_FW_PATCH})
 
 if(APP_TEST_PINS)
     target_compile_definitions(firmware PRIVATE APP_TEST_PINS=1)

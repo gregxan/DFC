@@ -121,9 +121,111 @@ void updater_check_boot(void) {
     }
 }
 
+/* ------------------------------------------------------ image info block -- */
+
+/* Rev 2.25: present in every image, so the host tool and the updater can
+ * tell that an image carries an updater, which protocol it speaks and which
+ * firmware version it is, before installing it. Referenced by HELLO, so the
+ * linker keeps it. 32 bytes, 4-byte aligned in the image (its 32-byte RAM
+ * alignment does not carry over to the flash image: copy_to_ram).
+ * Little-endian, shared with tools/dfc_update.py:
+ *   0  u32 magic_lo 0x55434644 ("DFCU"), 4 u32 magic_hi 0x519C4450
+ *   8  u16 info block format (1)
+ *  10  u16 updater protocol (UPDATER_PROTOCOL)
+ *  12  u16 firmware major, 14 u16 minor, 16 u16 patch
+ *  18  u16 protocol floor (UPDATER_PROTOCOL_FLOOR)
+ *  20  u32 reserved, 24 u32 reserved (0)
+ *  28  u32 check: ~XOR of the seven words before it. A 64-bit magic plus
+ *      this check word: an accidental match is not credible. */
+#define INFO_MAGIC_LO 0x55434644u
+#define INFO_MAGIC_HI 0x519C4450u
+#define INFO_FORMAT 1u
+
+typedef struct {
+    uint32_t magic_lo;
+    uint32_t magic_hi;
+    uint16_t format;
+    uint16_t protocol;
+    uint16_t fw_major;
+    uint16_t fw_minor;
+    uint16_t fw_patch;
+    uint16_t floor;
+    uint32_t reserved[2];
+    uint32_t check;
+} upd_info_t;
+_Static_assert(sizeof(upd_info_t) == 32u, "updater info block must be 32 bytes");
+
+#define INFO_W2 ((uint32_t)INFO_FORMAT | ((uint32_t)UPDATER_PROTOCOL << 16))
+#define INFO_W3 ((uint32_t)DFC_FW_MAJOR | ((uint32_t)DFC_FW_MINOR << 16))
+#define INFO_W4 ((uint32_t)DFC_FW_PATCH | ((uint32_t)UPDATER_PROTOCOL_FLOOR << 16))
+
+static const upd_info_t g_updater_info __attribute__((aligned(32), used)) = {
+    INFO_MAGIC_LO,
+    INFO_MAGIC_HI,
+    INFO_FORMAT,
+    UPDATER_PROTOCOL,
+    DFC_FW_MAJOR,
+    DFC_FW_MINOR,
+    DFC_FW_PATCH,
+    UPDATER_PROTOCOL_FLOOR,
+    {0u, 0u},
+    ~(INFO_MAGIC_LO ^ INFO_MAGIC_HI ^ INFO_W2 ^ INFO_W3 ^ INFO_W4),
+};
+
+static uint32_t rd32(const uint8_t *p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+/* Updater protocol of a valid info block at p (32 bytes), or -1. */
+static int info_at(const uint8_t *p) {
+    uint32_t w[8];
+    for (unsigned i = 0; i < 8u; i++) {
+        w[i] = rd32(&p[4u * i]);
+    }
+    uint32_t chk = ~(w[0] ^ w[1] ^ w[2] ^ w[3] ^ w[4] ^ w[5] ^ w[6]);
+    if (w[0] != INFO_MAGIC_LO || w[1] != INFO_MAGIC_HI || w[7] != chk || (w[2] & 0xFFFFu) < 1u) {
+        return -1;
+    }
+    return (int)(w[2] >> 16);
+}
+
+/* Scans an image delivered in chunks, including blocks that straddle two
+ * chunks. Chunks are multiples of 4 bytes except possibly the last. */
+static struct {
+    uint8_t tail[28]; /* last 28 bytes of the previous chunk */
+    uint32_t tail_n;
+    int proto;
+} s_scan;
+
+static void scan_reset(void) {
+    s_scan.tail_n = 0u;
+    s_scan.proto = -1;
+}
+
+static void scan_chunk(const uint8_t *p, uint32_t n) {
+    if (s_scan.proto >= 0) {
+        return;
+    }
+    /* Across the boundary: tail of the previous chunk + start of this one. */
+    if (s_scan.tail_n != 0u && n >= 28u) {
+        uint8_t win[56];
+        memcpy(win, s_scan.tail, s_scan.tail_n);
+        memcpy(&win[s_scan.tail_n], p, 28u);
+        for (uint32_t i = 0; i + 32u <= s_scan.tail_n + 28u && s_scan.proto < 0; i += 4u) {
+            s_scan.proto = info_at(&win[i]);
+        }
+    }
+    for (uint32_t i = 0; i + 32u <= n && s_scan.proto < 0; i += 4u) {
+        s_scan.proto = info_at(&p[i]);
+    }
+    uint32_t k = n < 28u ? n : 28u;
+    memcpy(s_scan.tail, &p[n - k], k);
+    s_scan.tail_n = k;
+}
+
 /* ------------------------------------------------------------- protocol -- */
 
-#define UPD_PROTO_VERSION 1u
+#define UPD_PROTO_VERSION UPDATER_PROTOCOL
 #define UPD_SOF0 0xA5u
 #define UPD_SOF1 0x5Au
 #define UPD_MAX_PAYLOAD (4096u + 16u)
@@ -151,6 +253,8 @@ enum {
     UPD_ERR_IMAGE_CRC = 9,   /* whole-image CRC wrong (detail: CRC computed) */
     UPD_ERR_MISSING = 10,    /* FINISH before every block arrived (detail: first missing offset) */
     UPD_ERR_TOO_BIG = 11,    /* image larger than the slot (detail: slot size) */
+    UPD_ERR_NO_INFO = 12,    /* image has no updater info block             */
+    UPD_ERR_OLD_UPDATER = 13, /* image's updater protocol below the floor (detail: its protocol) */
 };
 
 #define UPD_BOARD_ID "DFC-XIAO-RP2350"
@@ -280,7 +384,7 @@ static const upd_port_t k_usb_port = {usb_init, usb_read, usb_write, usb_connect
 static const upd_port_t *s_port;
 static updater_link_t s_link;
 static uint8_t s_rx[UPD_MAX_PAYLOAD];
-static uint8_t s_tx[64];
+static uint8_t s_tx[96];
 
 static void send_frame(uint8_t cmd, const uint8_t *payload, uint16_t len) {
     uint8_t h[5] = {UPD_SOF0, UPD_SOF1, cmd, (uint8_t)len, (uint8_t)(len >> 8)};
@@ -329,7 +433,9 @@ static void reply_hello(void) {
     memcpy(&s_tx[16], UPD_BOARD_ID, sizeof UPD_BOARD_ID - 1u);
     size_t bl = strlen(g_build_id);
     memcpy(&s_tx[32], g_build_id, bl < 32u ? bl : 32u);
-    send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 64u);
+    /* 64: the running image's info block, as stored in it. */
+    memcpy(&s_tx[64], &g_updater_info, sizeof g_updater_info); /* the whole block */
+    send_frame(UPD_CMD_HELLO | 0x80u, s_tx, 96u);
 }
 
 static void __attribute__((noreturn)) reboot_to_app(void) {
@@ -487,6 +593,8 @@ static void do_finish(void) {
      * back from flash. */
     uint32_t first = s_up.size < SECTOR ? s_up.size : SECTOR;
     uint32_t crc = crc32_update(0u, s_sector0, first);
+    scan_reset();
+    scan_chunk(s_sector0, first);
     for (uint32_t i = 1; i < s_up.sectors; i++) {
         int r = flash_op(CFLASH_OP_VALUE_READ, s_up.offset + i * SECTOR, SECTOR, s_buf);
         if (r != 0) {
@@ -495,9 +603,21 @@ static void do_finish(void) {
         }
         uint32_t n = s_up.size - i * SECTOR < SECTOR ? s_up.size - i * SECTOR : SECTOR;
         crc = crc32_update(crc, s_buf, n);
+        scan_chunk(s_buf, n);
     }
     if (crc != s_up.crc) {
         send_error_detail(UPD_ERR_IMAGE_CRC, crc);
+        return;
+    }
+    /* Rev 2.25: only an image whose updater this protocol line can still
+     * drive may be installed; otherwise the unit could never be updated
+     * again. */
+    if (s_scan.proto < 0) {
+        send_error(UPD_ERR_NO_INFO);
+        return;
+    }
+    if ((uint32_t)s_scan.proto < UPDATER_PROTOCOL_FLOOR) {
+        send_error_detail(UPD_ERR_OLD_UPDATER, (uint32_t)s_scan.proto);
         return;
     }
     /* Everything else is in place and checked: now the start block. */

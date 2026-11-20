@@ -41,6 +41,17 @@ typedef enum {
  * flag uses a separate key, which only updater.c knows. */
 #define UPDATER_REQUEST_KEY 0xF511608FAA39ADB9ull
 
+/* Updater protocol version. Raise it whenever the host protocol changes in
+ * a way older tools cannot drive. It goes into every image's updater info
+ * block, and HELLO reports it. */
+#define UPDATER_PROTOCOL 1u
+
+/* Lowest updater protocol an image may carry to be installed by this
+ * firmware. Raise it in a release once the tools no longer support an older
+ * protocol, so such an image can never be installed again (it would leave
+ * the unit unreachable). Checked on the board at FINISH. */
+#define UPDATER_PROTOCOL_FLOOR 1u
+
 /* Idle timeout: with no valid command from the host for this long, the
  * updater reboots into the current firmware. */
 #ifndef UPDATER_IDLE_TIMEOUT_S

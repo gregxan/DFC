@@ -325,6 +325,11 @@ UART-related interrupt (B-20).
   ```bash
   py tools\dfc_update.py COM13 --enter flash build\diag\firmware.uf2
   ```
+  The script refuses an image without the updater info block, one whose
+  updater protocol it cannot drive, and (unless overridden) an older firmware
+  version (`--allow-downgrade`) or an older updater protocol
+  (`--allow-older-updater`). Set the version with `-DDFC_FW_VERSION=x.y.z`
+  (default 0.1.0) and raise it for every release (DESIGN 4b).
   Not yet: trial boot with automatic fallback, and updates over UART0/UART1.
 - **Hang and crash capture.** In diagnostic builds the yellow LED blinks
   while the firmware runs. If it ever stops for 2 s, a watchdog resets the

@@ -483,6 +483,46 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
   the chip revision, from the bootrom's boot info. STAT has `slot=`,
   `boot_type=`, `tbyb=` and `chip_rev=`.
 
+## 4b. Updater info block and version checks (Rev 2.25)
+
+Every image carries a 32-byte **updater info block**
+(`g_updater_info` in `updater.c`):
+
+| Bytes | Field |
+|---|---|
+| 0–7 | 64-bit magic `0x519C4450_55434644` |
+| 8–9 | block format (1) |
+| 10–11 | updater protocol (`UPDATER_PROTOCOL`, `updater.h`) |
+| 12–17 | firmware version major / minor / patch (`DFC_FW_VERSION`, CMake) |
+| 18–19 | protocol floor (`UPDATER_PROTOCOL_FLOOR`) |
+| 20–27 | reserved, 0 |
+| 28–31 | check word: inverted XOR of the seven words before it |
+
+It is found by scanning the image at 4-byte steps, across sector boundaries.
+Its 32-byte alignment is in RAM, not in the flash image (copy_to_ram). The
+magic alone also occurs in the code's literal pool, and the check word
+rejects that. HELLO returns the running image's block.
+
+**Checks before an image is installed:**
+
+| Check | Where | Override |
+|---|---|---|
+| The image has a valid info block | script, and the board at FINISH | none |
+| The image's protocol is one the script supports (`SUPPORTED_PROTOCOLS`) | script | none |
+| The image's protocol is not below the running firmware's floor | board at FINISH | none |
+| The image's protocol is not older than the running one | script | `--allow-older-updater` |
+| The image's firmware version is not older than the running one | script | `--allow-downgrade` |
+
+The board checks before writing the image's first sector, so a refused
+image is never bootable and the running firmware is untouched.
+
+**Release rules:**
+- Raise `DFC_FW_VERSION` for every release.
+- Raise `UPDATER_PROTOCOL` when the host protocol changes in a way older
+  tools cannot drive, and add it to `SUPPORTED_PROTOCOLS` in the script.
+- Raise `UPDATER_PROTOCOL_FLOOR` once the tools stop supporting an older
+  protocol, so no unit can be put back on it.
+
 ## 5. Resources (R-1 … R-3)
 
 | Resource | Use |
