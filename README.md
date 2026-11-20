@@ -328,7 +328,11 @@ UART-related interrupt (B-20).
   The script refuses an image without the updater info block, one whose
   updater protocol it cannot drive, and (unless overridden) an older firmware
   version (`--allow-downgrade`) or an older updater protocol
-  (`--allow-older-updater`). Set the version with `-DDFC_FW_VERSION=x.y.z`
+  (`--allow-older-updater`). Every protection can be switched off on
+  purpose (`--allow-no-info`, `--allow-unsupported-protocol`,
+  `--allow-below-floor`, `--no-trial`); each one warns and needs a typed
+  `yes`, and `--no-trial` also needs its key typed in (DESIGN 4c).
+  Set the version with `-DDFC_FW_VERSION=x.y.z`
   (default 0.1.0) and raise it for every release (DESIGN 4b).
   The new image boots **on trial**. The script reconnects to the new image's
   own updater and confirms it. Only then does it become permanent. If

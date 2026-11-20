@@ -14,10 +14,16 @@
  *   HELLO  (0x01) -> HELLO reply: protocol version, link, running slot,
  *                    chip revision, flash and slot size, largest block,
  *                    board ID, build ID.
- *   BEGIN  (0x10) u32 size, u32 crc32 of the image -> u8 target slot,
- *                    u32 target flash offset, u32 slot size. The target is
- *                    the slot that is not running. Its first sector is
- *                    erased at once.
+ *   BEGIN  (0x10) u32 size, u32 crc32 of the image [, u32 bypass flags,
+ *                    u64 no-trial key] -> u8 target slot, u32 target flash
+ *                    offset, u32 slot size, u32 bypass flags accepted. The
+ *                    target is the slot that is not running. Its first
+ *                    sector is erased at once. Bypass flags (each one an
+ *                    explicit host request; old hosts send none):
+ *                      bit 0 ALLOW_NO_INFO      install without an info block
+ *                      bit 1 ALLOW_BELOW_FLOOR  install below the protocol floor
+ *                      bit 2 NO_TRIAL           no trial boot: permanent at
+ *                                               once; needs UPDATER_NO_TRIAL_KEY
  *   DATA   (0x11) u32 offset, data (4096 bytes; the last block may be
  *                    shorter) -> u32 offset. offset is a multiple of 4096.
  *                    Each sector is erased, programmed and read back. The
@@ -300,7 +306,14 @@ enum {
     UPD_ERR_NOT_TRIAL = 15,  /* CONFIRM, but this image is not on trial      */
     UPD_ERR_BUY = 16,        /* explicit_buy failed (detail: bootrom code)  */
     UPD_ERR_IMAGE_DEF = 17,  /* image's start block not found, or hashed/signed (cannot set the trial flag) */
+    UPD_ERR_BAD_KEY = 18,    /* NO_TRIAL requested without the right key    */
+    UPD_ERR_BAD_FLAGS = 19,  /* unknown bypass flag                         */
 };
+
+#define UPD_BEGIN_ALLOW_NO_INFO 0x1u
+#define UPD_BEGIN_ALLOW_BELOW_FLOOR 0x2u
+#define UPD_BEGIN_NO_TRIAL 0x4u
+#define UPD_BEGIN_ALL (UPD_BEGIN_ALLOW_NO_INFO | UPD_BEGIN_ALLOW_BELOW_FLOOR | UPD_BEGIN_NO_TRIAL)
 
 #define UPD_BOARD_ID "DFC-XIAO-RP2350"
 #ifndef PICO_FLASH_SIZE_BYTES
@@ -505,6 +518,7 @@ static struct {
     uint32_t size;        /* image size              */
     uint32_t crc;         /* expected image CRC-32   */
     uint32_t sectors;
+    uint32_t bypass;      /* UPD_BEGIN_* the host asked for and passed  */
     uint8_t got[MAX_SECTORS / 8u];
 } s_up;
 
@@ -521,11 +535,23 @@ static bool running_partition(unsigned *p) {
 }
 
 static void do_begin(uint16_t len) {
-    if (len != 8u) {
+    if (len != 8u && len != 20u) {
         send_error(UPD_ERR_LENGTH);
         return;
     }
     s_up.active = false;
+    uint32_t bypass = (len == 20u) ? get32(&s_rx[8]) : 0u;
+    if (bypass & ~UPD_BEGIN_ALL) {
+        send_error_detail(UPD_ERR_BAD_FLAGS, bypass);
+        return;
+    }
+    if (bypass & UPD_BEGIN_NO_TRIAL) {
+        uint64_t key = (uint64_t)get32(&s_rx[12]) | ((uint64_t)get32(&s_rx[16]) << 32);
+        if (key != UPDATER_NO_TRIAL_KEY) {
+            send_error(UPD_ERR_BAD_KEY);
+            return;
+        }
+    }
     unsigned run;
     uint32_t off;
     uint32_t sz;
@@ -552,13 +578,15 @@ static void do_begin(uint16_t len) {
     s_up.size = size;
     s_up.crc = get32(&s_rx[4]);
     s_up.sectors = (size + SECTOR - 1u) / SECTOR;
+    s_up.bypass = bypass;
     memset(s_up.got, 0, sizeof s_up.got);
     memset(s_sector0, 0xFF, sizeof s_sector0);
-    uint8_t b[12];
+    uint8_t b[16];
     b[0] = (uint8_t)s_up.target;
     b[1] = b[2] = b[3] = 0u;
     put32(&b[4], off);
     put32(&b[8], sz);
+    put32(&b[12], bypass); /* the host checks these are what it asked for */
     send_frame(UPD_CMD_BEGIN | 0x80u, b, sizeof b);
 }
 
@@ -705,21 +733,26 @@ static void do_finish(void) {
     /* Rev 2.25: only an image whose updater this protocol line can still
      * drive may be installed; otherwise the unit could never be updated
      * again. */
-    if (s_scan.proto < 0) {
+    if (s_scan.proto < 0 && !(s_up.bypass & UPD_BEGIN_ALLOW_NO_INFO)) {
         send_error(UPD_ERR_NO_INFO);
         return;
     }
-    if ((uint32_t)s_scan.proto < UPDATER_PROTOCOL_FLOOR) {
+    if (s_scan.proto >= 0 && (uint32_t)s_scan.proto < UPDATER_PROTOCOL_FLOOR &&
+        !(s_up.bypass & UPD_BEGIN_ALLOW_BELOW_FLOOR)) {
         send_error_detail(UPD_ERR_OLD_UPDATER, (uint32_t)s_scan.proto);
         return;
     }
     /* Step 5: the copy written is a try-before-you-buy image, so it boots on
      * trial and must be confirmed through its own updater. (A UF2 copied to
-     * the BOOTSEL drive is not patched: bench flashing stays permanent.) */
-    int pr = set_tbyb(s_sector0, first);
-    if (pr != 0) {
-        send_error_detail(UPD_ERR_IMAGE_DEF, (uint32_t)pr);
-        return;
+     * the BOOTSEL drive is not patched: bench flashing stays permanent.)
+     * NO_TRIAL (keyed): left as built, so it is permanent once booted. */
+    bool trial = !(s_up.bypass & UPD_BEGIN_NO_TRIAL);
+    if (trial) {
+        int pr = set_tbyb(s_sector0, first);
+        if (pr != 0) {
+            send_error_detail(UPD_ERR_IMAGE_DEF, (uint32_t)pr);
+            return;
+        }
     }
     /* Everything else is in place and checked: now the start block. */
     static uint8_t copy[SECTOR] __attribute__((aligned(4)));
@@ -732,7 +765,11 @@ static void do_finish(void) {
     send_frame(UPD_CMD_FINISH | 0x80u, b, sizeof b);
     sleep_ms(300); /* let the reply reach the host before the port goes */
     s_up.active = false;
-    set_boot_flag((uint32_t)s_link); /* the new image starts in its updater */
+    if (trial) {
+        set_boot_flag((uint32_t)s_link); /* the new image starts in its updater */
+    }
+    /* Flash update boot. A non-TBYB (NO_TRIAL) image is launched and the
+     * bootrom erases the old slot's first sector at once. */
     flash_update_boot(s_up.offset);
 }
 

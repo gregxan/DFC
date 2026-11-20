@@ -53,7 +53,15 @@ ERRORS = {
     12: "image has no updater info block", 13: "image's updater protocol is below the board's floor",
     14: "not allowed while the board runs on trial", 15: "not on trial (nothing to confirm)",
     16: "explicit_buy failed", 17: "cannot set the trial flag in the image's start block",
+    18: "wrong no-trial key", 19: "unknown bypass flag",
 }
+
+# BEGIN bypass flags (src/updater.c UPD_BEGIN_*): each skips a check on the board.
+BYPASS_NO_INFO = 0x1
+BYPASS_BELOW_FLOOR = 0x2
+BYPASS_NO_TRIAL = 0x4
+# src/updater.h UPDATER_NO_TRIAL_KEY. --no-trial makes the user type it.
+NO_TRIAL_KEY = 0xDFCBADA55B007ED0
 
 # Updater protocols this script can drive (src/updater.h UPDATER_PROTOCOL).
 # Only images carrying one of these may be installed: anything else could
@@ -239,10 +247,11 @@ def expect(link: Link, want: int, what: str, timeout: float = 5.0) -> bytes:
     return payload
 
 
-def check_versions(new: Info, running: Info | None, allow_older_updater: bool, allow_downgrade: bool) -> None:
+def check_versions(new: Info, running: Info | None, allow_older_updater: bool, allow_downgrade: bool,
+                   allow_unsupported: bool = False) -> None:
     """Refuse images that could strand the unit, or that are older (section
     "Updater info block" in docs/DESIGN.md)."""
-    if new.protocol not in SUPPORTED_PROTOCOLS:
+    if new.protocol not in SUPPORTED_PROTOCOLS and not allow_unsupported:
         raise UpdateError(f"the image's updater speaks protocol {new.protocol}; this script supports "
                           f"{sorted(SUPPORTED_PROTOCOLS)}. Installing it could leave a unit these tools cannot update.")
     if running is None:
@@ -256,11 +265,67 @@ def check_versions(new: Info, running: Info | None, allow_older_updater: bool, a
                           f"{running.version_text}. Use --allow-downgrade if that is intended.")
 
 
-def flash(link: Link, image: bytes) -> int:
+def confirm_bypasses(args: argparse.Namespace, new: "Info | None") -> tuple[int, int]:
+    """List the protections being skipped, warn, and make the user confirm.
+    Returns (board bypass flags, no-trial key)."""
+    items = []
+    bypass = 0
+    if args.allow_no_info:
+        bypass |= BYPASS_NO_INFO
+        items.append("--allow-no-info: the image may have no DFC updater; the unit may become "
+                     "impossible to update except over USB BOOTSEL")
+    if args.allow_unsupported_protocol:
+        items.append("--allow-unsupported-protocol: these tools may not be able to update the unit again")
+    if args.allow_below_floor:
+        bypass |= BYPASS_BELOW_FLOOR
+        items.append("--allow-below-floor: the image's updater is older than this firmware allows")
+    if args.allow_older_updater:
+        items.append("--allow-older-updater: installs an older updater protocol than the running one")
+    if args.allow_downgrade:
+        items.append("--allow-downgrade: installs an older firmware version than the running one")
+    if args.no_trial:
+        bypass |= BYPASS_NO_TRIAL
+        items.append("--no-trial: the image becomes PERMANENT as soon as it boots. No confirm, no "
+                     "automatic fallback to the current firmware")
+    if not items:
+        return 0, 0
+    print("\n*** WARNING: protections switched off for this update ***")
+    for it in items:
+        print("  - " + it)
+    if new is None and not args.no_trial:
+        print("  (an image without an info block will not answer the confirm step: it will fall back, "
+              "unless --no-trial is also given)")
+    key = 0
+    if args.no_trial:
+        key_text = f"{NO_TRIAL_KEY:016X}"
+        if args.no_trial_key is not None:
+            typed = args.no_trial_key
+        else:
+            print(f"\nTo install without a trial boot, type the no-trial key exactly: {key_text}")
+            typed = input("no-trial key: ")
+        typed = typed.strip().upper().removeprefix("0X")
+        if typed != key_text:
+            raise UpdateError("no-trial key does not match. Nothing was sent.")
+        key = NO_TRIAL_KEY
+    if not args.yes:
+        if input("\nType 'yes' to continue: ").strip().lower() != "yes":
+            raise UpdateError("not confirmed. Nothing was sent.")
+    print()
+    return bypass, key
+
+
+def flash(link: Link, image: bytes, bypass: int = 0, key: int = 0) -> int:
     crc = zlib.crc32(image) & 0xFFFFFFFF
-    link.send(frame(CMD_BEGIN, struct.pack("<II", len(image), crc)))
+    if bypass:
+        link.send(frame(CMD_BEGIN, struct.pack("<IIIQ", len(image), crc, bypass, key)))
+    else:
+        link.send(frame(CMD_BEGIN, struct.pack("<II", len(image), crc)))
     r = expect(link, CMD_BEGIN, "BEGIN")
     target, (offset, slot_size) = r[0], struct.unpack_from("<II", r, 4)
+    accepted = struct.unpack_from("<I", r, 12)[0] if len(r) >= 16 else 0
+    if accepted != bypass:
+        raise UpdateError(f"the board accepted bypass flags 0x{accepted:X}, not the 0x{bypass:X} requested "
+                          "(older firmware?). Nothing was installed.")
     print(f"Writing {len(image)} bytes (CRC 0x{crc:08X}) to slot {'AB'[target]} "
           f"at flash offset 0x{offset:X} ({slot_size // 1024} KB slot)")
     blocks = list(range(0, len(image), SECTOR))
@@ -280,13 +345,14 @@ def flash(link: Link, image: bytes) -> int:
     link.send(frame(CMD_FINISH))
     try:
         r = expect(link, CMD_FINISH, "FINISH", timeout=10.0)
-        print(f"Image verified on the board (CRC 0x{struct.unpack_from('<I', r)[0]:08X}); booting it on trial.")
+        how = "PERMANENTLY (no trial)" if bypass & BYPASS_NO_TRIAL else "on trial"
+        print(f"Image verified on the board (CRC 0x{struct.unpack_from('<I', r)[0]:08X}); booting it {how}.")
     except serial.SerialException:
         print("Board rebooted before its FINISH reply was read; continuing.")
     return target
 
 
-def confirm(port: str, target: int, new: Info | None, started: float) -> bool:
+def confirm(port: str, target: int, new: Info | None, started: float, allow_unsupported: bool = False) -> bool:
     """The new image boots on trial into its own updater. Check it is the
     image just sent, then CONFIRM before the bootrom's trial watchdog fires.
     Returns False (and does not confirm) if anything is off: the board then
@@ -317,6 +383,8 @@ def confirm(port: str, target: int, new: Info | None, started: float) -> bool:
             problems.append("it is not on trial")
         if new is None or running is None or running.version != new.version or running.protocol != new.protocol:
             problems.append("its updater info differs from the image sent")
+        elif running.protocol not in SUPPORTED_PROTOCOLS and not allow_unsupported:
+            problems.append(f"its updater protocol {running.protocol} is not one these tools support")
         if problems:
             print("Not confirming: " + "; ".join(problems) + ".")
             return False
@@ -344,9 +412,20 @@ def main() -> int:
                     help="flash: allow an older firmware version than the one running")
     ap.add_argument("--allow-older-updater", action="store_true",
                     help="flash: allow an image whose updater protocol is older than the running one")
-    ap.add_argument("--skip-host-checks", action="store_true",
-                    help="TEST ONLY: send the image even if it has no updater info block or fails the "
-                         "version checks, to check that the board itself refuses it")
+    g = ap.add_argument_group("bypasses (flash): each one skips a protection, prints a warning, and needs "
+                              "a typed 'yes' (or --yes)")
+    g.add_argument("--allow-no-info", action="store_true",
+                   help="install an image with no updater info block (script and board check)")
+    g.add_argument("--allow-unsupported-protocol", action="store_true",
+                   help="install an image whose updater protocol this script does not support")
+    g.add_argument("--allow-below-floor", action="store_true",
+                   help="install an image whose updater protocol is below the board's floor (board check)")
+    g.add_argument("--no-trial", action="store_true",
+                   help="no trial boot: permanent as soon as it boots, no confirm, no fallback. "
+                        "You must type the no-trial key")
+    g.add_argument("--no-trial-key", metavar="KEY",
+                   help="the no-trial key, given on the command line instead of typed at the prompt")
+    g.add_argument("--yes", action="store_true", help="do not ask for 'yes' (the warnings still print)")
     ap.add_argument("--no-confirm", action="store_true",
                     help="flash: write and trial-boot the image but do not confirm it (tests the fallback)")
     ap.add_argument("--enter", action="store_true",
@@ -359,12 +438,11 @@ def main() -> int:
         try:
             image = load_uf2(args.file)
             new_info = find_info(image)
-            if not args.skip_host_checks:
-                if new_info is None:
-                    raise UpdateError(f"{args.file} has no updater info block: not a DFC image with an updater "
-                                      "(or one from before Rev 2.25). Refusing it.")
-                if new_info.protocol not in SUPPORTED_PROTOCOLS:
-                    check_versions(new_info, None, False, False)  # raises
+            if new_info is None and not args.allow_no_info:
+                raise UpdateError(f"{args.file} has no updater info block: not a DFC image with an updater "
+                                  "(or one from before Rev 2.25). Refusing it (--allow-no-info to override).")
+            if new_info and new_info.protocol not in SUPPORTED_PROTOCOLS and not args.allow_unsupported_protocol:
+                check_versions(new_info, None, False, False)  # raises
         except (OSError, UpdateError) as e:
             print("Error:", e)
             return 1
@@ -372,8 +450,11 @@ def main() -> int:
             print(f"Image: firmware {new_info.version_text}, updater protocol {new_info.protocol}, {len(image)} bytes")
         else:
             print(f"Image: NO updater info block, {len(image)} bytes")
-        if args.skip_host_checks:
-            print("--skip-host-checks: the script's checks are off; the board's own checks still apply.")
+        try:
+            bypass, key = confirm_bypasses(args, new_info)
+        except UpdateError as e:
+            print("Error:", e)
+            return 1
 
     if args.enter:
         link = Link(args.port)
@@ -389,22 +470,33 @@ def main() -> int:
             try:
                 link.send(frame(CMD_HELLO))
                 running = show_hello(expect(link, CMD_HELLO, "HELLO"))
-                if not args.skip_host_checks:
-                    check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade)
-                target = flash(link, image)
+                if new_info is not None:
+                    check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade,
+                                   args.allow_unsupported_protocol)
+                target = flash(link, image, bypass, key)
             except UpdateError as e:
                 print("\nError:", e)
                 print("The running firmware is untouched. The board leaves updater mode after 90 s idle.")
                 return 1
             started = time.monotonic()
             link.close()
+            if bypass & BYPASS_NO_TRIAL:
+                print(f"Waiting for {args.port} to come back...")
+                try:
+                    wait_for_port(args.port, gone_first=True, timeout=20.0)
+                except TimeoutError as e:
+                    print(e)
+                    return 1
+                print("Done: the image is permanent (no trial). If it has no working DFC updater, "
+                      "only USB BOOTSEL can replace it.")
+                return 0
             if args.no_confirm:
                 print("--no-confirm: not confirming. The board returns to the previous firmware "
                       f"about {TRIAL_WINDOW_S:.0f} s after the trial boot.")
                 return 0
             print(f"Waiting for the new image's updater on {args.port}...")
             try:
-                ok = confirm(args.port, target, new_info, started)
+                ok = confirm(args.port, target, new_info, started, args.allow_unsupported_protocol)
             except (TimeoutError, UpdateError) as e:
                 print(e)
                 ok = False

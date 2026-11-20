@@ -52,6 +52,13 @@ typedef enum {
  * the unit unreachable). Checked on the board at FINISH. */
 #define UPDATER_PROTOCOL_FLOOR 1u
 
+/* Key the host must send in BEGIN to install an image WITHOUT a trial boot
+ * (UPD_BEGIN_NO_TRIAL): the image becomes permanent as soon as it boots, with
+ * no confirm and no automatic fallback. tools/dfc_update.py makes the user
+ * type it. Only for deliberately installing firmware that has no DFC
+ * updater (or must not be trial-booted). */
+#define UPDATER_NO_TRIAL_KEY 0xDFCBADA55B007ED0ull /* "DFC BADASS BOOTED" */
+
 /* Idle timeout: with no valid command from the host for this long, the
  * updater reboots into the current firmware. */
 #ifndef UPDATER_IDLE_TIMEOUT_S

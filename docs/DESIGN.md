@@ -551,6 +551,26 @@ do not arm their own watchdog while a buy is pending
 to the BOOTSEL drive is not patched, so bench flashing is permanent as
 before.
 
+**Deliberate bypasses (`dfc_update.py flash`).** Each one prints a
+warning and needs a typed `yes` (or `--yes`). The board-side ones travel as
+BEGIN flags, and the BEGIN reply echoes the flags the board accepted. The
+script stops if the echo does not match what it asked for. Old scripts
+send no flags, so they always get full protection.
+
+| Flag | Skips | Where |
+|---|---|---|
+| `--allow-no-info` | info block required | script; board (BEGIN bit 0) |
+| `--allow-unsupported-protocol` | protocol must be one the script supports (also at confirm) | script |
+| `--allow-below-floor` | protocol floor | board (BEGIN bit 1) |
+| `--allow-older-updater` | updater not older than the running one | script |
+| `--allow-downgrade` | firmware not older than the running one | script |
+| `--no-trial` | trial boot, confirm and fallback (layers 2 and 3): permanent as soon as it boots | board (BEGIN bit 2) |
+
+`--no-trial` also needs `UPDATER_NO_TRIAL_KEY` (64 bits, `updater.h`). The
+script shows it and the user types it back (or passes `--no-trial-key`). The
+board checks every bit before it writes a permanent image. It is for
+deliberately installing firmware that has no DFC updater.
+
 **Layers of protection against a bad image,** in order:
 1. The info block and protocol checks (4b) refuse images that the tools
    could not update again.
