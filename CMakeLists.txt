@@ -114,6 +114,17 @@ endif()
 target_compile_definitions(firmware PRIVATE
     DFC_FW_MAJOR=${DFC_FW_MAJOR} DFC_FW_MINOR=${DFC_FW_MINOR} DFC_FW_PATCH=${DFC_FW_PATCH})
 
+# TEST ONLY: an image whose updater never runs (it ignores the boot flag),
+# to check that an unconfirmed trial falls back to the previous firmware.
+# Never ship one: it cannot be updated again except over USB BOOTSEL.
+option(DFC_TEST_NO_UPDATER "TEST ONLY: build an image whose updater never runs" OFF)
+if(DFC_TEST_NO_UPDATER)
+    message(WARNING "DFC_TEST_NO_UPDATER: this image's updater is disabled (fallback test only)")
+    target_compile_definitions(firmware PRIVATE DFC_TEST_NO_UPDATER=1)
+else()
+    target_compile_definitions(firmware PRIVATE DFC_TEST_NO_UPDATER=0)
+endif()
+
 if(APP_TEST_PINS)
     target_compile_definitions(firmware PRIVATE APP_TEST_PINS=1)
 else()

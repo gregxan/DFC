@@ -125,7 +125,10 @@ bool updater_request(updater_link_t link, uint64_t key) {
 
 static void __attribute__((noreturn)) updater_run(updater_link_t link);
 
+static void keep_info(void);
+
 void updater_check_boot(void) {
+    keep_info();
     uint32_t lo = powman_hw->scratch[FLAG_KEY_LO];
     uint32_t hi = powman_hw->scratch[FLAG_KEY_HI];
     uint32_t link = powman_hw->scratch[FLAG_LINK];
@@ -135,9 +138,21 @@ void updater_check_boot(void) {
     for (unsigned i = 0; i < 4u; i++) {
         powman_hw->scratch[i] = 0u;
     }
+#if DFC_TEST_NO_UPDATER
+    /* TEST BUILD ONLY (CMake -DDFC_TEST_NO_UPDATER=ON): behave like an image
+     * whose updater is broken. The flag is ignored, so after an update this
+     * image boots on trial into the application, is never confirmed, and the
+     * bootrom's watchdog must bring the previous firmware back. */
+    (void)lo;
+    (void)hi;
+    (void)link;
+    (void)chk;
+    (void)updater_run; /* kept, so the image is otherwise identical */
+#else
     if (lo == BOOT_KEY_LO && hi == BOOT_KEY_HI && chk == flag_check(lo, hi, link) && link_ok(link)) {
         updater_run((updater_link_t)link);
     }
+#endif
 }
 
 /* ------------------------------------------------------ image info block -- */
@@ -190,6 +205,12 @@ static const upd_info_t g_updater_info __attribute__((aligned(32), used)) = {
     {0u, 0u},
     ~(INFO_MAGIC_LO ^ INFO_MAGIC_HI ^ INFO_W2 ^ INFO_W3 ^ INFO_W4),
 };
+
+/* Keep the updater info block in every image, whatever else the linker
+ * drops: the board and the host tool refuse images without it. */
+static void keep_info(void) {
+    __asm volatile("" : : "r"(&g_updater_info));
+}
 
 static uint32_t rd32(const uint8_t *p) {
     return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
