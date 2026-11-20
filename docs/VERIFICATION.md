@@ -110,8 +110,23 @@ echo, swap the two signal wires (crossed TX/RX does no harm). Wire colours
 vary between cables. On the bench (Rev 2.25), the FTDI cable worked with the
 opposite colours to FTDI's TTL-232R convention, so go by the echo.
 
-Bench result (Rev 2.25, `57b546f`): `--uart --enter` over an FTDI cable on
-UART0 gives HELLO `on UART0`.
+Bench results (Rev 2.25, `57b546f`, FTDI cable on UART0, 81,664-byte image):
+
+| Check | Result |
+|---|---|
+| `--uart --enter`: HELLO `on UART0` | Pass |
+| Full update at 4096-byte frames: trial boot, confirmed 0.6 s after it | Pass, 20 frames in 1.9 s (~43 kB/s) |
+| `--block-size 1024` | Pass, 80 frames in 2.2 s |
+| `--block-size 64` | Pass, 1276 frames in 21.0 s |
+| `--no-confirm`: back on the previous slot after ~17 s | Pass |
+| UART1 | Not run (back pads not wired) |
+
+Each frame cost about 16 ms on top of wire and flash time: the FTDI driver's
+default 16 ms latency timer holds the board's short replies. Setting it to
+1 ms (Device Manager → the port → Port Settings → Advanced → Latency Timer)
+should bring 64-byte frames to a few seconds. On a deployed system, the
+pass-through device's per-reply delay plays the same part. The time is about
+frames × (wire time + ~50 ms flash per 4 KB + delay per reply).
 
 1. `py tools\dfc_update.py COMx --uart --enter`. **Pass:** HELLO shows
    `on UART0`.
