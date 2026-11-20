@@ -551,6 +551,19 @@ do not arm their own watchdog while a buy is pending
 to the BOOTSEL drive is not patched, so bench flashing is permanent as
 before.
 
+**Layers of protection against a bad image,** in order:
+1. The info block and protocol checks (4b) refuse images that the tools
+   could not update again.
+2. The confirm must come from the new image's own updater.
+3. Automatic fallback: an unconfirmed trial falls back when the 16.7 s
+   watchdog fires.
+
+Layer 3 holds only if nothing feeds the watchdog during the trial. The
+diag build follows this (bench fix, `f804588`). A user application with its
+own watchdog should not arm or feed it while `updater_trial_pending()` is
+true. If it does, an unconfirmed image stays up until a reset, and the
+reset still brings the old image back.
+
 ## 5. Resources (R-1 … R-3)
 
 | Resource | Use |
