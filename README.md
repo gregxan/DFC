@@ -316,6 +316,14 @@ UART-related interrupt (B-20).
   setting lasts until the next reset. To change the start-up rate, including
   in release builds, set `MAG_RATE_DEFAULT_HZ` (see `src/config.h`), or set
   `g_mag_rate_hz` from the application.
+- **Firmware updater (in progress, Rev 2.25).** Type `!` and the board
+  reboots into its updater on this USB port. The COM port closes and comes
+  back. The updater blinks the LED fast and waits 90 s for
+  `tools\dfc_update.py`, then boots the firmware again. So far it only answers
+  `hello` and `reboot`; flashing a `.uf2` comes later:
+  ```bash
+  py tools\dfc_update.py COM13 --enter
+  ```
 - **Hang and crash capture.** In diagnostic builds the yellow LED blinks
   while the firmware runs. If it ever stops for 2 s, a watchdog resets the
   board, and the report's **Last reset** line says where it was stuck, or

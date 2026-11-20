@@ -79,7 +79,12 @@ static void link0_handler(void) {
         if (n == 0u) {
             break;
         }
-        /* TODO: parse / process LINK_0 data here */
+        /* TODO: parse / process LINK_0 data here.
+         * Firmware update (Rev 2.25): when the protocol receives its own
+         * "enter updater" message with the right magic key, call
+         *     updater_request(UPDATER_LINK_UART0, UPDATER_REQUEST_KEY);
+         * (updater.h). It reboots into the updater on this link and does
+         * not return; a wrong key returns false and changes nothing. */
         (void)link_write(LINK_1, s_link0_buf, n);
         avail -= n;
     }

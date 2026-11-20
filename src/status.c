@@ -20,6 +20,7 @@
 #include "diag.h"
 #include "link.h"
 #include "mag.h"
+#include "updater.h"
 #include "wirecheck.h"
 
 #include "prof.h"
@@ -49,7 +50,8 @@ void app_mag_noise_take(uint32_t *count, uint32_t rms_ug[3]); /* D-10 */
  * Send 'm' over the same USB port for machine lines, 'h' for readable. The
  * switch takes effect at the next report. '~' reboots into the USB
  * bootloader for reflashing (Rev 2.20). 'r' steps the magnetometer rate
- * 1000 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). */
+ * 1000 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). '!' reboots into the
+ * firmware updater on this USB port (Rev 2.25, updater.h). */
 static bool s_human = true;
 static bool s_want_human = true;
 
@@ -630,7 +632,7 @@ static int format_human(unsigned line) {
         static const char *const mode[] = {"echo test", "pattern test", "user application"};
         return snprintf(s_buf, n,
                         "\r\n===== DFC status #%" PRIu32 " | up %02" PRIu32 ":%02" PRIu32 ":%02" PRIu32
-                        " | %s =====\r\n(type 'm' machine format, 'h' readable, 'r' mag rate, '~' reflash)\r\n",
+                        " | %s =====\r\n(keys: m machine, h readable, r mag rate, ~ reflash, ! updater)\r\n",
                         s_seq, tm / 3600u, (tm / 60u) % 60u, tm % 60u, mode[APP_MODE]);
     }
     case H_BAUD:
@@ -1015,9 +1017,17 @@ static unsigned line_count(void) {
  * for reflashing, after a short delay so the notice reaches the terminal. */
 #define BOOTSEL_DELAY_US 100000u
 static uint64_t s_bootsel_at; /* 0 = not requested */
+static uint64_t s_updater_at; /* Rev 2.25: '!' pending, 0 = not requested */
 
 void status_poll(void) {
     crash_feed(); /* D-9: watchdog, heartbeat LED */
+    if (s_updater_at != 0u) {
+        if ((int64_t)(time_us_64() - s_updater_at) >= 0) {
+            (void)updater_request(UPDATER_LINK_USB, UPDATER_REQUEST_KEY); /* does not return */
+            s_updater_at = 0u;
+        }
+        return;
+    }
     if (s_bootsel_at != 0u) {
         if ((int64_t)(time_us_64() - s_bootsel_at) >= 0) {
             reset_usb_boot(0u, 0u); /* does not return */
@@ -1034,6 +1044,15 @@ void status_poll(void) {
         s_want_human = false;
     } else if (ch == 'h' || ch == 'H') {
         s_want_human = true;
+    } else if (ch == '!') {
+        static const char k_msg[] = "\r\n\r\n*** '!' received: rebooting into the firmware updater on this USB port. "
+                                    "The COM port closes and comes back; the updater waits 90 s for "
+                                    "tools/dfc_update.py, then boots the firmware again. ***\r\n";
+        if (tud_cdc_write_available() >= sizeof k_msg - 1u) {
+            stdio_put_string(k_msg, (int)(sizeof k_msg - 1u), false, false);
+        }
+        s_updater_at = time_us_64() + BOOTSEL_DELAY_US;
+        return;
     } else if (ch == 'r' || ch == 'R') {
         /* M-3b (Rev 2.25): next rate; shown from the next report. */
         g_mag_rate_hz = mag_rate_next(g_mag_rate_hz);

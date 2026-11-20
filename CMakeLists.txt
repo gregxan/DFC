@@ -52,6 +52,7 @@ set(APP_SOURCES
     src/status.c
     src/wirecheck.c
     src/crash.c
+    src/updater.c
 )
 if(APP_MODE STREQUAL "user")
     list(APPEND APP_SOURCES src/app_user.c)

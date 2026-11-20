@@ -35,6 +35,7 @@
 #include "prof.h"
 #include "status.h"
 #include "tick.h"
+#include "updater.h"
 
 volatile bool g_app_baud_ok; /* U-2 result of link_init(); reported by status.c */
 
@@ -123,6 +124,9 @@ static void __attribute__((noreturn)) run_free(void) {
 #endif
 
 int main(void) {
+    /* Rev 2.25: first of all. Runs the updater (and does not return) if
+     * updater_request() left a valid boot flag; always clears the flag. */
+    updater_check_boot();
 #if APP_USB_STATUS
     crash_capture(); /* D-9: what the last reset left, before anything else */
     status_init(); /* USB CDC; priority lowered below all UART interrupts (B-20) */
