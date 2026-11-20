@@ -398,7 +398,7 @@ static int format_human(unsigned line) {
         for (unsigned s = 0; s < 2u; s++) {
             unsigned k = w->n_found[s] < WIRE_MAX_FOUND ? w->n_found[s] : WIRE_MAX_FOUND;
             int m = snprintf(f[s], sizeof f[s], k ? "" : "none");
-            for (unsigned j = 0; j < k && m > 0 && (unsigned)m < sizeof f[s]; j++) {
+            for (unsigned j = 0; j < k && m >= 0 && (unsigned)m < sizeof f[s]; j++) {
                 m += snprintf(f[s] + m, sizeof f[s] - (unsigned)m, "%s0x%02X", j ? " " : "", (unsigned)w->found[s][j]);
             }
         }
