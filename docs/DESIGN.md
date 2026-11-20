@@ -539,6 +539,35 @@ At 921600 baud, a 4096-byte frame is a ~45 ms burst and a 1024-byte frame
 at least one frame. Stop-and-wait means nothing arrives while the board
 writes flash. A frame stalled for 500 ms mid-way is dropped.
 
+## 4b3. Ports and entry over the UARTs (Rev 2.25, updater step 6)
+
+- **Ports.** The updater opens UART0 and UART1 (polled, 921600 8N1, RX
+  pull-ups, independent of `link.c` and its DMA), plus the USB console in
+  diag builds. Each port has its own frame parser. Before a port is chosen,
+  frames may carry at most 32 payload bytes (HELLO, BEGIN, CONFIRM, REBOOT),
+  so each parser needs only a small buffer. The first port to deliver a
+  valid frame is chosen; from then on only it is served, and HELLO reports
+  it. Plain-text status lines go only to USB, never onto a UART.
+- **Why polling is enough.** The protocol is stop-and-wait, so nothing
+  arrives while the updater writes flash or replies. A byte with a framing
+  error, break or overrun is dropped, and the frame CRC catches it.
+- **Entry.** `updater_trigger_scan()` recognises the generic trigger
+  message: `DFC!UPDT` followed by the 64-bit request key, little-endian,
+  16 bytes. It keeps a 16-byte window across calls and returns the key it
+  carried. The caller passes that key to `updater_request()`, which checks
+  it. The test applications scan both UARTs. `app_user.c` shows the call,
+  commented out. An application with its own protocol can carry the key in
+  its own message instead.
+- **Host.** `dfc_update.py --uart` uses the port at `--baud`. `--enter`
+  sends the trigger. A UART does not disappear on a reboot, so the script
+  waits a second and retries HELLO. It skips request frames, so its own
+  frames echoed by an echoing application are ignored. Reply reads take
+  what has arrived, with no fixed-size wait (a 100 ms-per-frame cost
+  before).
+- **REBOOT reply code.** The REBOOT reply is 0xFF (0x7F | 0x80), the same
+  code as an error. It is told apart by its empty payload; error replies
+  always carry a code byte.
+
 ## 4c. Trial boot and confirm (Rev 2.25, updater step 5)
 
 1. At FINISH the updater sets the try-before-you-buy (TBYB) bit in the image

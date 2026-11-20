@@ -25,6 +25,7 @@
 #include "config.h"
 #include "link.h"
 #include "mag.h"
+#include "updater.h"
 
 #if APP_MODE == APP_MODE_USER
 #error "app_test.c is built only for APP_MODE echo or pattern"
@@ -86,6 +87,19 @@ static void test_pins_init(void) {}
 #endif
 
 static uint8_t s_buf[256];
+
+/* Rev 2.25: the generic updater trigger ("DFC!UPDT" + request key, see
+ * updater.h) on either UART reboots into the updater on that link. */
+static updater_trigger_t s_trigger[LINK_COUNT];
+_Static_assert((int)LINK_0 == (int)UPDATER_LINK_UART0 && (int)LINK_1 == (int)UPDATER_LINK_UART1,
+               "link and updater link numbers must match");
+
+static void check_trigger(unsigned i, const uint8_t *p, size_t n) {
+    uint64_t key;
+    if (updater_trigger_scan(&s_trigger[i], p, n, &key)) {
+        (void)updater_request((updater_link_t)i, key); /* no return if the key is right */
+    }
+}
 
 #if APP_MODE == APP_MODE_PATTERN
 static uint8_t s_tx_next[LINK_COUNT];
@@ -177,6 +191,9 @@ void app_poll(void) {
     for (unsigned i = 0; i < LINK_COUNT; i++) {
         link_id_t id = (link_id_t)i;
         size_t n = link_read(id, s_buf, sizeof s_buf);
+        if (n != 0u) {
+            check_trigger(i, s_buf, n);
+        }
 #if APP_MODE == APP_MODE_PATTERN
         if (n != 0u) {
             TEST_TOGGLE(k_rx_seen_mask[i]);

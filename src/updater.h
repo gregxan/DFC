@@ -28,6 +28,7 @@
 #define UPDATER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 typedef enum {
@@ -70,6 +71,25 @@ typedef enum {
  * builds). Otherwise it reboots into the updater and does not return. Call
  * from the main loop. */
 bool updater_request(updater_link_t link, uint64_t key);
+
+/* Optional helper for applications: the generic trigger message.
+ *
+ *     "DFC!UPDT" (8 ASCII bytes) followed by the 64-bit request key,
+ *     little-endian (16 bytes in all)
+ *
+ * Feed it every received byte of a link, in order (any chunking). When the
+ * message has passed by it returns true with the key it carried. The caller
+ * then calls updater_request(link, key), which checks the key, so a wrong
+ * one changes nothing. The test applications (app_test.c) use it.
+ * tools/dfc_update.py sends it with --enter on a UART. An application with
+ * its own protocol can use its own message instead. */
+#define UPDATER_TRIGGER_PREFIX "DFC!UPDT"
+typedef struct {
+    uint8_t win[16];
+    uint8_t n;
+} updater_trigger_t;
+
+bool updater_trigger_scan(updater_trigger_t *t, const uint8_t *p, size_t n, uint64_t *key);
 
 /* Rejected updater_request() calls since boot (diagnostics). */
 uint32_t updater_rejects(void);

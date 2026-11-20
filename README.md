@@ -347,7 +347,18 @@ UART-related interrupt (B-20).
   the image that was sent), the board goes back to the previous firmware by
   itself within about 17 s. `--no-confirm` skips the confirm, to watch the
   fallback happen. A `.uf2` copied to the BOOTSEL drive is not on trial.
-  Not yet: updates over UART0/UART1.
+- **Updating over UART0 or UART1** (how a deployed unit is updated): connect
+  a 3.3 V USB-serial adapter (or the pass-through device) to the link, then:
+  ```bash
+  py tools\dfc_update.py COM20 --uart --enter flash build\release\firmware.uf2
+  ```
+  `--enter` sends the trigger message (`DFC!UPDT` + the request key). The test
+  builds react to it, and the user application must have its own entry (see
+  `app_user.c`). The updater listens on UART0, UART1 and, in diag builds,
+  USB, and serves whichever port speaks first. `--baud` (default 921600)
+  must match the link. `--block-size` shortens bursts for a pass-through
+  device. `tools/sim_board.py` simulates a board over a pty, for testing the
+  script on Linux.
 - **Hang and crash capture.** In diagnostic builds the yellow LED blinks
   while the firmware runs. If it ever stops for 2 s, a watchdog resets the
   board, and the report's **Last reset** line says where it was stuck, or

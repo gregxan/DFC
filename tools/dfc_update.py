@@ -60,6 +60,10 @@ ERRORS = {
 BYPASS_NO_INFO = 0x1
 BYPASS_BELOW_FLOOR = 0x2
 BYPASS_NO_TRIAL = 0x4
+# src/updater.h UPDATER_REQUEST_KEY and the generic trigger message
+# (updater_trigger_scan): --enter on a UART sends TRIGGER_PREFIX + key.
+REQUEST_KEY = 0xDFCC0DEB007ED00D
+TRIGGER_PREFIX = b"DFC!UPDT"
 # src/updater.h UPDATER_NO_TRIAL_KEY. --no-trial makes the user type it.
 NO_TRIAL_KEY = 0xDFCBADA55B007ED0
 
@@ -148,15 +152,28 @@ def frame(cmd: int, payload: bytes = b"") -> bytes:
 
 
 class Link:
-    def __init__(self, port: str):
+    def __init__(self, port: str, baud: int = 115200):
         self.port = port
+        self.baud = baud
         self.ser = self._open()
         self.text = b""
 
     def _open(self) -> serial.Serial:
-        s = serial.Serial(self.port, 115200, timeout=0.1)
-        s.dtr = True  # the board only talks to an open, DTR-asserted port
+        # USB: the baud rate is ignored, and the board only talks to a port
+        # opened with DTR asserted. UART: baud must match the links (U-1).
+        s = serial.Serial(self.port, self.baud, timeout=0.1)
+        try:
+            s.dtr = True
+        except (OSError, serial.SerialException):
+            pass  # ports without modem lines (some adapters, ptys)
         return s
+
+    def drain(self) -> None:
+        """Discard pending input (e.g. bytes echoed by the application)."""
+        try:
+            self.ser.reset_input_buffer()
+        except serial.SerialException:
+            pass
 
     def close(self) -> None:
         try:
@@ -173,7 +190,10 @@ class Link:
         buf = b""
         end = time.monotonic() + timeout
         while time.monotonic() < end:
-            buf += self.ser.read(4096)
+            # Read what has arrived (at least 1 byte, waiting up to the port
+            # timeout): asking for a fixed count would wait out the timeout
+            # on every reply, 0.1 s per frame.
+            buf += self.ser.read(max(1, self.ser.in_waiting))
             i = buf.find(SOF)
             if i < 0:
                 self._show_text(buf[:-1] if buf.endswith(SOF[:1]) else buf)
@@ -190,6 +210,11 @@ class Link:
             (crc,) = struct.unpack_from("<I", buf, 5 + n)
             if zlib.crc32(body) & 0xFFFFFFFF != crc:
                 buf = buf[2:]  # not a real frame start: keep looking
+                continue
+            if not cmd & 0x80:
+                # A request, not a reply: our own frame echoed back by an
+                # application that echoes (e.g. the echo test build). Skip it.
+                buf = buf[5 + n + 4:]
                 continue
             return cmd, buf[5:5 + n]
         raise TimeoutError("no reply from the board (is it in updater mode?)")
@@ -364,29 +389,81 @@ def flash(link: Link, image: bytes, bypass: int = 0, key: int = 0, block: int = 
     return target
 
 
-def confirm(port: str, target: int, new: Info | None, started: float, allow_unsupported: bool = False) -> bool:
+class Board:
+    """How to reach the board: the diag USB console, or a UART (a USB-serial
+    adapter, or a pass-through device) at the links' baud rate."""
+
+    def __init__(self, port: str, uart: bool, baud: int):
+        self.port = port
+        self.uart = uart
+        self.baud = baud
+
+    def open(self) -> Link:
+        return Link(self.port, self.baud if self.uart else 115200)
+
+    def wait_reboot(self, timeout: float = 20.0) -> None:
+        """Wait out a board reboot. Over USB the COM port disappears and comes
+        back. Over a UART nothing disappears, so just give it time to boot."""
+        if self.uart:
+            time.sleep(1.0)
+        else:
+            wait_for_port(self.port, gone_first=True, timeout=timeout)
+
+    def enter(self) -> None:
+        """Reboot the running firmware into updater mode."""
+        link = self.open()
+        try:
+            if self.uart:
+                link.send(TRIGGER_PREFIX + struct.pack("<Q", REQUEST_KEY))
+                what = "the updater trigger message"
+            else:
+                link.send(b"!")
+                what = "'!'"
+            time.sleep(0.2)
+        finally:
+            link.close()
+        print(f"Sent {what}: waiting for the board to come back in updater mode...")
+        self.wait_reboot(timeout=15.0)
+
+    def hello(self, link: Link | None, deadline: float, quiet: bool = False) -> tuple[Link, bytes]:
+        """HELLO, retried until the updater answers or the deadline passes.
+        Reopens the port as needed (USB re-enumeration). Returns the open link
+        and the HELLO payload."""
+        while True:
+            try:
+                if link is None:
+                    link = self.open()
+                link.drain()
+                link.send(frame(CMD_HELLO))
+                return link, expect(link, CMD_HELLO, "HELLO", timeout=1.0)
+            except (serial.SerialException, TimeoutError, OSError):
+                if link is not None and not self.uart:
+                    link.close()
+                    link = None
+                if time.monotonic() > deadline:
+                    if link is not None:
+                        link.close()
+                    raise TimeoutError("the board's updater did not answer"
+                                       + ("" if quiet else " (is it in updater mode? use --enter)"))
+                time.sleep(0.3)
+
+
+def confirm(board: Board, target: int, new: Info | None, started: float, allow_unsupported: bool = False) -> bool:
     """The new image boots on trial into its own updater. Check it is the
     image just sent, then CONFIRM before the bootrom's trial watchdog fires.
     Returns False (and does not confirm) if anything is off: the board then
     falls back to the previous firmware by itself."""
-    wait_for_port(port, gone_first=True, timeout=TRIAL_WINDOW_S)
+    if not board.uart:
+        wait_for_port(board.port, gone_first=True, timeout=TRIAL_WINDOW_S)
+    else:
+        time.sleep(0.5)
     deadline = started + TRIAL_WINDOW_S - 2.0  # margin for CONFIRM itself
-    link = None
     try:
-        while True:
-            try:
-                link = Link(port)
-                link.send(frame(CMD_HELLO))
-                p = expect(link, CMD_HELLO, "HELLO (new image)", timeout=1.5)
-                break
-            except (serial.SerialException, TimeoutError):
-                if link:
-                    link.close()
-                link = None
-                if time.monotonic() > deadline:
-                    print("The new image's updater did not answer in time.")
-                    return False
-                time.sleep(0.3)
+        link, p = board.hello(None, deadline, quiet=True)
+    except TimeoutError:
+        print("The new image's updater did not answer in time.")
+        return False
+    try:
         running = show_hello(p)
         problems = []
         if p[2] != target:
@@ -411,15 +488,21 @@ def confirm(port: str, target: int, new: Info | None, started: float, allow_unsu
         print(f"Confirmed {time.monotonic() - started:.1f} s after the trial boot: the new firmware is permanent.")
         return True
     finally:
-        if link:
-            link.close()
+        link.close()
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("port", help="COM port of the board, e.g. COM13")
+    ap.add_argument("port", help="serial port of the board: the diag USB console (e.g. COM13), or with --uart "
+                                 "a USB-serial adapter or pass-through device on UART0/UART1")
     ap.add_argument("command", nargs="?", default="hello", choices=("hello", "flash", "reboot"))
     ap.add_argument("file", nargs="?", help="flash: the .uf2 to write (e.g. build\\diag\\firmware.uf2)")
+    ap.add_argument("--uart", action="store_true",
+                    help="the port is a UART link (UART0 or UART1), not the diag USB console")
+    ap.add_argument("--baud", type=int, default=921600, help="--uart: baud rate (default 921600, the links' rate)")
+    ap.add_argument("--enter", action="store_true",
+                    help="first reboot the running firmware into updater mode: '!' on the USB console, or "
+                         "with --uart the trigger message (\"DFC!UPDT\" + request key)")
     ap.add_argument("--allow-downgrade", action="store_true",
                     help="flash: allow an older firmware version than the one running")
     ap.add_argument("--allow-older-updater", action="store_true",
@@ -444,10 +527,12 @@ def main() -> int:
     g.add_argument("--yes", action="store_true", help="do not ask for 'yes' (the warnings still print)")
     ap.add_argument("--no-confirm", action="store_true",
                     help="flash: write and trial-boot the image but do not confirm it (tests the fallback)")
-    ap.add_argument("--enter", action="store_true",
-                    help="first send '!' on the diag USB console to reboot into updater mode")
     args = ap.parse_args()
+    board = Board(args.port, args.uart, args.baud)
+
     image = b""
+    new_info = None
+    bypass = key = 0
     if args.command == "flash":
         if not args.file:
             ap.error("flash needs a .uf2 file")
@@ -472,86 +557,76 @@ def main() -> int:
             print("Error:", e)
             return 1
 
-    if args.enter:
-        link = Link(args.port)
-        link.send(b"!")
-        time.sleep(0.2)
-        link.close()
-        print(f"Sent '!': waiting for {args.port} to come back in updater mode...")
-        wait_for_port(args.port, gone_first=True)
-
-    link = Link(args.port)
     try:
-        if args.command == "flash":
-            try:
-                link.send(frame(CMD_HELLO))
-                hello = expect(link, CMD_HELLO, "HELLO")
-                running = show_hello(hello)
-                lo, hi = block_limits(hello)
-                b = args.block_size
-                if b & (b - 1) or not lo <= b <= hi:
-                    raise UpdateError(f"--block-size {b}: this board accepts powers of two from {lo} to {hi}")
-                if new_info is not None:
-                    check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade,
-                                   args.allow_unsupported_protocol)
-                target = flash(link, image, bypass, key, args.block_size)
-            except UpdateError as e:
-                print("\nError:", e)
-                print("The running firmware is untouched. The board leaves updater mode after 90 s idle.")
-                return 1
-            started = time.monotonic()
-            link.close()
-            if bypass & BYPASS_NO_TRIAL:
-                print(f"Waiting for {args.port} to come back...")
-                try:
-                    wait_for_port(args.port, gone_first=True, timeout=20.0)
-                except TimeoutError as e:
-                    print(e)
-                    return 1
-                print("Done: the image is permanent (no trial). If it has no working DFC updater, "
-                      "only USB BOOTSEL can replace it.")
-                return 0
-            if args.no_confirm:
-                print("--no-confirm: not confirming. The board returns to the previous firmware "
-                      f"about {TRIAL_WINDOW_S:.0f} s after the trial boot.")
-                return 0
-            print(f"Waiting for the new image's updater on {args.port}...")
-            try:
-                ok = confirm(args.port, target, new_info, started, args.allow_unsupported_protocol)
-            except (TimeoutError, UpdateError) as e:
-                print(e)
-                ok = False
-            if not ok:
-                print(f"The board returns to the previous firmware within about {TRIAL_WINDOW_S:.0f} s.")
-                return 1
-            print(f"Waiting for {args.port} to come back in the application...")
-            try:
-                wait_for_port(args.port, gone_first=True, timeout=20.0)
-                print("Done. The Firmware line shows the new slot and build time.")
-            except TimeoutError as e:
-                print(e)
-                return 1
-        elif args.command == "hello":
-            link.send(frame(CMD_HELLO))
-            cmd, payload = link.reply()
-            if cmd == RSP_ERROR:
-                print("Error:", ERRORS.get(payload[0], payload[0]))
-                return 1
-            if cmd != CMD_HELLO | 0x80:
-                print(f"Unexpected reply 0x{cmd:02X}")
-                return 1
-            show_hello(payload)
-        else:
+        if args.enter:
+            board.enter()
+        link, hello = board.hello(None, time.monotonic() + (10.0 if args.enter else 3.0))
+    except (TimeoutError, UpdateError, serial.SerialException, OSError) as e:
+        print("Error:", e)
+        return 1
+
+    try:
+        if args.command == "hello":
+            show_hello(hello)
+            return 0
+        if args.command == "reboot":
             link.send(frame(CMD_REBOOT))
             try:
                 cmd, _ = link.reply()
-            except serial.SerialException:
-                # The board rebooted and Windows removed the port before the
-                # reply was read: the command worked.
+            except (serial.SerialException, TimeoutError):
+                # Over USB the port can vanish before the reply is read: the
+                # command worked.
                 cmd = CMD_REBOOT | 0x80
             print("Rebooting into the firmware." if cmd == CMD_REBOOT | 0x80 else f"Unexpected reply 0x{cmd:02X}")
+            return 0
+
+        # flash
+        try:
+            running = show_hello(hello)
+            lo, hi = block_limits(hello)
+            b = args.block_size
+            if b & (b - 1) or not lo <= b <= hi:
+                raise UpdateError(f"--block-size {b}: this board accepts powers of two from {lo} to {hi}")
+            if new_info is not None:
+                check_versions(new_info, running, args.allow_older_updater, args.allow_downgrade,
+                               args.allow_unsupported_protocol)
+            target = flash(link, image, bypass, key, args.block_size)
+        except UpdateError as e:
+            print("\nError:", e)
+            print("The running firmware is untouched. The board leaves updater mode after 90 s idle.")
+            return 1
     finally:
         link.close()
+
+    started = time.monotonic()
+    if bypass & BYPASS_NO_TRIAL:
+        try:
+            board.wait_reboot()
+        except TimeoutError as e:
+            print(e)
+            return 1
+        print("Done: the image is permanent (no trial). If it has no working DFC updater, "
+              "only USB BOOTSEL can replace it.")
+        return 0
+    if args.no_confirm:
+        print("--no-confirm: not confirming. The board returns to the previous firmware "
+              f"about {TRIAL_WINDOW_S:.0f} s after the trial boot.")
+        return 0
+    print(f"Waiting for the new image's updater on {args.port}...")
+    try:
+        ok = confirm(board, target, new_info, started, args.allow_unsupported_protocol)
+    except (TimeoutError, UpdateError) as e:
+        print(e)
+        ok = False
+    if not ok:
+        print(f"The board returns to the previous firmware within about {TRIAL_WINDOW_S:.0f} s.")
+        return 1
+    try:
+        board.wait_reboot()
+    except TimeoutError as e:
+        print(e)
+        return 1
+    print("Done. The new firmware runs: on the diag console the Firmware line shows the new slot and build time.")
     return 0
 
 

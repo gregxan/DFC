@@ -88,6 +88,28 @@ py -m pip install -r tools/requirements.txt
 4. Note the chip revision shown (A2 needs the E10 block; A3 and later ignore
    it).
 
+## Updater over UART0 / UART1 (Rev 2.25, step 6)
+
+Needs a 3.3 V USB-serial adapter: adapter TX → D7 (UART0 RX), adapter RX →
+D6 (UART0 TX), GND → GND. Use the diag (echo) build, so the USB console can
+still be watched. Remove the D6–D7 loopback jumper.
+
+1. `py tools\dfc_update.py COMx --uart --enter`. **Pass:** HELLO shows
+   `on UART0`.
+2. `py tools\dfc_update.py COMx --uart --enter flash build\diag\firmware.uf2`.
+   **Pass:** trial boot, "Confirmed", and the diag console's Firmware line
+   shows the new slot and build time.
+3. The same with `--block-size 1024`, `256` and `64`. **Pass:** confirmed
+   each time. Record the times.
+4. `--no-confirm`. **Pass:** the previous firmware returns after ~17 s.
+5. With the USB console open during an update: the USB console shows no
+   text, and HELLO over the UART still reports `on UART0`.
+6. UART1 (back pads D12/D11), once wired: repeat 1–2. **Pass:** `on UART1`.
+
+Before testing on the board, the host side can be checked against the
+simulator (Linux): run `tools/sim_board.py` and the same commands, pointed at
+the port it prints.
+
 ## Test setup
 
 - Two USB-UART adapters, 3.3 V logic, capable of 921,600 baud. Connect one
