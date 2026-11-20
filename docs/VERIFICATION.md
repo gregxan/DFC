@@ -40,6 +40,15 @@ section. Procedures not listed there have not been run.
 | Firmware downgrade refused without `--allow-downgrade` | Not run (checked on the PC only) |
 | 90 s idle timeout; power cycle in updater mode boots the firmware | Pass |
 
+**Trial boot and fallback (Rev 2.25, `f804588`).**
+
+| Check | Result |
+|---|---|
+| Image whose updater never runs (`DFC_TEST_NO_UPDATER`): boots on trial, report shows ON TRIAL, script does not confirm | Pass |
+| ...the 16.7 s trial watchdog reboots it and the previous slot (A) comes back | Pass (after `f804588`: the diag reporter had fed the watchdog) |
+| ...a power cycle during the trial brings the previous slot back | Pass |
+| Normal update: confirmed through the new image's updater, permanent after a power cycle | Not yet reported |
+
 All tools run on Windows (V-7). Install the Python dependency once:
 
 ```bash
