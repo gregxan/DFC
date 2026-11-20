@@ -36,12 +36,14 @@ typedef enum {
     MAG_SAMPLE_NOT_READY = 3,   /* read with Meas_M_Done clear: incomplete          */
 } mag_sample_reason_t;
 
-/* M-10. raw, tout and status are filled by one 9-byte DMA read of
- * registers 0x00..0x08 and must stay adjacent (checked in mag.c). */
+/* M-10 (Rev 2.21). status, raw and tout are filled by one DMA read in this
+ * order (Status 0x08 first, then 0x00..0x07) and must stay adjacent
+ * (checked in mag.c). Status comes first because reading the output
+ * registers clears Meas_M_Done on the real part (found at bring-up). */
 typedef struct {
+    uint8_t status;        /* register 0x08, read before the data (bit 0 = Meas_M_Done) */
     uint8_t raw[MMC_SAMPLE_BYTES];
     uint8_t tout;          /* register 0x07; not updated (TM_T unused)         */
-    uint8_t status;        /* register 0x08 at read time (Meas_M_Done = bit 0) */
     bool valid;            /* true exactly when reason == MAG_SAMPLE_OK (M-9)  */
     uint8_t reason;        /* mag_sample_reason_t (Rev 2.11)                   */
     uint32_t seq;          /* index of the tick whose transaction triggered it   */
@@ -107,8 +109,8 @@ typedef struct {
     uint16_t t_fast_us;  /* BW = 800 Hz, each write ended by STOP            */
     uint16_t t_slow_us;  /* BW = 100 Hz (default), each write ended by STOP  */
     uint16_t t_rs_us;    /* BW = 800 Hz written, then TM_M after a repeated START */
-    uint8_t burst_status;  /* Status from a 9-byte burst after a finished measurement */
-    uint8_t direct_status; /* Status read on its own at the same time       */
+    uint8_t burst_status;  /* Status at the end of a 9-byte burst, 2 ms after TM_M */
+    uint8_t direct_status; /* Status read on its own, 2 ms after another TM_M */
 } mag_boot_t;
 
 const mag_boot_t *mag_boot(void);

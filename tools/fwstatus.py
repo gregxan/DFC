@@ -300,7 +300,7 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
         lines.append(f"  start-up  ID 0x{b.get('id', 0):02X}  status 0x{b.get('status', 0):02X}  "
                      f"calibration {'OK' if b.get('cal_ok') else 'failed'}   meas. time 800 Hz {t(b.get('t_fast_us', 0))}"
                      f", 100 Hz {t(b.get('t_slow_us', 0))}, after repeated START {t(b.get('t_rs_us', 0))}"
-                     f", Status burst/direct 0x{b.get('burst_status', 0):02X}/0x{b.get('direct_status', 0):02X}")
+                     f", Status alone/after data 0x{b.get('direct_status', 0):02X}/0x{b.get('burst_status', 0):02X}")
     if not fault:
         for key, label in (("i2c_error", "I2C errors"), ("timeout", "timeouts"), ("missed_tick", "missed ticks")):
             if d("MAG", key):

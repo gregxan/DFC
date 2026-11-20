@@ -6,7 +6,7 @@
  *   - every UART byte received during the previous epoch is in the RX ring
  *     (DMA, U-3..U-5);
  *   - the newest magnetometer sample was published during the previous
- *     epoch (~375-450 us after its tick, M-8) and is complete.
+ *     epoch (~445-515 us after its tick, M-8) and is complete.
  * The whole of app_poll() must finish in < 1 ms (EX-8); main.c measures it
  * (PROF_EPOCH) and counts epochs that run late (DIAG_EPOCH_OVERRUN).
  *

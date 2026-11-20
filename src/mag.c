@@ -98,10 +98,10 @@ static bool s_pulse_now;          /* entering MAG_SR_PULSE: pulse immediately   
 static uint32_t s_cmd[PRE_COUNT][I2C_TX_FIFO_DEPTH] __attribute__((aligned(4)));
 static uint32_t s_cmd_len[PRE_COUNT];
 
-/* The 9-byte DMA read lands in raw[], tout and status in one go. */
-_Static_assert(offsetof(mag_sample_t, tout) == offsetof(mag_sample_t, raw) + MMC_SAMPLE_BYTES &&
-                   offsetof(mag_sample_t, status) == offsetof(mag_sample_t, raw) + MMC_READ_BYTES - 1u,
-               "mag_sample_t: raw, tout, status must be contiguous");
+/* The 9-byte DMA read lands in status, raw[] and tout in one go (Rev 2.21). */
+_Static_assert(offsetof(mag_sample_t, raw) == offsetof(mag_sample_t, status) + 1u &&
+                   offsetof(mag_sample_t, tout) == offsetof(mag_sample_t, raw) + MMC_SAMPLE_BYTES,
+               "mag_sample_t: status, raw, tout must be contiguous");
 _Static_assert(sizeof(mag_sample_t) == 24u, "reason must fit in existing padding");
 
 static uint s_dma_cmd;
@@ -146,9 +146,13 @@ static inline void i2c_irq_unmask(void) {
  * Auto_SR_en is never set), so each write carries only its own bit. */
 static size_t build_cmds(uint32_t *c, unsigned pre) {
     size_t i = 0;
-    c[i++] = MMC_REG_XOUT0; /* START + W(0x00) */
-    for (unsigned k = 0; k < MMC_READ_BYTES; k++) {
-        c[i++] = CMD_READ | (k == 0u ? CMD_RESTART : 0u); /* RESTART + R x9 */
+    /* Rev 2.21: Status first. Reading the output registers clears
+     * Meas_M_Done, so a burst ending at Status always read "not ready". */
+    c[i++] = MMC_REG_STATUS;                 /* START + W(0x08)      */
+    c[i++] = CMD_RESTART | CMD_READ;         /* RESTART + R x1       */
+    c[i++] = CMD_RESTART | MMC_REG_XOUT0;    /* RESTART + W(0x00)    */
+    for (unsigned k = 0; k < MMC_READ_BYTES - 1u; k++) {
+        c[i++] = CMD_READ | (k == 0u ? CMD_RESTART : 0u); /* RESTART + R x8 */
     }
     if (pre != PRE_NONE) {
         c[i++] = CMD_RESTART | MMC_REG_CTRL0;
@@ -327,7 +331,7 @@ static void __not_in_flash_func(mag_start)(uint32_t tick) {
     s_cur_slot = slot;
     s_cur_tick = tick;
     s_cur_pre = pre;
-    start_dma(TXN_SAMPLE, s_cmd[pre], s_cmd_len[pre], s_slots[slot].raw, MMC_READ_BYTES);
+    start_dma(TXN_SAMPLE, s_cmd[pre], s_cmd_len[pre], &s_slots[slot].status, MMC_READ_BYTES);
 }
 
 /* M-2 (Rev 2.7): read the product ID (non-blocking). */
@@ -728,13 +732,15 @@ static bool blocking_measure(int32_t xyz[3]) {
         return false;
     }
     sleep_ms(2); /* 0.5 ms measurement at BW = 11, with margin */
-    if (!burst_read(b)) {
+    /* Rev 2.21: Status before the data (reading the data clears Meas_M_Done). */
+    uint8_t st = 0;
+    if (!reg_read(MMC_REG_STATUS, &st) || !burst_read(b)) {
         return false;
     }
 #if APP_USB_STATUS
-    s_boot.cal_status = b[MMC_READ_BYTES - 1u];
+    s_boot.cal_status = st;
 #endif
-    if (!(b[MMC_READ_BYTES - 1u] & MMC_STATUS_MEAS_M_DONE)) {
+    if (!(st & MMC_STATUS_MEAS_M_DONE)) {
         return false;
     }
     mag_convert(b, xyz);
@@ -817,14 +823,21 @@ static void boot_experiment(void) {
         s_boot.t_slow_us = time_measurement();
     }
     sleep_ms(10);
-    /* 2. 800 Hz, every write ended by STOP: expect ~0.5 ms. Then compare
-     * Status from the burst with Status read on its own. */
+    /* 2. 800 Hz, every write ended by STOP: expect ~0.5 ms. */
     if (reg_write(MMC_REG_CTRL1, MMC_CTRL1_BW_800HZ) && reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
         s_boot.t_fast_us = time_measurement();
+    }
+    /* 2b. Two fresh measurements, 2 ms each: Status read on its own first,
+     * vs Status at the end of a 9-byte burst (data read first). */
+    if (reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+        sleep_ms(2);
+        (void)reg_read(MMC_REG_STATUS, &s_boot.direct_status);
+    }
+    if (reg_write(MMC_REG_CTRL0, (uint8_t)MMC_CTRL0_TM_M)) {
+        sleep_ms(2);
         if (burst_read(b)) {
             s_boot.burst_status = b[MMC_READ_BYTES - 1u];
         }
-        (void)reg_read(MMC_REG_STATUS, &s_boot.direct_status);
     }
     sleep_ms(10);
     /* 3. Back to the default, then 800 Hz written WITHOUT a STOP; the TM_M
@@ -982,7 +995,7 @@ bool mag_init(void) {
     channel_config_set_read_increment(&c, false);
     channel_config_set_write_increment(&c, true);
     channel_config_set_dreq(&c, i2c_get_dreq(MAG_I2C, false));
-    dma_channel_configure(s_dma_data, &c, s_slots[0].raw, &hw->data_cmd, 0, false);
+    dma_channel_configure(s_dma_data, &c, &s_slots[0].status, &hw->data_cmd, 0, false);
 
     s_dma_mask = (1u << s_dma_cmd) | (1u << s_dma_data);
 

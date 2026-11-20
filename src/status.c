@@ -257,8 +257,12 @@ static const char *boot_verdict(const mag_boot_t *bt) {
     if (!fast && slow_ok) {
         return "800 Hz setting not taking effect even with STOP-ended writes";
     }
-    if (fast && (bt->direct_status & MMC_STATUS_MEAS_M_DONE) && !(bt->burst_status & MMC_STATUS_MEAS_M_DONE)) {
-        return "Status reads wrong at the end of the 9-byte burst: measurements are fine, the ready check is not";
+    if ((bt->direct_status & MMC_STATUS_MEAS_M_DONE) && !(bt->burst_status & MMC_STATUS_MEAS_M_DONE)) {
+        /* Expected on the real part (Rev 2.21): handled by reading Status first. */
+        if (!(bt->status & MMC_STATUS_OTP_RD_DONE)) {
+            return "OTP_Rd_Done was clear after the software reset";
+        }
+        return "sensor timing OK (reading the data clears Meas_M_Done, so Status is read first)";
     }
     if (fast && (bt->t_rs_us == MAG_BOOT_NEVER || bt->t_rs_us >= 2000u)) {
         return "writes followed by a repeated START are ignored: the DMA configuration needs a STOP after each write";
@@ -473,10 +477,10 @@ static int format_human(unsigned line) {
     case H_BOOT_TIME: {
         const mag_boot_t *bt = mag_boot();
         return snprintf(s_buf, n, "  Meas. time   800 Hz %s   100 Hz %s   800 Hz set before a repeated START %s"
-                                  "   Status burst/direct 0x%02X/0x%02X\r\n",
+                                  "   Status alone/after data 0x%02X/0x%02X\r\n",
                         ms_text(a, sizeof a, bt->t_fast_us), ms_text(b, sizeof b, bt->t_slow_us),
-                        ms_text(c, sizeof c, bt->t_rs_us), (unsigned)bt->burst_status,
-                        (unsigned)bt->direct_status);
+                        ms_text(c, sizeof c, bt->t_rs_us), (unsigned)bt->direct_status,
+                        (unsigned)bt->burst_status);
     }
     case H_BOOT_VERDICT:
         return snprintf(s_buf, n, "               -> %s\r\n", boot_verdict(mag_boot()));

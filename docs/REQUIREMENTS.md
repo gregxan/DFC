@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.20**. The changes since Revision 2 are listed in sections 11 to 30.
+**Revision 2.21**. The changes since Revision 2 are listed in sections 11 to 31.
 
 ## 1. Scope
 
@@ -133,15 +133,15 @@ Firmware for a Seeed XIAO RP2350 that:
 - **M-6** A hardware timer shall start one magnetometer transaction every 1 ms (1,000 Hz). The timer shall run for the life of the application, even if the magnetometer fault flag is set, because U-8 and U-15a depend on it.
 - **M-6a** The tick period shall be 1,000 µs ± 20 µs, with no cumulative drift (each tick is scheduled from the previous target time, not from the current time). If the next target is already in the past when the timer is re-armed, the schedule shall skip forward on the same grid. Each skipped tick is counted as a tick overrun (D-1), not as a magnetometer missed tick. *(Amended in Rev 2.11.)*
 - **M-7** Each transaction shall run entirely by DMA, using one channel to feed I2C command words and one to receive data. It consists of: *(Amended in Rev 2.8.)*
-  - Reading 9 bytes from register 0x00: the 7 field bytes of the measurement triggered by the previous transaction, Tout (0x07, unused), and Status (0x08).
+  - Reading Status (0x08), then 8 bytes from register 0x00: the 7 field bytes of the measurement triggered by the previous transaction and Tout (0x07, unused). Status is read first because, on the real part, reading the output registers clears Meas_M_Done (found at bring-up, Rev 2.21; the datasheet says the bit stays set until the next measurement). *(Amended in Rev 2.21.)*
   - Optionally, a SET or RESET write to register 0x09 (M-4).
   - Writing TM_M to register 0x09 to trigger the next measurement.
 
   The segments are joined by repeated STARTs, with a single STOP at the end:
-  `START W(0x00) · RESTART R×9 · [RESTART W(0x09, SET|RESET)] · RESTART W(0x09, TM_M) · STOP`.
+  `START W(0x08) · RESTART R×1 · RESTART W(0x00) · RESTART R×8 · [RESTART W(0x09, SET|RESET)] · RESTART W(0x09, TM_M) · STOP`. *(Rev 2.21.)*
   The datasheet (MMC5983MA Rev A, p. 17) states that a data transfer "is terminated by a STOP condition or another START condition". Its example measurement sequence also chains read → START → write without a STOP. It also states that the sensor "initiate[s] a measurement" when it acknowledges the TM_M byte.
 - **M-7a** Before starting each magnetometer transaction (sample, probe or configuration), firmware shall resynchronise the DREQ credit counters of both magnetometer DMA channels (DBG_CTDREQ). An abort flushes the I2C TX and RX FIFOs, and draining leftover RX data reads a DMA-serviced FIFO. Either leaves a counter that no longer matches its FIFO (EX-9), which could let the data channel read an empty RX FIFO (corrupting a sample) or starve the command channel (a stall). *(Added in Rev 2.12.)*
-- **M-8** Each transaction shall complete within 400 µs of its tick, or 450 µs for a transaction that includes a SET or RESET pulse (M-4). Expected durations are about 375 µs and 445 µs. The trigger write shall finish within 450 µs of the tick, leaving at least 50 µs between measurement completion (trigger + 0.5 ms) and the next read. Both figures are to be confirmed by measurement. *(Amended in Rev 2.4, Rev 2.8.)*
+- **M-8** Each transaction shall complete within 470 µs of its tick, or 540 µs for a transaction that includes a SET or RESET pulse (M-4). Expected durations are about 445 µs and 515 µs. Status is read about 60 µs after the next tick, so a measurement finishing within 0.5 ms of the trigger (datasheet) is complete when checked; bring-up measured about 0.1 ms. A late measurement is caught by the M-9 check. Both figures are to be confirmed by measurement. *(Amended in Rev 2.4, Rev 2.8, Rev 2.21.)*
 - **M-9** The first transaction after startup, and the first transaction after any aborted or timed-out transaction (M-15, M-16), has no prior measurement, and its data shall be marked invalid. A measurement triggered immediately after a RESET pulse has inverted polarity, and its sample shall also be marked invalid. *(Amended in Rev 2.4.)* A sample whose Status register shows Meas_M_Done = 0 was read before the measurement finished. It shall be marked invalid and counted as "not ready" (D-1). The datasheet says this bit "should be checked before reading the output". *(Amended in Rev 2.8.)*
   - Invalid samples shall still be published, so the main loop sees every event in order. *(Added in Rev 2.11.)*
   - Each sample carries a reason code: `OK` (valid), `NO_PRIOR` (first after startup or an abort), `AFTER_RESET` (measured right after a RESET pulse), or `NOT_READY` (Meas_M_Done clear). If several reasons apply, the first in the order `NO_PRIOR`, `NOT_READY`, `AFTER_RESET` is reported.
@@ -495,3 +495,11 @@ This closes the open decision from the Rev 2.15 review.
 ## 30. Revision 2.20 Changes
 
 - **Amended B-20.** In diagnostic builds, `~` on the USB console reboots into the USB bootloader for reflashing. `fwstatus.py --bootsel` sends it.
+
+## 31. Revision 2.21 Changes
+
+Found at first hardware bring-up with the D-8 experiment: measurements complete (about 0.1 ms at 800 Hz, 7.5 ms at the default), and bandwidth writes take effect whether ended by STOP or a repeated START. But Meas_M_Done reads clear once the output registers have been read. The datasheet says the bit "will remain 1 till next measurement". The 9-byte burst read Status last, so every sample was "not ready", the startup calibration failed, and the M-2b run-time fault fired about 77 times a second.
+- **Amended M-7.** Status is read first, then 0x00–0x07. The data DMA destination is now `status, raw[7], tout`.
+- **Amended M-8.** The limits rise by 70 µs for the extra address phases.
+- **Startup calibration (M-4b)** reads Status on its own before the data.
+- **D-8 experiment** compares Status read alone with Status at the end of a burst, each 2 ms after a fresh trigger.

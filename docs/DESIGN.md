@@ -164,23 +164,25 @@ One command list goes to `IC_DATA_CMD` (16-entry TX FIFO, so the whole list
 fits). The DW I2C issues RESTARTs where the `RESTART` bit is set:
 
 ```
-START 0x30W 0x00   RESTART 0x30R  b0..b8 (9 reads: X,Y,Z, Tout, Status)   RESTART 0x30W 0x09 TM_M  STOP
+START 0x30W 0x08  RESTART 0x30R s  RESTART 0x30W 0x00  RESTART 0x30R b0..b7 (X,Y,Z, Tout)  RESTART 0x30W 0x09 TM_M  STOP
 ```
 
-That is about 139 SCL bit times, ~350 µs at 400 kHz, or ~375 µs with
-controller overheads (M-8: ≤ 400 µs). When the SET/RESET strategy calls for
+Status is read first (Rev 2.21): on the real part, reading the output
+registers clears Meas_M_Done, so a burst that ends at Status always reads
+"not ready". That is about 166 SCL bit times, ~415 µs at 400 kHz, or ~445 µs
+with controller overheads (M-8: ≤ 470 µs). When the SET/RESET strategy calls for
 a pulse (see below), an extra `RESTART 0x30W 0x09 SET` (or `RESET`) is
-inserted before the trigger. That adds ~70 µs, for ~445 µs in total
-(M-8: ≤ 450 µs with a pulse). The 0.5 ms measurement then ends ≲ 950 µs
+inserted before the trigger. That adds ~70 µs, for ~515 µs in total
+(M-8: ≤ 540 µs with a pulse). The 0.5 ms measurement then ends ≲ 950 µs
 after the tick, before the next read reaches the data registers at
 ~1050 µs. The repeated STARTs follow the datasheet (p. 17; M-7).
 
 - Command DMA channel: `s_cmd` → `IC_DATA_CMD`, 32-bit, DREQ = I2C TX.
 - Data DMA channel: `IC_DATA_CMD` → `slots[!latest].raw`, 8-bit, 9
-  transfers, DREQ = I2C RX (M-11). The 9 bytes land in `raw[7]`, `tout`
-  and `status`, which a `_Static_assert` keeps adjacent.
+  transfers, DREQ = I2C RX (M-11). The 9 bytes land in `status`, `raw[7]`
+  and `tout`, which a `_Static_assert` keeps adjacent.
 - Three sample command lists are prebuilt: no pulse, SET, RESET. The
-  longest is 14 words, which fits the 16-entry FIFO. No persistent
+  longest is 15 words, which fits the 16-entry FIFO. No persistent
   Internal Control 0 bits are used (M-5).
 - **Completeness check (M-9, Rev 2.8).** When publishing, the ISR checks
   `Meas_M_Done` (Status bit 0), which was read just before this
