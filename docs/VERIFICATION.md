@@ -21,6 +21,13 @@ section. Procedures not listed there have not been run.
 | Offset removal (180° turn), axis orientation, SDA short to GND, sensor power-cycle at run time (M-2b) | Not run |
 | SET/RESET modes, saturation, M-8 durations, V-5a, supply current | Not run (need a debugger, analyzer or meter) |
 
+**A/B partition table (Rev 2.25, `c52164b`, chip RP2350 A3).**
+
+| Check | Result |
+|---|---|
+| `pt.uf2` then `firmware.uf2`: first image boots from slot B (flash update boot) | Pass |
+| Second copy goes into slot A and keeps booting from A | Pass |
+
 All tools run on Windows (V-7). Install the Python dependency once:
 
 ```bash
