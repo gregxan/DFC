@@ -10,6 +10,7 @@
 
 #include "hardware/irq.h"
 #include "pico/stdio.h"
+#include "pico/bootrom.h"
 #include "pico/stdlib.h"
 #include "tusb.h"
 
@@ -41,7 +42,8 @@ extern volatile uint32_t g_app_rx_pattern_errors[2];
  *   machine            - compact "GROUP key=value" lines (N_LINES of them),
  *                        parsed by tools/fwstatus.py and tools/soak_test.py.
  * Send 'm' over the same USB port for machine lines, 'h' for readable. The
- * switch takes effect at the next report. */
+ * switch takes effect at the next report. '~' reboots into the USB
+ * bootloader for reflashing (Rev 2.20). */
 static bool s_human = true;
 static bool s_want_human = true;
 
@@ -333,7 +335,7 @@ static int format_human(unsigned line) {
         static const char *const mode[] = {"echo test", "pattern test", "user application"};
         return snprintf(s_buf, n,
                         "\r\n===== DFC status #%" PRIu32 " | up %02" PRIu32 ":%02" PRIu32 ":%02" PRIu32
-                        " | %s | send 'm' for machine format =====\r\n",
+                        " | %s | 'm' machine format, '~' reflash =====\r\n",
                         s_seq, t / 3600u, (t / 60u) % 60u, t % 60u, mode[APP_MODE]);
     }
     case H_BAUD:
@@ -583,13 +585,34 @@ static unsigned line_count(void) {
     return s_human ? (unsigned)H_COUNT : N_LINES;
 }
 
+/* Rev 2.20: '~' from the host reboots into the USB bootloader (BOOTSEL)
+ * for reflashing, after a short delay so the notice reaches the terminal. */
+#define BOOTSEL_DELAY_US 100000u
+static uint64_t s_bootsel_at; /* 0 = not requested */
+
 void status_poll(void) {
-    /* Format selection from the host: 'm' machine, 'h' readable. */
+    if (s_bootsel_at != 0u) {
+        if ((int64_t)(time_us_64() - s_bootsel_at) >= 0) {
+            reset_usb_boot(0u, 0u); /* does not return */
+        }
+        return;
+    }
+
+    /* From the host: 'm' machine format, 'h' readable, '~' bootloader. */
     int ch = getchar_timeout_us(0);
     if (ch == 'm' || ch == 'M') {
         s_want_human = false;
     } else if (ch == 'h' || ch == 'H') {
         s_want_human = true;
+    } else if (ch == '~') {
+        static const char k_msg[] = "\r\n\r\n*** '~' received: rebooting into the USB bootloader. The COM port "
+                                    "will close; the board appears as the RP2350 drive. ***\r\n";
+        if (tud_cdc_write_available() >= sizeof k_msg - 1u) {
+            (void)tud_cdc_write(k_msg, sizeof k_msg - 1u);
+            (void)tud_cdc_write_flush();
+        }
+        s_bootsel_at = time_us_64() + BOOTSEL_DELAY_US;
+        return;
     }
 
     if (s_line >= line_count()) {

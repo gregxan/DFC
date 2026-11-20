@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.19**. The changes since Revision 2 are listed in sections 11 to 29.
+**Revision 2.20**. The changes since Revision 2 are listed in sections 11 to 30.
 
 ## 1. Scope
 
@@ -243,6 +243,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **B-18** The binary type shall be copy_to_ram, so all code executes from SRAM.
 - **B-19** Debug printing over UART shall be disabled (`pico_enable_stdio_uart(<target> 0)`), since GPIO0/1 are used by UART0.
 - **B-20** USB serial shall be disabled in production builds. If enabled for debugging, it uses the built-in Windows USB serial driver (shows up as a COM port), and its interrupt priority shall be below all UART-related interrupts.
+  - In diagnostic builds, receiving `~` on the USB console shall reboot the board into the USB bootloader (BOOTSEL) for reflashing, about 100 ms later so a notice reaches the terminal. *(Added in Rev 2.20.)*
 - **B-21** Release builds shall use `CMAKE_BUILD_TYPE=Release` with `-g`.
 - **B-22** Compiler warnings shall include `-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion`. B-22, B-23 and B-24 apply to every C source compiled into the image, including the Pico SDK's (B-25). *(Amended in Rev 2.5.)*
 - **B-23** Stack usage shall be checked with `-fstack-usage` and `-Wstack-usage=1024`.
@@ -490,3 +491,7 @@ This closes the open decision from the Rev 2.15 review.
 ## 29. Revision 2.19 Changes
 
 - **Added D-8.** A startup measurement-timing experiment in diagnostic builds. On first hardware bring-up the sensor answered, but every sample was "not ready" and the startup calibration failed. The experiment tells apart: the bandwidth setting not taking effect, register writes followed by a repeated START being ignored (as in the DMA configuration), the TM_M trigger not working, and Status reading wrong at the end of the 9-byte burst.
+
+## 30. Revision 2.20 Changes
+
+- **Amended B-20.** In diagnostic builds, `~` on the USB console reboots into the USB bootloader for reflashing. `fwstatus.py --bootsel` sends it.

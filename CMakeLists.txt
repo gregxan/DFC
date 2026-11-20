@@ -66,6 +66,7 @@ target_include_directories(firmware PRIVATE ${CMAKE_CURRENT_LIST_DIR}/src)
 
 target_link_libraries(firmware PRIVATE
     pico_stdlib
+    pico_bootrom
     hardware_dma
     hardware_i2c
     hardware_irq

@@ -272,6 +272,11 @@ UART-related interrupt (B-20).
   terminal for compact machine lines (`GROUP key=value`), or `h` to go back.
   The change applies from the next report. `fwstatus.py` and `soak_test.py`
   send `m` themselves when they connect.
+- **Reflash from the console.** Type `~` in the terminal and the board
+  reboots into its USB bootloader: the COM port closes and the **RP2350**
+  drive appears, ready for a `.uf2`. `py tools\fwstatus.py COM7 --bootsel`
+  does the same from a script. (Release builds have no USB console: use
+  the BOOT button.)
 - **Wiring check.** Diagnostic builds also test the magnetometer's SDA/SCL
   wiring at start-up, with no test equipment, and print a conclusion such
   as "swap the D4/D5 wires" or "sensor VDDIO not powered" under the

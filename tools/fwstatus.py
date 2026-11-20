@@ -368,7 +368,17 @@ def main() -> int:
     ap.add_argument("--raw", action="store_true", help="print the firmware's machine-format lines unchanged")
     ap.add_argument("--scroll", action="store_true", help="print each report below the last "
                     "instead of redrawing the screen")
+    ap.add_argument("--bootsel", action="store_true", help="send '~' to reboot the board into its USB "
+                    "bootloader (RP2350 drive) for reflashing, then exit")
     args = ap.parse_args()
+    if args.bootsel:
+        with serial.Serial(args.port, 115200, timeout=0.2) as ser:
+            ser.dtr = True
+            ser.write(b"~")
+            ser.flush()
+            time.sleep(0.3)
+        print("Sent '~': the board should now appear as the RP2350 drive.")
+        return 0
     ansi = _enable_ansi()
     mon = StatusMonitor(args.port, args.log)
     prev = None
