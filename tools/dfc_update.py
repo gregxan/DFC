@@ -160,7 +160,12 @@ def main() -> int:
             show_hello(payload)
         else:
             link.send(frame(CMD_REBOOT))
-            cmd, _ = link.reply()
+            try:
+                cmd, _ = link.reply()
+            except serial.SerialException:
+                # The board rebooted and Windows removed the port before the
+                # reply was read: the command worked.
+                cmd = CMD_REBOOT | 0x80
             print("Rebooting into the firmware." if cmd == CMD_REBOOT | 0x80 else f"Unexpected reply 0x{cmd:02X}")
     finally:
         link.close()

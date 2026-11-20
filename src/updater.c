@@ -261,7 +261,7 @@ static bool handle(uint8_t cmd, uint16_t len) {
         return true;
     case UPD_CMD_REBOOT:
         send_frame(UPD_CMD_REBOOT | 0x80u, NULL, 0u);
-        sleep_ms(50); /* let the reply leave */
+        sleep_ms(300); /* let the host read the reply before the port goes */
         reboot_to_app();
     default:
         send_error(UPD_ERR_UNKNOWN_CMD);
