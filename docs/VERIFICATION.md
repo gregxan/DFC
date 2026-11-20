@@ -28,6 +28,18 @@ section. Procedures not listed there have not been run.
 | `pt.uf2` then `firmware.uf2`: first image boots from slot B (flash update boot) | Pass |
 | Second copy goes into slot A and keeps booting from A | Pass |
 
+**Updater over USB (Rev 2.25, `0097a82`, chip RP2350 A3).**
+
+| Check | Result |
+|---|---|
+| `!` / `--enter`, HELLO (slot, chip, sizes, build) | Pass |
+| `reboot` out of updater mode | Pass |
+| `flash`: image written to the other slot, verified, flash update boot, new build time shown | Pass |
+| Image without an updater info block refused | Pass |
+| Update interrupted (USB unplugged mid-transfer): old firmware boots | Pass |
+| Firmware downgrade refused without `--allow-downgrade` | Not run (checked on the PC only) |
+| 90 s idle timeout; power cycle in updater mode boots the firmware | Not confirmed |
+
 All tools run on Windows (V-7). Install the Python dependency once:
 
 ```bash
