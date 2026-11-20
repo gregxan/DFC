@@ -101,7 +101,11 @@ void __attribute__((used, noreturn)) crash_hardfault_c(const uint32_t *frame) {
     watchdog_hw->scratch[0] = CRASH_MAGIC | CRASH_FAULT | (s0 & 0x0000FF00u) | (xpsr & 0xFFu);
     watchdog_hw->scratch[1] = frame[6]; /* PC */
     watchdog_hw->scratch[2] = frame[5]; /* LR */
-    watchdog_hw->scratch[3] = m33_hw->cfsr;
+    /* CFSR uses bits 0-25. Fold in the HFSR causes (Rev 2.25) at bits
+     * 31 (DEBUGEVT: a BKPT, e.g. an SDK panic or assert), 30 (FORCED:
+     * escalated) and 29 (VECTTBL: vector fetch failed). */
+    uint32_t hfsr = m33_hw->hfsr;
+    watchdog_hw->scratch[3] = (m33_hw->cfsr & 0x03FFFFFFu) | (hfsr & 0xC0000000u) | ((hfsr & 2u) << 28);
     hw_set_bits(&watchdog_hw->ctrl, WATCHDOG_CTRL_TRIGGER_BITS);
     for (;;) {
     }

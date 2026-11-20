@@ -445,7 +445,8 @@ static const char *cfsr_text(uint32_t cfsr) {
     static const struct {
         uint32_t bit;
         const char *text;
-    } k[] = {{1u << 25, "divide by zero"},           {1u << 24, "unaligned access"},
+    } k[] = {{1u << 31, "breakpoint instruction (an SDK panic or assert)"},
+             {1u << 25, "divide by zero"},           {1u << 24, "unaligned access"},
              {1u << 20, "stack overflow"},           {1u << 19, "coprocessor (FPU) not enabled"},
              {1u << 18, "invalid PC on return"},     {1u << 17, "invalid state (Thumb bit)"},
              {1u << 16, "undefined instruction"},    {1u << 9, "bus error on data access"},
@@ -458,7 +459,13 @@ static const char *cfsr_text(uint32_t cfsr) {
             return k[i].text;
         }
     }
-    return cfsr ? "see CFSR" : "no fault status (escalated or debug)";
+    if (cfsr & (1u << 31)) {
+        return "breakpoint instruction (an SDK panic or assert)";
+    }
+    if (cfsr & (1u << 29)) {
+        return "vector table read failed";
+    }
+    return cfsr ? "see CFSR" : "no fault status";
 }
 
 static int reset_text(int len) {
