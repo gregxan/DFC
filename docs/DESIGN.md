@@ -208,6 +208,8 @@ in firmware.
 | `g_mag_rate_hz` | N | BW | Datasheet time | Available | Datasheet noise |
 |---|---|---|---|---|---|
 | 1000 | 1 | 11 | 0.5 ms | ~0.6 ms | 1.2 mG |
+| 500 | 2 | 11 | 0.5 ms | ~1.6 ms | 1.2 mG |
+| 250 | 4 | 10 | 2 ms | ~3.6 ms | 0.8 mG |
 | 200 | 5 | 01 | 4 ms | ~4.6 ms | 0.6 mG |
 | 100 | 10 | 00 | 8 ms | ~9.6 ms | 0.4 mG |
 | 50 | 20 | 00 | 8 ms | ~19.6 ms | 0.4 mG |
@@ -236,6 +238,12 @@ datasheet times are upper bounds, and D-8 now also times BW 01.
   (`first_period()`), because the bench measured 0.72 ms for that first
   measurement. This applies after a rate change and after a re-probe
   configuration. `s_cur_period` and `s_trig_period` carry the actual period.
+- **Setting it and detecting new samples (Rev 2.27).** `mag_set_rate_hz()`
+  checks the rate against `k_rates[]` and writes `g_mag_rate_hz`.
+  `publish()` increments `s_sample_count` right after it switches
+  `s_latest`. `mag_read_latest()` copies the count in the same critical
+  section as the slot (`mag_reading_t.count`), so a reading and its count
+  always agree. `app_user.c` sets `s_mag_arrived` and `s_mag_new` from it.
 - **Per-sample period.** Each sample stores `period_ticks` (the ticks from its
   trigger to its read: N, or 2 after a BW write at 1 kHz). Consumers check gaps with `seq == last_seq + last_period`.
   `mag_read_latest()` scales the M-17 stale limit by the longer of it and
@@ -247,7 +255,7 @@ datasheet times are upper bounds, and D-8 now also times BW 01.
   8 ms) is still read too early and detected, but after 10 samples (~50 ms).
   At 100/50 Hz the default BW is the configured one and it is not detected
   (stated in M-2b).
-- **Not used.** BW 10 (no rate fits it), continuous mode (drift, M-3), and
+- **Not used.** Continuous mode (drift, M-3), and
   averaging in firmware (by choice: the sensor's own filtering is used).
   Auto_SR_en (M-3a) would double the measurement time. At 50 Hz, BW 00 with
   auto SET/RESET might still fit (~16 ms of ~19.6 ms), which is a possible

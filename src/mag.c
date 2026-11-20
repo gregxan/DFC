@@ -48,11 +48,14 @@ volatile uint32_t g_mag_rate_hz = MAG_RATE_DEFAULT_HZ;
  * tick) and is read ~0.06 ms after the tick period_ticks later, so it has
  * about period_ticks - 0.4 ms to finish:
  *   1000 Hz: BW 800 Hz, 0.5 ms (datasheet), 0.6 ms available, 1.2 mG RMS
+ *    500 Hz: BW 800 Hz, 0.5 ms,             1.6 ms available, 1.2 mG RMS
+ *    250 Hz: BW 400 Hz, 2 ms,               3.6 ms available, 0.8 mG RMS
  *    200 Hz: BW 200 Hz, 4 ms,               4.6 ms available, 0.6 mG RMS
  *    100 Hz: BW 100 Hz, 8 ms,               9.6 ms available, 0.4 mG RMS
  *     50 Hz: BW 100 Hz, 8 ms,              19.6 ms available, 0.4 mG RMS
- * BW 400 Hz (2 ms) has no slot: 500 Hz leaves 1.6 ms. 50 Hz has the same
- * noise as 100 Hz, as BW 100 Hz is the sensor's slowest setting.
+ * 500 Hz has the same noise as 1000 Hz (same BW: fewer samples, not less
+ * noise). 50 Hz has the same noise as 100 Hz, as BW 100 Hz is the sensor's
+ * slowest setting. (Rev 2.27 added 500 and 250 Hz.)
  * wait_ms: start-up wait from trigger to read (blocking calibration). */
 typedef struct {
     uint16_t hz;
@@ -63,6 +66,8 @@ typedef struct {
 
 static const mag_rate_t k_rates[] = {
     {1000u, 1u, MMC_CTRL1_BW_800HZ, 2u},
+    {500u, 2u, MMC_CTRL1_BW_800HZ, 2u},
+    {250u, 4u, MMC_CTRL1_BW_400HZ, 3u},
     {200u, 5u, MMC_CTRL1_BW_200HZ, 5u},
     {100u, 10u, MMC_CTRL1_BW_100HZ, 9u},
     {50u, 20u, MMC_CTRL1_BW_100HZ, 9u},
@@ -82,6 +87,7 @@ typedef enum {
 /* M-11: double buffer. s_latest is SLOT_NONE until the first publish. */
 static mag_sample_t s_slots[2];
 static volatile uint32_t s_latest = SLOT_NONE;
+static volatile uint32_t s_sample_count; /* M-13a: samples published */
 
 static volatile mag_state_t s_state = MAG_FAULT;
 static volatile bool s_fault = true;
@@ -246,6 +252,14 @@ static unsigned __not_in_flash_func(rate_index)(uint32_t hz) {
 static unsigned __not_in_flash_func(rate_select)(void) {
     unsigned r = rate_index(g_mag_rate_hz);
     return r < RATE_COUNT ? r : s_rate_applied;
+}
+
+bool mag_set_rate_hz(uint32_t hz) {
+    if (rate_index(hz) >= RATE_COUNT) {
+        return false;
+    }
+    g_mag_rate_hz = hz; /* single 32-bit write; the tick ISR reads it */
+    return true;
 }
 
 uint32_t mag_rate_hz(void) {
@@ -622,6 +636,7 @@ static void __not_in_flash_func(publish)(uint64_t now_us) {
     }
     __dmb();
     s_latest = s_cur_slot; /* single atomic 32-bit write */
+    s_sample_count++;      /* M-13a; read with the slot in mag_read_latest() */
 
     s_trig_ok = true;
     s_trig_tick = tick;
@@ -831,6 +846,10 @@ void __not_in_flash_func(mag_tick_isr)(uint32_t tick) {
 
 /* ---------------------------------------------------------- main loop -- */
 
+uint32_t mag_sample_count(void) {
+    return s_sample_count;
+}
+
 bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
     diag_span_t t0 = diag_span_begin(); /* Rev 2.22: ISR time excluded */
     cs_t cs = cs_enter();
@@ -842,6 +861,7 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
     r->offset[1] = s_offset[1];
     r->offset[2] = s_offset[2];
     r->offset_valid = s_offset_valid;
+    r->count = s_sample_count;
     cs_exit(cs);
 
     r->present = l < SLOT_NONE;

@@ -33,7 +33,7 @@ health checks (colour where the console supports it):
     py tools/fwstatus.py COM7 --raw          # the firmware's own lines
     py tools/fwstatus.py COM7 --log run.log  # also record every raw line
     py tools/fwstatus.py COM7 --rate 100     # set the magnetometer rate first
-                                             # (1000, 200, 100 or 50 Hz)
+                                             # (1000, 500, 250, 200, 100 or 50 Hz)
 """
 
 from __future__ import annotations
@@ -401,7 +401,7 @@ def main() -> int:
     ap.add_argument("--raw", action="store_true", help="print the firmware's machine-format lines unchanged")
     ap.add_argument("--scroll", action="store_true", help="print each report below the last "
                     "instead of redrawing the screen")
-    ap.add_argument("--rate", type=int, choices=(1000, 200, 100, 50), help="set the magnetometer rate (Hz) "
+    ap.add_argument("--rate", type=int, choices=(1000, 500, 250, 200, 100, 50), help="set the magnetometer rate (Hz) "
                     "by sending 'r' until the firmware reports it; lasts until the next reset")
     ap.add_argument("--bootsel", action="store_true", help="send '~' to reboot the board into its USB "
                     "bootloader (RP2350 drive) for reflashing, then exit")
@@ -426,7 +426,7 @@ def main() -> int:
             cur = mon.report()
             req = cur.get("MAGS", {}).get("rate_req_hz")
             if args.rate is not None and req is not None and req != args.rate:
-                mon.send(b"r")  # one step per report: 1000 -> 200 -> 100 -> 50 -> 1000
+                mon.send(b"r")  # one step per report: 1000 -> 500 -> 250 -> 200 -> 100 -> 50 -> 1000
             if args.raw:
                 print(format_report(cur), "\n", flush=True)
             else:

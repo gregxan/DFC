@@ -7,8 +7,10 @@
  *     (DMA, U-3..U-5);
  *   - the newest magnetometer sample was published during the previous
  *     epoch (~445-515 us after its tick, M-8) and is complete. At 1 kHz
- *     every epoch brings a new sample; at 200/100/50 Hz (M-3b, g_mag_rate_hz)
- *     only every 5th/10th/20th does, and s_mag_new is false in between.
+ *     every epoch brings a new sample. At a lower rate (M-3b,
+ *     mag_set_rate_hz(): 500/250/200/100/50 Hz) only every 2nd/4th/5th/
+ *     10th/20th epoch does, with the same timing, and s_mag_new is false in
+ *     between. The epochs themselves still run every 1 ms.
  * The whole of app_poll() must finish in < 1 ms (EX-8); main.c measures it
  * (PROF_EPOCH) and counts epochs that run late (DIAG_EPOCH_OVERRUN).
  *
@@ -44,7 +46,11 @@ static void check_update_request(link_id_t id, const uint8_t *p, size_t n) {
     }
 }
 
-void app_init(void) {}
+void app_init(void) {
+    /* Magnetometer rate (M-3b): 1000 Hz unless changed here or later, e.g.
+     *     (void)mag_set_rate_hz(100);
+     * Supported: 1000, 500, 250, 200, 100, 50 Hz. */
+}
 
 /* ---- Magnetometer state, shared by all handlers -------------------- */
 /* Filled by mag_handler(), which runs first in app_poll(), so the link
@@ -54,18 +60,23 @@ static mag_reading_t s_mag;  /* latest reading this epoch (may be invalid or sta
 static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G, offset removed */
 static int16_t s_mag_xyz16[3]; /* same, 16-bit scale (4096/G), for compact messages */
 static bool s_mag_new;       /* true if this epoch brought a new valid sample */
+static bool s_mag_arrived;   /* true if this epoch brought a new sample, valid or not */
 
 /* ---- Magnetometer: most recent sample ------------------------------- */
 static void mag_handler(void) {
     static bool have_last;
     static uint32_t last_seq;
     static uint32_t last_period; /* M-3b: ticks to the next sample */
+    static uint32_t last_count;  /* M-13a: mag_sample_count() last epoch */
 
     s_mag_new = false;
-    if (mag_read_latest(&s_mag) && s_mag.s.valid && !s_mag.stale) {
-        if (have_last && s_mag.s.seq == last_seq) {
-            return; /* same sample as last epoch: nothing new */
-        }
+    s_mag_arrived = false;
+    if (!mag_read_latest(&s_mag) || s_mag.count == last_count) {
+        return; /* no sample yet, or none new this epoch (lower rates) */
+    }
+    last_count = s_mag.count;
+    s_mag_arrived = true;
+    if (s_mag.s.valid && !s_mag.stale) {
         if (have_last && s_mag.s.seq != last_seq + last_period) {
             /* gap: samples were missed (abort / fault) */
         }

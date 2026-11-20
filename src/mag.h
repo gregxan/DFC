@@ -30,11 +30,26 @@ extern volatile uint32_t g_mag_sr_mode;
  * 1..MAG_SR_INTERVAL_MAX are clamped when used. */
 extern volatile uint32_t g_mag_sr_interval;
 
-/* M-3b (Rev 2.25): requested output rate in Hz (1000, 200, 100 or 50).
+/* M-3b: requested output rate in Hz (1000, 500, 250, 200, 100 or 50).
  * Read at the start of every sample transaction; a new value takes effect
  * at the next sample (within one sample period of the old rate). Invalid
- * values are ignored and the previous rate stays in use. */
+ * values are ignored and the previous rate stays in use. Prefer
+ * mag_set_rate_hz(). */
 extern volatile uint32_t g_mag_rate_hz;
+
+/* M-3b (Rev 2.27): set the output rate. Returns false, changing nothing, if
+ * hz is not one of the supported rates. The change takes effect at the next
+ * sample. The 1 ms tick and the user application's epochs are not affected:
+ * at every rate app_poll() still runs every 1 ms, and an epoch that follows
+ * a sampling tick sees its sample with the same timing as at 1 kHz (EX-10). */
+bool mag_set_rate_hz(uint32_t hz);
+
+/* M-13a (Rev 2.27): samples published since start-up, valid or not (each
+ * transaction that completes publishes one, M-9). Compare it with the value
+ * from the previous epoch to tell whether this epoch brought a new sample.
+ * It wraps after 2^32 samples (~50 days at 1 kHz); compare with !=, not <.
+ * The same count comes with every reading in mag_reading_t.count. */
+uint32_t mag_sample_count(void);
 
 /* Rate the sensor is configured for now (Hz): equals g_mag_rate_hz once a
  * change has taken effect. */
@@ -43,8 +58,8 @@ uint32_t mag_rate_hz(void);
 /* True if hz is one of the supported rates. */
 bool mag_rate_supported(uint32_t hz);
 
-/* The supported rate after hz in the list 1000 -> 200 -> 100 -> 50 -> 1000
- * (for stepping through them from a console). */
+/* The supported rate after hz in the list 1000 -> 500 -> 250 -> 200 -> 100
+ * -> 50 -> 1000 (for stepping through them from a console). */
 uint32_t mag_rate_next(uint32_t hz);
 
 /* Sensor bandwidth (Internal Control 1 BW, MMC_CTRL1_BW_*) used at rate hz;
@@ -89,6 +104,9 @@ typedef struct {
      * field = mag_convert(raw) - offset. Not applied by the firmware. */
     int32_t offset[3];
     bool offset_valid; /* false until the first successful calibration */
+    /* M-13a (Rev 2.27): mag_sample_count() as of this sample, copied with it.
+     * Changes exactly when a new sample has been published. */
+    uint32_t count;
 } mag_reading_t;
 
 /* Blocking start-up (before the main loop): bus clear, software reset,

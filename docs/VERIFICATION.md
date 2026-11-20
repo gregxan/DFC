@@ -520,6 +520,8 @@ moving steel and cables carrying current.
    | Rate | `valid` per report | `Noise` (datasheet) | `not_ready`, `gaps` |
    |---|---|---|---|
    | 1000 Hz | ~1000 | ~1.2 mG per axis | 0 |
+   | 500 Hz | ~500 | ~1.2 mG (same BW as 1000 Hz) | 0 |
+   | 250 Hz | ~250 | ~0.8 mG | 0 |
    | 200 Hz | ~200 | ~0.6 mG | 0 |
    | 100 Hz | ~100 | ~0.4 mG | 0 |
    | 50 Hz | ~50 | ~0.4 mG (same BW as 100 Hz) | 0 |

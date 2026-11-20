@@ -51,7 +51,7 @@ void app_mag_noise_take(uint32_t *count, uint32_t rms_ug[3]); /* D-10 */
  * Send 'm' over the same USB port for machine lines, 'h' for readable. The
  * switch takes effect at the next report. '~' reboots into the USB
  * bootloader for reflashing (Rev 2.20). 'r' steps the magnetometer rate
- * 1000 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). '!' reboots into the
+ * 1000 -> 500 -> 250 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). '!' reboots into the
  * firmware updater on this USB port (Rev 2.25, updater.h). */
 static bool s_human = true;
 static bool s_want_human = true;

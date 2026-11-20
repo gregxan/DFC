@@ -7,7 +7,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
   interrupt in the data path. TX is DMA-driven from a ring buffer.
 - **MMC5983MA at 1 kHz on I2C1**, run entirely by DMA and published through a
-  double buffer. For lower noise it can run at 200, 100 or 50 Hz, using the
+  double buffer. For lower noise or load it can run at 500, 250, 200, 100 or 50 Hz, using the
   sensor's own slower bandwidth settings with no averaging in firmware (M-3b).
 - **A single non-blocking main loop on core 0.** Core 1 stays idle.
 - **Builds on Windows** with CMake presets and Ninja. It needs no WSL, MSYS2,
@@ -315,14 +315,14 @@ UART-related interrupt (B-20).
   drive appears, ready for a `.uf2`. `py tools\fwstatus.py COM7 --bootsel`
   does the same from a script. (Release builds have no USB console: use
   the BOOT button.)
-- **Magnetometer rate.** Type `r` to step the rate 1000 → 200 → 100 → 50 →
-  1000 Hz. The report's `Rate` line shows the rate in use, and in the `diag`
+- **Magnetometer rate.** Type `r` to step the rate 1000 → 500 → 250 → 200 →
+  100 → 50 → 1000 Hz. The report's `Rate` line shows the rate in use, and in the `diag`
   and `diag-pattern` builds a `Noise` line shows the per-axis RMS over the
   last second, in mG. Keep the board still to read sensor noise.
   `py tools\fwstatus.py COM7 --rate 100` sets the rate from a script. The
   setting lasts until the next reset. To change the start-up rate, including
-  in release builds, set `MAG_RATE_DEFAULT_HZ` (see `src/config.h`), or set
-  `g_mag_rate_hz` from the application.
+  in release builds, set `MAG_RATE_DEFAULT_HZ` (see `src/config.h`), or call
+  `mag_set_rate_hz()` from the application.
 - **Firmware updater (REQUIREMENTS section 6a).** Type `!` and the board
   reboots into its updater on this USB port. The COM port closes and comes
   back. The updater blinks the LED fast and waits 90 s for

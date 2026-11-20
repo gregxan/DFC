@@ -1,13 +1,13 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.26**. The changes since Revision 2 are listed in sections 11 to 36.
+**Revision 2.27**. The changes since Revision 2 are listed in sections 11 to 37.
 
 ## 1. Scope
 
 Firmware for a Seeed XIAO RP2350 that:
 
 - Moves data on two UARTs at 921,600 baud with the lowest achievable latency, to the numeric targets in section 4.5.
-- Samples an MMC5983MA magnetometer over I2C at 1 kHz, or at 200, 100 or 50 Hz for lower noise (M-3b).
+- Samples an MMC5983MA magnetometer over I2C at 1 kHz, or at 500, 250, 200, 100 or 50 Hz for lower noise or load (M-3b).
 - Exposes all data to a single bare-metal main loop without ever blocking it.
 - Can be updated in the field over either UART, with A/B firmware slots, a trial boot and automatic fallback (section 6a).
 - Builds, flashes, and debugs from a Windows host.
@@ -45,6 +45,8 @@ Firmware for a Seeed XIAO RP2350 that:
   - **Test applications:** one main-loop pass shall be < 1 ms.
 - **EX-9** The CPU shall not read or write a peripheral FIFO that a DMA channel is paced against, unless that channel's DREQ credit counter is resynchronised (DBG_CTDREQ) before its next transfer. The RP2350 datasheet (§12.6.4.2) warns that such access "causes the channel and peripheral to become desynchronised, and can cause corruption or loss of data". *(Added in Rev 2.12.)*
 - **EX-10** The user application shall run on 1 ms epochs aligned to the tick grid (M-6). After each tick, the main loop calls `app_poll()` once. It consumes the data that arrived during the previous epoch: UART bytes received up to the tick (made available by DMA within U-16), and the newest magnetometer sample, published during the previous epoch (M-8). The test applications (`echo`, `pattern`) run `app_poll()` on every main-loop pass instead, so the latency tests (V-2, V-3) can measure how quickly a byte is noticed. *(Added in Rev 2.14.)*
+  - At every magnetometer rate (M-3b) the epochs shall still run every 1 ms. Only the epochs that follow a sampling tick bring a new sample. They see it with the same timing as at 1 kHz: published during the previous epoch, about 0.45 ms after that tick. The application tells them apart by the sample count (M-13a). *(Added in Rev 2.27.)*
+  - Epoch-to-epoch jitter from the rate: a sampling tick's handler starts a transaction (about 1–2 µs more than a non-sampling tick), and the transaction's completion interrupt (about 3 µs, M-12) preempts that epoch. Non-sampling epochs have neither. The start latency recorded by D-4 includes this. *(Added in Rev 2.27.)*
 
 ## 4. UART Requirements
 
@@ -116,20 +118,22 @@ Firmware for a Seeed XIAO RP2350 that:
   - Internal Control 2 = 0x00: continuous mode, CM_Freq, periodic SET (Prd_set, En_prd_set) all off. Continuous mode runs from the sensor's own oscillator ("1000 Hz typical"). It would drift against the 1 ms tick, causing duplicated or skipped samples and losing the trigger timestamp (M-10). Periodic SET requires continuous mode.
   - Internal Control 0: Auto_SR_en, INT_meas_done_en, TM_T and OTP_Read are never set.
   - Internal Control 3 = 0x00 (self-test and 3-wire SPI off).
-- **M-3b** The output rate shall be selectable from 1000, 200, 100 and 50 Hz. Each rate uses the sensor's own bandwidth setting, with one triggered measurement per output sample. The firmware does not average samples. *(Added in Rev 2.25.)*
+- **M-3b** The output rate shall be selectable from 1000, 500, 250, 200, 100 and 50 Hz *(500 and 250 Hz added in Rev 2.27)*. Each rate uses the sensor's own bandwidth setting, with one triggered measurement per output sample. The firmware does not average samples. *(Added in Rev 2.25.)*
 
   | Rate | Trigger every | BW | Measurement time (datasheet) | Time available (M-8) | Noise (datasheet, RMS) |
   |---|---|---|---|---|---|
   | 1000 Hz | 1 tick | 11 (800 Hz) | 0.5 ms | ~0.6 ms | 1.2 mG |
+  | 500 Hz | 2 ticks | 11 (800 Hz) | 0.5 ms | ~1.6 ms | 1.2 mG |
+  | 250 Hz | 4 ticks | 10 (400 Hz) | 2 ms | ~3.6 ms | 0.8 mG |
   | 200 Hz | 5 ticks | 01 (200 Hz) | 4 ms | ~4.6 ms | 0.6 mG |
   | 100 Hz | 10 ticks | 00 (100 Hz) | 8 ms | ~9.6 ms | 0.4 mG |
   | 50 Hz | 20 ticks | 00 (100 Hz) | 8 ms | ~19.6 ms | 0.4 mG |
 
-  - The rate at startup is a build option (`MAG_RATE_DEFAULT_HZ`, default 1000). At run time it is set through a global variable, `g_mag_rate_hz`, in Hz. Diagnostic builds also step through the rates from the USB console (B-20).
+  - The rate at startup is a build option (`MAG_RATE_DEFAULT_HZ`, default 1000). At run time the application sets it with `mag_set_rate_hz(hz)`, which returns false and changes nothing for an unsupported rate *(added in Rev 2.27)*. `mag_rate_hz()` returns the rate in effect. The underlying global, `g_mag_rate_hz`, remains for the debugger. Diagnostic builds also step through the rates from the USB console (B-20).
   - A change shall take effect at the next sample transaction, which writes the new BW (Internal Control 1) after its read and before its trigger write. The sample read in that transaction belongs to the old rate and is valid. If the transaction is aborted, the next one writes BW again. The sample triggered right after a BW write (rate change or re-probe configuration) is read at least 2 ticks later, because the bench showed the first measurement after a BW write taking 0.72 ms. At 1 kHz this gives one 2 ms step in `seq`, recorded in the sample's period (M-10), so it is not a gap.
   - An unsupported value shall be ignored, and the previous rate remains in use.
   - The re-probe configuration (M-2a) uses the rate selected at that time.
-  - BW = 10 (400 Hz, 2 ms) is not used: no rate leaves room for it (500 Hz would leave ~1.6 ms). At 50 Hz the noise is the same as at 100 Hz, because BW = 00 is the sensor's slowest setting.
+  - 500 Hz has the same noise as 1000 Hz (same bandwidth): it halves the load, not the noise. At 50 Hz the noise is the same as at 100 Hz, because BW = 00 is the sensor's slowest setting.
   - Continuous mode remains off at every rate (M-3).
 - **M-3a** Auto_SR_en shall not be used. The datasheet gives a maximum output rate of 580 Hz at BW = 11 outside continuous mode, consistent with two measurements per output when automatic SET/RESET is active, so it is not expected to sustain 1 kHz. *(Added in Rev 2.8.)*
 - **M-4** The sensor shall be conditioned with SET/RESET pulses. At startup, firmware shall perform one RESET → SET cycle, ending in SET so measurements have normal polarity. The ongoing strategy shall be selectable at run time through a global variable, `g_mag_sr_mode`. It is currently changed only from the debugger. *(Replaced in Rev 2.4; automatic mode removed in Rev 2.8.)*
@@ -179,7 +183,8 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **M-11** Two sample slots shall be used. DMA shall always write into the slot not currently marked latest.
 - **M-12** A transaction is complete when the I2C controller detects the STOP condition that ends the trigger write. On that event, the completion interrupt (I2C STOP detect) shall confirm that both magnetometer DMA channels have finished. It shall then publish the new slot as latest with a single atomic 32-bit write. DMA channel completion does not mark the end of a transaction and shall not be used for this purpose. *(Amended in Rev 2.1.)*
-- **M-13** The read-latest function shall copy the latest slot inside a critical section of at most 2 µs. It returns the sample, timestamp, sequence number, valid flag, and the current offset calibration and its validity (M-4b). *(Amended in Rev 2.9.)*
+- **M-13** The read-latest function shall copy the latest slot inside a critical section of at most 2 µs. It returns the sample, timestamp, sequence number, valid flag, and the current offset calibration and its validity (M-4b). *(Amended in Rev 2.9.)* It also returns the sample count (M-13a) as of that sample, copied in the same critical section. *(Amended in Rev 2.27.)*
+- **M-13a** Firmware shall count every published sample, valid or invalid, in a 32-bit count readable at any time through `mag_sample_count()`. The count changes exactly when a new sample is published, so comparing it with the previous epoch's value tells whether an epoch brought a new sample. It wraps after 2^32 samples, so compare for inequality. *(Added in Rev 2.27.)*
 - **M-14** Only the latest sample is retained. No history buffer is required.
 
 ### 5.4 Errors
@@ -746,3 +751,9 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 - **F-10 (bench request):** the updater serves only the requesting link. It was "the first port that delivers a valid frame".
 - **Amended B-20 and D-9:** the diagnostic console's keys are listed. The watchdog is fed only when armed and is not armed during a trial. An implausible watchdog record is not reported as a hang.
 - **Not covered:** authenticated (signed) updates (F-24).
+
+## 37. Revision 2.27 Changes
+
+- **Amended M-3b.** 500 Hz (BW 11, every 2 ticks) and 250 Hz (BW 10, every 4 ticks, 0.8 mG) added. The application sets the rate with `mag_set_rate_hz()`.
+- **Added M-13a, amended M-13.** A count of published samples, through `mag_sample_count()` and in every reading, to tell epochs with a new sample from those without.
+- **Amended EX-10.** Epochs run every 1 ms at every rate, and sample epochs keep the 1 kHz timing. The rate-dependent jitter (1–2 µs tick handler, about 3 µs completion interrupt in sample epochs) is stated.
