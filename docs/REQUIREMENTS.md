@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.22**. The changes since Revision 2 are listed in sections 11 to 32.
+**Revision 2.23**. The changes since Revision 2 are listed in sections 11 to 33.
 
 ## 1. Scope
 
@@ -198,6 +198,13 @@ Firmware for a Seeed XIAO RP2350 that:
   Resets, re-initialisation, and retries remain prohibited. *(Amended in Rev 2.2.)*
 - **D-7** Diagnostic builds shall check the magnetometer wiring once at startup, before the I2C controller takes the pins, using no test equipment: each line's level with the internal pull-up (held low), each line's rise against the internal pull-down after being driven low (external pull-up present), SDA–SCL short, and an I2C address scan (0x08–0x77) with SDA/SCL as wired and swapped. The results and a one-line conclusion are reported over USB. Production builds shall not include it. *(Added in Rev 2.18.)*
 - **D-8** Diagnostic builds shall report the magnetometer's startup results (product ID, Status after the software reset, fault cause, calibration result) and run a measurement-timing experiment after startup: the time from TM_M to Meas_M_Done at 800 Hz and at the default bandwidth with STOP-terminated writes, the same after a bandwidth write followed by a repeated START, and Status read at the end of the 9-byte burst compared with Status read alone. *(Added in Rev 2.19.)*
+- **D-9** Diagnostic builds shall capture hangs and crashes:
+  - **Watchdog:** a 2 s watchdog, fed by the main loop, resets the board if the main loop stops. Before that, the main loop's position, the interrupt running (if any) and the tick count are kept in watchdog scratch registers 0–3.
+  - **Faults:** a HardFault records the faulting PC, LR and CFSR there, then resets.
+  - **Report:** after the reset, the status report states what happened.
+  - **Heartbeat:** the user LED blinks while the main loop runs.
+
+  This is a diagnostic exception to D-5. Production builds never reset themselves. *(Added in Rev 2.23.)*
 - **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
 
 ## 7. Resources
@@ -512,3 +519,7 @@ Found at first hardware bring-up with the D-8 experiment: measurements complete 
   - ATTENTION lists one item per line and names what is over its limit, with the value, e.g. "mag_read_latest 14600 ns, over the 2000 ns API limit".
   - The timing section names the worst handler and the worst API call.
   - The machine format is unchanged.
+
+## 33. Revision 2.23 Changes
+
+- **Added D-9.** Hang and crash capture in diagnostic builds. During bring-up the board occasionally stopped responding: no output, and `~` was ignored, so the main loop or the USB stack had stopped. The watchdog report now shows whether the main loop was stuck (and where), an interrupt never returned (and which one), or the processor faulted (PC, LR and fault type). The `~` reboot disarms the watchdog first, and writes its notice through stdio rather than calling TinyUSB directly.

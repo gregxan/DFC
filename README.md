@@ -277,6 +277,10 @@ UART-related interrupt (B-20).
   drive appears, ready for a `.uf2`. `py tools\fwstatus.py COM7 --bootsel`
   does the same from a script. (Release builds have no USB console: use
   the BOOT button.)
+- **Hang and crash capture.** In diagnostic builds the yellow LED blinks
+  while the firmware runs. If it ever stops for 2 s, a watchdog resets the
+  board, and the report's **Last reset** line says where it was stuck, or
+  where it crashed. Production builds never reset themselves.
 - **Wiring check.** Diagnostic builds also test the magnetometer's SDA/SCL
   wiring at start-up, with no test equipment, and print a conclusion such
   as "swap the D4/D5 wires" or "sensor VDDIO not powered" under the

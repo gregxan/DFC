@@ -1,5 +1,7 @@
 #include "tick.h"
 
+#include "crash.h"
+
 #include "hardware/irq.h"
 #include "hardware/timer.h"
 
@@ -51,6 +53,7 @@ static void __not_in_flash_func(tick_isr)(void) {
     }
 
     s_tick_count = s_next_index; /* after any skip-ahead */
+    crash_tick(s_next_index); /* D-9 (diagnostic builds) */
 
     link_tick_isr();  /* U-8, U-15a */
     mag_tick_isr(idx); /* M-6, M-16 */

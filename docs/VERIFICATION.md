@@ -138,6 +138,27 @@ shows it under the magnetometer:
 The check runs only at start-up. After rewiring (with the USB unplugged),
 plug back in, or press **R**, and reconnect the terminal.
 
+### Hangs and crashes (Rev 2.23)
+
+In diagnostic builds the yellow user LED blinks about twice a second while
+the main loop runs. If the main loop stops for 2 s, the watchdog resets the
+board. A processor fault also resets it. Reconnect the terminal: the
+**Last reset** line under Baud says what happened. ATTENTION flags it until
+the next normal reset.
+
+```
+Last reset    WATCHDOG - main loop stopped for 2 s
+              Main loop was sending to USB.
+              Stuck inside interrupt IRQ 14 (USB controller).
+```
+
+| Line | Meaning |
+|---|---|
+| Stuck inside interrupt IRQ n | that handler never returned and starved the main loop |
+| Interrupts kept running | the main loop itself was stuck (in the step named) |
+| The tick stopped at the same time | interrupts were disabled, or everything stalled |
+| HARD FAULT … PC / LR / CFSR | a crash. Run the `arm-none-eabi-addr2line` command shown, from the repository folder, with the toolchain from the Pico extension (`%USERPROFILE%\.pico-sdk\toolchain\<version>\bin`), to get the function and line |
+
 ### Magnetometer start-up and timing check (Rev 2.19)
 
 Below the wiring check, diagnostic builds show what happened at start-up

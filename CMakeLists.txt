@@ -51,6 +51,7 @@ set(APP_SOURCES
     src/prof.c
     src/status.c
     src/wirecheck.c
+    src/crash.c
 )
 if(APP_MODE STREQUAL "user")
     list(APPEND APP_SOURCES src/app_user.c)
@@ -74,6 +75,7 @@ target_link_libraries(firmware PRIVATE
     hardware_sync
     hardware_timer
     hardware_uart
+    hardware_watchdog
 )
 
 if(APP_MODE STREQUAL "pattern")

@@ -28,6 +28,7 @@
 
 #include "app.h"
 #include "config.h"
+#include "crash.h"
 #include "diag.h"
 #include "link.h"
 #include "mag.h"
@@ -88,7 +89,9 @@ static void __attribute__((noreturn)) run_epochs(void) {
 
         EPOCH_PIN_HIGH();
         PROF_BEGIN(PROF_EPOCH);
+        crash_crumb(CRUMB_APP);
         app_poll();
+        crash_crumb(CRUMB_IDLE);
         PROF_END(PROF_EPOCH);
         EPOCH_PIN_LOW();
 
@@ -106,7 +109,9 @@ static void __attribute__((noreturn)) run_epochs(void) {
 static void __attribute__((noreturn)) run_free(void) {
     for (;;) {
         diag_loop_mark(); /* D-4: one pass of the test application */
+        crash_crumb(CRUMB_APP);
         app_poll();
+        crash_crumb(CRUMB_IDLE);
 #if APP_USB_STATUS
         uint32_t ts = diag_excluded_begin(); /* D-4: not part of EX-8 */
         status_poll();
@@ -119,6 +124,7 @@ static void __attribute__((noreturn)) run_free(void) {
 
 int main(void) {
 #if APP_USB_STATUS
+    crash_capture(); /* D-9: what the last reset left, before anything else */
     status_init(); /* USB CDC; priority lowered below all UART interrupts (B-20) */
 #endif
     diag_init();
@@ -130,6 +136,7 @@ int main(void) {
 #if APP_USB_STATUS
     /* Rev 2.22: last, once every interrupt handler is installed. */
     diag_isr_accounting_init();
+    crash_arm(); /* D-9: watchdog, fed by the main loop */
 #endif
 
 #if APP_MODE == APP_MODE_USER

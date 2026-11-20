@@ -5,6 +5,8 @@
 #include "hardware/structs/scb.h"
 #include "hardware/sync.h"
 
+#include "crash.h"
+
 volatile uint32_t g_diag_ctr[DIAG_COUNT];
 volatile uint32_t g_diag_max_cycles[DIAG_T_COUNT];
 volatile uint32_t g_diag_rx_hwm[2];
@@ -38,7 +40,11 @@ static void __not_in_flash_func(isr_wrap)(void) {
     }
     restore_interrupts(save);
 
+    /* D-9: which interrupt is running, for the watchdog report. */
+    uint32_t prev = watchdog_hw->scratch[1];
+    crash_irq(irq + 1u);
     s_isr_orig[irq]();
+    crash_irq(prev);
 
     save = save_and_disable_interrupts();
     if (outer) {

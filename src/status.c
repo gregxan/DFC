@@ -16,6 +16,7 @@
 #include "pico/stdlib.h"
 #include "tusb.h"
 
+#include "crash.h"
 #include "diag.h"
 #include "mag.h"
 #include "wirecheck.h"
@@ -154,11 +155,16 @@ static int format_line(unsigned line) {
     case 7: { /* Rev 2.19: start-up results and measurement timing */
         const mag_boot_t *bt = mag_boot();
         return snprintf(s_buf, n, "BOOT ran=%u id=0x%02X status=0x%02X cause=%u cal_ok=%u cal_status=0x%02X"
-                        " t_fast_us=%u t_slow_us=%u t_rs_us=%u burst_status=0x%02X direct_status=0x%02X\r\n",
+                        " t_fast_us=%u t_slow_us=%u t_rs_us=%u burst_status=0x%02X direct_status=0x%02X"
+                        " rst=%u rst_crumb=%u rst_irq=%" PRIu32 " rst_exc=%u rst_ticks=%" PRIu32
+                        " rst_pc=0x%08" PRIX32 " rst_lr=0x%08" PRIX32 " rst_cfsr=0x%08" PRIX32 "\r\n",
                         (unsigned)bt->ran, (unsigned)bt->id, (unsigned)bt->status, (unsigned)bt->cause,
                         (unsigned)bt->cal_ok, (unsigned)bt->cal_status, (unsigned)bt->t_fast_us,
                         (unsigned)bt->t_slow_us, (unsigned)bt->t_rs_us, (unsigned)bt->burst_status,
-                        (unsigned)bt->direct_status);
+                        (unsigned)bt->direct_status, (unsigned)crash_last()->kind, (unsigned)crash_last()->crumb,
+                        crash_last()->irq, (unsigned)crash_last()->exception,
+                        crash_last()->isr_tick - crash_last()->loop_tick, crash_last()->pc, crash_last()->lr,
+                        crash_last()->cfsr);
     }
 #if APP_MODE == APP_MODE_USER
     case 9: /* EX-8, D-4: 1 ms epoch work time */
@@ -199,6 +205,7 @@ static uint32_t s_prev_pattern[2], s_d_pattern[2];
 enum {
     H_HEADER,
     H_BAUD,
+    H_RESET,
     H_UART_HEAD,
     H_RX_OVERFLOW,
     H_TX_REJECT,
@@ -397,6 +404,92 @@ static uint32_t loop_or_epoch_max_us(void) {
 #endif
 }
 
+/* D-9: what the last reset left (diagnostic builds). */
+static const char *const k_crumb[CRUMB_COUNT] = {"unknown", "in app_poll()", "reading USB input",
+                                                 "formatting a report line", "sending to USB", "in the main loop"};
+
+static const char *irq_name(uint32_t irq) {
+    if (irq <= 7u) {
+        return "timer (tick or SDK alarm)";
+    }
+    if (irq >= 10u && irq <= 13u) {
+        return "DMA (UART TX)";
+    }
+    if (irq == 14u) {
+        return "USB controller";
+    }
+    if (irq >= 15u && irq <= 20u) {
+        return "PIO";
+    }
+    if (irq == 33u || irq == 34u) {
+        return "UART error";
+    }
+    if (irq == 36u || irq == 37u) {
+        return "I2C (magnetometer)";
+    }
+    if (irq >= 46u && irq <= 51u) {
+        return "USB stack task";
+    }
+    return "other";
+}
+
+static const char *cfsr_text(uint32_t cfsr) {
+    static const struct {
+        uint32_t bit;
+        const char *text;
+    } k[] = {{1u << 25, "divide by zero"},           {1u << 24, "unaligned access"},
+             {1u << 20, "stack overflow"},           {1u << 19, "coprocessor (FPU) not enabled"},
+             {1u << 18, "invalid PC on return"},     {1u << 17, "invalid state (Thumb bit)"},
+             {1u << 16, "undefined instruction"},    {1u << 9, "bus error on data access"},
+             {1u << 10, "imprecise bus error"},      {1u << 8, "bus error on instruction fetch"},
+             {1u << 12, "bus error stacking"},       {1u << 11, "bus error unstacking"},
+             {1u << 1, "memory protection: data"},   {1u << 0, "memory protection: instruction"},
+             {1u << 4, "memory protection stacking"}};
+    for (unsigned i = 0; i < sizeof k / sizeof k[0]; i++) {
+        if (cfsr & k[i].bit) {
+            return k[i].text;
+        }
+    }
+    return cfsr ? "see CFSR" : "no fault status (escalated or debug)";
+}
+
+static int reset_text(int len) {
+    const crash_t *c = crash_last();
+    const char *crumb = k_crumb[c->crumb < CRUMB_COUNT ? c->crumb : 0u];
+    char t[160];
+    if (c->kind == CRASH_KIND_WATCHDOG) {
+        len = put(len, "Last reset    WATCHDOG - main loop stopped for 2 s\r\n");
+        snprintf(t, sizeof t, "Main loop was %s.", crumb);
+        len = wrap(len, LABEL, 14u, t);
+        if (c->irq != 0u) {
+            snprintf(t, sizeof t, "Stuck inside interrupt IRQ %" PRIu32 " (%s).", c->irq - 1u, irq_name(c->irq - 1u));
+        } else if (c->isr_tick != c->loop_tick) {
+            snprintf(t, sizeof t, "Interrupts kept running: tick %" PRIu32 " ms past the main loop's last pass.",
+                     c->isr_tick - c->loop_tick);
+        } else {
+            snprintf(t, sizeof t, "The tick stopped at the same time (interrupts off or stalled).");
+        }
+        return wrap(len, LABEL, 14u, t);
+    }
+    if (c->kind == CRASH_KIND_FAULT) {
+        if (c->exception >= 16u) {
+            snprintf(t, sizeof t, "HARD FAULT in interrupt IRQ %u (%s)", c->exception - 16u,
+                     irq_name(c->exception - 16u));
+        } else if (c->exception != 0u) {
+            snprintf(t, sizeof t, "HARD FAULT in exception %u", c->exception);
+        } else {
+            snprintf(t, sizeof t, "HARD FAULT in the main loop (%s)", crumb);
+        }
+        len = wrap(len, "Last reset    ", 14u, t);
+        len = put(len, LABEL "PC 0x%08" PRIX32 "   LR 0x%08" PRIX32 "   CFSR 0x%08" PRIX32 "\r\n", c->pc, c->lr,
+                  c->cfsr);
+        snprintf(t, sizeof t, "%s. Look up PC and LR with: arm-none-eabi-addr2line -f -e build\\diag\\firmware.elf "
+                 "0x%08" PRIX32 " 0x%08" PRIX32, cfsr_text(c->cfsr), c->pc, c->lr);
+        return wrap(len, LABEL, 14u, t);
+    }
+    return put(len, "Last reset    normal (power-on, reset button or reflash)\r\n");
+}
+
 /* One ATTENTION item: the heading before the first. */
 static int attn_item(int len, unsigned *count, const char *text) {
     if (*count == 0u) {
@@ -422,6 +515,8 @@ static int format_human(unsigned line) {
     case H_BAUD:
         return snprintf(s_buf, n, "Baud          UART0 %" PRIu32 "   UART1 %" PRIu32 "   %s\r\n", g_diag_actual_baud[0],
                         g_diag_actual_baud[1], g_app_baud_ok ? "OK" : "OUT OF TOLERANCE");
+    case H_RESET:
+        return reset_text(0);
     case H_UART_HEAD:
         return snprintf(s_buf, n, "\r\nUART%30s%16s\r\n", "UART0", "UART1");
     case H_RX_OVERFLOW:
@@ -639,6 +734,11 @@ static int format_human(unsigned line) {
         if (!g_app_baud_ok) {
             len = attn_item(len, &count, "UART baud rate out of tolerance");
         }
+        if (crash_last()->kind != CRASH_KIND_NONE) {
+            len = attn_item(len, &count, crash_last()->kind == CRASH_KIND_FAULT
+                                             ? "the board reset after a HARD FAULT (see Last reset)"
+                                             : "the board reset after a HANG: watchdog (see Last reset)");
+        }
         static const char *const ename[] = {"RX overflows", "TX rejects", "framing errors", "breaks",
                                             "HW overruns"};
         for (unsigned k = 0; k < 2u; k++) {
@@ -730,6 +830,7 @@ static unsigned line_count(void) {
 static uint64_t s_bootsel_at; /* 0 = not requested */
 
 void status_poll(void) {
+    crash_feed(); /* D-9: watchdog, heartbeat LED */
     if (s_bootsel_at != 0u) {
         if ((int64_t)(time_us_64() - s_bootsel_at) >= 0) {
             reset_usb_boot(0u, 0u); /* does not return */
@@ -738,7 +839,9 @@ void status_poll(void) {
     }
 
     /* From the host: 'm' machine format, 'h' readable, '~' bootloader. */
+    crash_crumb(CRUMB_STATUS_INPUT);
     int ch = getchar_timeout_us(0);
+    crash_crumb(CRUMB_IDLE);
     if (ch == 'm' || ch == 'M') {
         s_want_human = false;
     } else if (ch == 'h' || ch == 'H') {
@@ -747,9 +850,9 @@ void status_poll(void) {
         static const char k_msg[] = "\r\n\r\n*** '~' received: rebooting into the USB bootloader. The COM port "
                                     "will close; the board appears as the RP2350 drive. ***\r\n";
         if (tud_cdc_write_available() >= sizeof k_msg - 1u) {
-            (void)tud_cdc_write(k_msg, sizeof k_msg - 1u);
-            (void)tud_cdc_write_flush();
+            stdio_put_string(k_msg, (int)(sizeof k_msg - 1u), false, false);
         }
+        crash_disarm(); /* D-9: an intentional reboot, not a hang */
         s_bootsel_at = time_us_64() + BOOTSEL_DELAY_US;
         return;
     }
@@ -783,7 +886,9 @@ void status_poll(void) {
         s_len = 0;
     }
     if (s_len == 0) {
+        crash_crumb(CRUMB_STATUS_FORMAT);
         s_len = s_human ? format_human(s_line) : format_line(s_line);
+        crash_crumb(CRUMB_IDLE);
         s_off = 0;
         if (s_len <= 0 || s_len >= (int)sizeof s_buf) {
             s_len = 0;
@@ -810,7 +915,9 @@ void status_poll(void) {
     if (n > avail) {
         n = avail;
     }
+    crash_crumb(CRUMB_STATUS_SEND);
     stdio_put_string(s_buf + s_off, n, false, false);
+    crash_crumb(CRUMB_IDLE);
     s_off += n;
     if (s_off >= s_len) {
         s_len = 0;
