@@ -99,9 +99,19 @@ py -m pip install -r tools/requirements.txt
 
 ## Updater over UART0 / UART1 (Rev 2.25, step 6)
 
-Needs a 3.3 V USB-serial adapter: adapter TX → D7 (UART0 RX), adapter RX →
-D6 (UART0 TX), GND → GND. Use the diag (echo) build, so the USB console can
-still be watched. Remove the D6–D7 loopback jumper.
+Needs a 3.3 V USB-serial adapter: adapter TX → UART0 RX (GPIO1), adapter
+RX → UART0 TX (GPIO0), GND → GND; leave the adapter's VCC unconnected. Use
+the diag (echo) build, so the USB console can still be watched. Remove the
+D6–D7 loopback jumper.
+
+Check the direction before anything else: open a terminal on the adapter's
+port at 921600 and type. The echo build sends every character back. With no
+echo, swap the two signal wires (crossed TX/RX does no harm). Wire colours
+vary between cables. On the bench (Rev 2.25), the FTDI cable worked with the
+opposite colours to FTDI's TTL-232R convention, so go by the echo.
+
+Bench result (Rev 2.25, `57b546f`): `--uart --enter` over an FTDI cable on
+UART0 gives HELLO `on UART0`.
 
 1. `py tools\dfc_update.py COMx --uart --enter`. **Pass:** HELLO shows
    `on UART0`.
