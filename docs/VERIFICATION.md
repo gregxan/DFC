@@ -21,6 +21,16 @@ section. Procedures not listed there have not been run.
 | Offset removal (180° turn), axis orientation, SDA short to GND, sensor power-cycle at run time (M-2b) | Not run |
 | SET/RESET modes, saturation, M-8 durations, V-5a, supply current | Not run (need a debugger, analyzer or meter) |
 
+**Open after Rev 2.28 (not yet run on the board).**
+
+| Check | Status |
+|---|---|
+| Rates 500 and 250 Hz, sample count (M-13a), epoch jitter at lower rates (EX-10) | Not run |
+| Saved settings, steps 1–9 of "Non-volatile settings" below (V-12) | Not run (host test passes) |
+| Offset choice `o` (M-4c): field shifts by the offset, survives a power cycle | Not run |
+| `~` USB detach (B-20): drive appears every time | Pass, a few tries (10 not yet done) |
+| Release-build update over UART; UART1 tests (back pads); loopback tests B–D | Not run |
+
 **UART0 loopback, diag-pattern (Rev 2.25, D6→D7 jumper, magnetometer at 1 kHz), 23.3 min logged.**
 
 | Check | Result |

@@ -1,5 +1,5 @@
 /*
- * Non-volatile settings (Rev 2.28, NV-1..NV-12).
+ * Non-volatile settings (Rev 2.28, NV-1..NV-13; offset choice M-4c).
  *
  * A small block of settings (NV_DATA_SIZE = 64 bytes) kept in flash, outside
  * both firmware slots, so it survives power cycles and firmware updates.
