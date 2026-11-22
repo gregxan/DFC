@@ -44,6 +44,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - **EX-8** The main loop shall keep real-time performance: its worst-case execution shall be less than 1 ms (D-4). *(Replaced in Rev 2.14.)*
   - **User application:** the work of one epoch, from the epoch start until `app_poll()` returns, shall be < 1 ms, so the next epoch never starts late. Epochs that do run late are counted (D-1).
   - **Test applications:** one main-loop pass shall be < 1 ms.
+  - **Exception: settings saves (NV-7).** A save of the non-volatile settings blocks the main loop for about 1 ms, and up to about 400 ms on every 16th save (sector erase). It is a deliberate, rare stall, made only on request (a client command or the `s` key), never periodically. The epochs it delays are counted as late (D-1) like any others, but they are not a fault, and EX-8 does not apply to the epoch that runs the save. *(Added in Rev 2.28.)*
 - **EX-9** The CPU shall not read or write a peripheral FIFO that a DMA channel is paced against, unless that channel's DREQ credit counter is resynchronised (DBG_CTDREQ) before its next transfer. The RP2350 datasheet (§12.6.4.2) warns that such access "causes the channel and peripheral to become desynchronised, and can cause corruption or loss of data". *(Added in Rev 2.12.)*
 - **EX-10** The user application shall run on 1 ms epochs aligned to the tick grid (M-6). After each tick, the main loop calls `app_poll()` once. It consumes the data that arrived during the previous epoch: UART bytes received up to the tick (made available by DMA within U-16), and the newest magnetometer sample, published during the previous epoch (M-8). The test applications (`echo`, `pattern`) run `app_poll()` on every main-loop pass instead, so the latency tests (V-2, V-3) can measure how quickly a byte is noticed. *(Added in Rev 2.14.)*
   - At every magnetometer rate (M-3b) the epochs shall still run every 1 ms. Only the epochs that follow a sampling tick bring a new sample. They see it with the same timing as at 1 kHz: published during the previous epoch, about 0.45 ms after that tick. The application tells them apart by the sample count (M-13a). *(Added in Rev 2.27.)*
@@ -185,7 +186,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
 - **M-11** Two sample slots shall be used. DMA shall always write into the slot not currently marked latest.
 - **M-12** A transaction is complete when the I2C controller detects the STOP condition that ends the trigger write. On that event, the completion interrupt (I2C STOP detect) shall confirm that both magnetometer DMA channels have finished. It shall then publish the new slot as latest with a single atomic 32-bit write. DMA channel completion does not mark the end of a transaction and shall not be used for this purpose. *(Amended in Rev 2.1.)*
-- **M-13** The read-latest function shall copy the latest slot inside a critical section of at most 2 µs. It returns the sample, timestamp, sequence number, valid flag, and the current offset calibration and its validity (M-4b). *(Amended in Rev 2.9.)* It also returns the sample count (M-13a) as of that sample, copied in the same critical section. *(Amended in Rev 2.27.)*
+- **M-13** The read-latest function shall copy the latest slot inside a critical section of at most 2 µs. It returns the sample, timestamp, sequence number, valid flag, and the current offset calibration and its validity (M-4b). *(Amended in Rev 2.9.)* It also returns the sample count (M-13a) as of that sample, copied in the same critical section. *(Amended in Rev 2.27.)* It also returns the offset choice in effect (`offset_apply`, M-4c), so the field helpers convert that reading consistently. *(Amended in Rev 2.28.)*
 - **M-13a** Firmware shall count every published sample, valid or invalid, in a 32-bit count readable at any time through `mag_sample_count()`. The count changes exactly when a new sample is published, so comparing it with the previous epoch's value tells whether an epoch brought a new sample. It wraps after 2^32 samples, so compare for inequality. *(Added in Rev 2.27.)*
 - **M-14** Only the latest sample is retained. No history buffer is required.
 
@@ -235,6 +236,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
   This is a diagnostic exception to D-5. Production builds never reset themselves. *(Added in Rev 2.23.)*
   - The watchdog shall be fed only once this capture has armed it, and shall not be armed during a trial boot (F-20). Otherwise feeding would hold off the bootrom's trial watchdog. A watchdog reset with an implausible tick gap (over 10 s) shall not be reported as a hang: that is a BOOTSEL reflash rebooting through the watchdog. *(Added in Rev 2.26.)*
+  - A settings save (NV-7) stalls the main loop for at most about 400 ms, well inside the 2 s watchdog, so it shall not cause a watchdog reset. It is also allowed while an image is on trial (F-20). The bootrom's trial watchdog (16.7 s) is not fed by the firmware, and a save is far shorter than it. *(Added in Rev 2.28.)*
 - **D-6** Firmware shall provide section profiling: named code sections can be timed with negligible overhead (last, maximum and average, in µs). These are reported in diagnostic builds. The user application's handlers are profiled this way. *(Added in Rev 2.14.)*
 
 ## 6a. Firmware Update
@@ -243,7 +245,12 @@ Firmware for a Seeed XIAO RP2350 that:
 
 ### 6a.1 Flash layout and provisioning
 
-- **F-1** The 2 MB flash shall be divided by a partition table (`partition_table.json`): the table at 0 KB (8 KB), slot A (partition 0) at 8 KB, slot B (partition 1, linked to A as an A/B pair) at 1020 KB, each 1012 KB and accepting the `rp2350-arm-s` UF2 family. The last 16 KB shall stay unpartitioned. The build shall produce the table as `pt.uf2` next to `firmware.uf2`.
+- **F-1** The 2 MB flash shall be divided by a partition table (`partition_table.json`): the table at 0 KB (8 KB), slot A (partition 0) at 8 KB, slot B (partition 1, linked to A as an A/B pair) at 1020 KB, each 1012 KB and accepting the `rp2350-arm-s` UF2 family. The last 16 KB shall stay unpartitioned. The build shall produce the table as `pt.uf2` next to `firmware.uf2`. *(Use of the last 16 KB added in Rev 2.28:)*
+  - 2032–2040 KB (0x1FC000–0x1FDFFF): the non-volatile settings (NV-2).
+  - 2040–2044 KB: spare.
+  - 2044–2048 KB (0x1FF000): the sector at which the RP2350-E10 block is aimed (F-3).
+
+  The updater shall write and erase only inside the slot it is installing into, so an update never touches the settings.
 - **F-2** The same image shall run from either slot. The build shall fail if `firmware.bin` exceeds one slot.
 - **F-3** Every `firmware.uf2` shall start with the RP2350-E10 workaround block, aimed at the last flash sector, which is unpartitioned. On A3 and later chips the block is ignored.
 - **F-4** A unit shall be provisioned once over the USB BOOTSEL drive: `pt.uf2`, then `firmware.uf2`. On blank slots the first image goes into slot B. An image copied to the BOOTSEL drive shall not be a trial image (F-18): it is permanent at its first boot, and the bootrom erases the other slot's first sector. After provisioning, updates shall use the updater.
@@ -378,9 +385,9 @@ Firmware for a Seeed XIAO RP2350 that:
 ## 7. Resources
 
 - **R-1** DMA channels: 6 of 16. UART0 RX, UART0 TX, UART1 RX, UART1 TX, I2C command, I2C data.
-- **R-2** RAM: about 24 KB for queues with default sizes, plus magnetometer slots and counters.
+- **R-2** RAM: about 24 KB for queues with default sizes, plus magnetometer slots and counters. The settings store adds a 256-byte page buffer and the 64-byte RAM copy of the settings (NV-1). *(Amended in Rev 2.28.)*
 - **R-3** Peripheral clock shall remain 150 MHz, or baud accuracy shall be re-verified if changed.
-- **R-4** Flash: one image shall fit a 1012 KB slot (F-1, F-2). At Rev 2.26 a diagnostic image is about 82 KB and a release image about 25 KB. *(Added in Rev 2.26.)*
+- **R-4** Flash: one image shall fit a 1012 KB slot (F-1, F-2). At Rev 2.26 a diagnostic image is about 82 KB and a release image about 25 KB. *(Added in Rev 2.26.)* At Rev 2.28 they are about 87 KB and 29 KB (code and read-only data). *(Amended in Rev 2.28.)*
 
 ## 8. Build and Toolchain
 
@@ -487,6 +494,16 @@ Firmware for a Seeed XIAO RP2350 that:
   - With `--allow-no-info` alone, it falls back.
 
   The host side can be pre-checked against `tools/sim_board.py`. *(Added in Rev 2.26.)*
+- **V-12** Non-volatile settings and offset choice (NV-1 … NV-13, M-4c):
+  - A host test of `nvstore.c` against simulated flash shall run 1,000 or more saves, wrapping the ring, with torn programs and torn erases. It shall always load the last completed value. A record from older firmware (shorter) shall load with defaults for the missing fields.
+  - On the board:
+    - a saved rate and offset choice shall be in effect from the first sample after a power cycle;
+    - an unchanged save shall not write;
+    - a save that crosses a sector shall erase within 400 ms;
+    - a power loss during a save shall leave either the old or the new settings;
+    - a firmware update shall keep the settings.
+
+  Procedure: `VERIFICATION.md`, "Non-volatile settings". *(Added in Rev 2.28.)*
 - **V-7** All verification tools (logic analyzer software, serial terminals, test scripts) shall run on Windows. Test scripts shall be written in Python.
 
 ## 10. Revision 2 Changes
@@ -784,7 +801,14 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 
 ## 38. Revision 2.28 Changes
 
-- **Added section 6b (NV-1 … NV-13).** A 64-byte non-volatile settings block in two reserved flash sectors, written as append-only records with CRC, safe against power loss. Its first field is the start-up magnetometer rate, applied in `app_init()`.
+- **Added section 6b (NV-1 … NV-13).** A 64-byte non-volatile settings block in two reserved flash sectors, written as append-only records with CRC, safe against power loss. It holds two fields, the start-up magnetometer rate and the offset choice (M-4c), with 61 bytes reserved. `app_init()` applies them with `settings_apply_startup()` before the tick starts. `app_user.c` has commented-out client-command stubs that set and save each one.
+- **Amended EX-8.** A settings save is an allowed exception to the 1 ms limit.
+- **Amended D-9.** A settings save fits inside the 2 s watchdog, and is allowed during a trial boot.
+- **Amended M-13.** Each reading also carries the offset choice (`offset_apply`).
+- **Amended F-1.** The use of the last 16 KB is stated: settings, spare, E10 sector. The updater never writes outside its target slot.
+- **Amended R-2, R-4.** Settings RAM, and image sizes at Rev 2.28.
+- **Added V-12.** Verification of the settings and the offset choice.
+- **Diagnostic report.** A `Saved` line (stored settings, record number, last save). The Offset line shows whether the offset is removed. The machine `CAL` line gains `offset_apply` (`fwstatus.py` shows it).
 - **Amended M-3b.** The start-up rate can also come from the saved settings (NV-11).
 - **Amended B-20.** `~` detaches from USB for 500 ms before entering the bootloader. Keys `o` and `s` added.
 - **Added M-4c.** A run-time choice of whether the field helpers remove the calibrated offset. It is also kept in the saved settings (NV-11).

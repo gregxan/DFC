@@ -764,7 +764,7 @@ reset still brings the old image back.
 | HW-4, HW-5 | `config.h`; `mag_init()` pins, pull-ups, address 0x30 |
 | HW-5a | Hardware only (SPI_CS, CAP and VDD capacitors); README wiring notes |
 | HW-7, HW-8 | C + Pico SDK; core 1 never launched |
-| NV-1 … NV-13 | `nvstore.[ch]`; `app_init()` in `app_user.c`, `app_test.c`; `status.c` `s` key and `H_MAG_SAVED` |
+| NV-1 … NV-13, V-12 | `nvstore.[ch]` (`settings_apply_startup()`, `settings_save_*()`); `app_init()` in `app_user.c`, `app_test.c`; client stubs in `link0_handler()`; `status.c` `o` and `s` keys, `H_MAG_SAVED` |
 | EX-1, EX-2 | `main.c`; every API in `link.c` / `mag.c` / `diag.c` returns without waiting |
 | EX-3 | `cs_enter()` / `cs_exit()` in `diag.h`; max recorded as `DIAG_T_CRITICAL` |
 | EX-4, EX-5 | §2; `irq_set_priority` calls in `link.c`, `mag.c`, `tick.c`, `status.c` |
@@ -781,6 +781,7 @@ reset still brings the old image back.
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
 | M-4b, D-1 (calibration, saturation) | `calibrate()`, `count_saturation()`, `blocking_measure()`, `mag_field()` |
+| M-4c (offset choice) | `mag_set_offset_apply()`, `mag_offset_apply()`, `g_mag_offset_apply`, `mag_reading_t.offset_apply`, `mag_field()`/`mag_field16()`; `status.c` `o` key, Offset line, `CAL offset_apply` |
 | M-2b | `publish()` (`s_not_ready_score`), `mag_tick_isr()` (`MAG_IDLE`), `DIAG_MAG_RUNTIME_FAULT` |
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
@@ -805,7 +806,7 @@ reset still brings the old image back.
 | D-5 | No counter or flag triggers anything; only M-15/M-16 aborts and U-9 resync |
 | R-1, R-2 | §5 |
 | B-1 … B-17 | README.md, `CMakePresets.json`, `cmake/host_tools.cmake`, `.gitattributes`, `.gitmodules`, `.vscode/` |
-| B-19, B-20 | `CMakeLists.txt` (`pico_enable_stdio_uart 0`, USB only with `APP_USB_STATUS`), `status_init()` |
+| B-19, B-20 | `CMakeLists.txt` (`pico_enable_stdio_uart 0`, USB only with `APP_USB_STATUS`), `status_init()`; `~`: `status_poll()` (`tud_disconnect()`, `BOOTSEL_DETACH_US`, then `reset_usb_boot()`) |
 | B-21 … B-25 | `CMakeLists.txt` (`-g` in Release, target-wide C flags, per-file SDK exceptions) |
 | V-1 … V-7 | docs/VERIFICATION.md, `tools/` |
 
