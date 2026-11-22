@@ -1055,6 +1055,8 @@ static unsigned line_count(void) {
  * for reflashing, after a short delay so the notice reaches the terminal. */
 #define BOOTSEL_DELAY_US 100000u
 static uint64_t s_bootsel_at; /* 0 = not requested */
+static bool s_bootsel_detached; /* Rev 2.28: USB already disconnected */
+#define BOOTSEL_DETACH_US 500000u /* time off the bus before the reboot */
 static uint64_t s_updater_at; /* Rev 2.25: '!' pending, 0 = not requested */
 
 void status_poll(void) {
@@ -1067,8 +1069,19 @@ void status_poll(void) {
         return;
     }
     if (s_bootsel_at != 0u) {
+        /* Two steps (Rev 2.28, bench: the drive often did not appear when
+         * the bootrom took over USB at once): first drop off the bus, so
+         * the host sees a clean unplug and closes the COM port; then, after
+         * BOOTSEL_DETACH_US, reboot into the bootloader, which attaches as
+         * a new device. */
         if ((int64_t)(time_us_64() - s_bootsel_at) >= 0) {
-            reset_usb_boot(0u, 0u); /* does not return */
+            if (!s_bootsel_detached) {
+                tud_disconnect();
+                s_bootsel_detached = true;
+                s_bootsel_at = time_us_64() + BOOTSEL_DETACH_US;
+            } else {
+                reset_usb_boot(0u, 0u); /* does not return */
+            }
         }
         return;
     }
