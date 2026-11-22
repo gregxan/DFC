@@ -53,13 +53,8 @@ void app_init(void) {
      * 1 ms tick starts, so the first sample already uses it. With nothing
      * saved the rate stays at 1000 Hz.
      *
-     * To change and keep a rate from your client protocol (main loop only;
-     * the flash write stalls the loop, ~1 ms, sometimes up to ~400 ms, and
-     * is skipped if the value is unchanged):
-     *     if (mag_set_rate_hz(hz)) {
-     *         (void)settings_save_mag_rate(hz);
-     *     }
-     * Supported: 1000, 500, 250, 200, 100, 50 Hz. */
+     * To change and keep a rate from your client protocol, see the
+     * commented-out stub in link0_handler(). */
     (void)settings_load();
     uint32_t hz = settings_mag_rate_hz();
     if (hz != 0u) {
@@ -123,6 +118,26 @@ static void link0_handler(void) {
         }
         check_update_request(LINK_0, s_link0_buf, n); /* firmware update entry */
         /* TODO: parse / process LINK_0 data here. */
+
+        /* Client command: set the magnetometer rate and keep it as the
+         * start-up rate (M-3b, NV-11/NV-12). Decode `hz` from your own
+         * message; the same goes in link1_handler() if LINK_1 takes
+         * commands too. mag_set_rate_hz() rejects an unsupported rate
+         * (1000, 500, 250, 200, 100, 50 Hz only). The save blocks this
+         * epoch for ~1 ms (up to ~400 ms on every 16th save: a few epochs
+         * are missed) and writes nothing if the rate is unchanged. Returns 0
+         * on success, else a negative NV_ERR_* or bootrom error (nvstore.h).
+         *
+         * if (<message is SET_MAG_RATE>) {
+         *     uint32_t hz = <rate from the message>;
+         *     if (mag_set_rate_hz(hz)) {
+         *         int err = settings_save_mag_rate(hz);
+         *         (void)err; // reply ok / error to the client
+         *     } else {
+         *         // reply "unsupported rate" to the client
+         *     }
+         * }
+         */
         (void)link_write(LINK_1, s_link0_buf, n);
         avail -= n;
     }
