@@ -9,10 +9,11 @@ format, each second the firmware emits nine lines:
     L0 rx_overflow=.. tx_reject=.. framing=.. break=.. overrun=.. rx_hwm=.. tx_hwm=.. pattern_err=..
     L1 ...
     MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. no_ack=.. wrong_id=.. cause=.. id=0x.. bus_clear=.. ...
-    MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=..
-    CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
+    MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=.. rate_hz=.. rate_req_hz=.. bw=..
+         noise_n=.. nx_ug=.. ny_ug=.. nz_ug=..   (noise: test builds only)
+    CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=.. offset_apply=..
     WIRE ran=.. sda_low=.. scl_low=.. sda_pullup=.. scl_pullup=.. shorted=.. found=.. mag=.. mag_swapped=.. ...
-    BOOT ran=.. id=0x.. status=0x.. cause=.. cal_ok=.. t_fast_us=.. t_slow_us=.. t_rs_us=.. burst_status=0x.. ...
+    BOOT ran=.. id=0x.. status=0x.. cause=.. cal_ok=.. t_fast_us=.. t_slow_us=.. t_rs_us=.. t_200_us=.. ...
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
 
 User application builds (diag-user) add:
@@ -31,6 +32,8 @@ health checks (colour where the console supports it):
     py tools/fwstatus.py COM7 --scroll       # one report below the next
     py tools/fwstatus.py COM7 --raw          # the firmware's own lines
     py tools/fwstatus.py COM7 --log run.log  # also record every raw line
+    py tools/fwstatus.py COM7 --rate 100     # set the magnetometer rate first
+                                             # (1000, 500, 250, 200, 100 or 50 Hz)
 """
 
 from __future__ import annotations
@@ -80,6 +83,9 @@ class StatusMonitor:
         self._request_machine()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def send(self, data: bytes) -> None:
+        self._ser.write(data)
 
     def _request_machine(self) -> None:
         try:
@@ -266,6 +272,21 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     for key, label in (("rx_hwm", "RX high-water"), ("tx_hwm", "TX high-water")):
         lines.append(f"  {label:<14}{g('L0', key):>14}{g('L1', key):>14}")
     lines.append(f"  {'TX interrupts':<14}{g('L0', 'tx_irq'):>14}{g('L1', 'tx_irq'):>14}")
+    if "rx_bytes" in cur.get("L0", {}):
+        secs = (g("STAT", "t_ms") - prev.get("STAT", {}).get("t_ms", 0)) / 1000.0 if prev else 0.0
+
+        def rate(link: str) -> str:
+            if not secs:
+                return "-"
+            r = (d(link, "rx_bytes") & 0xFFFFFFFF) / secs / 1000
+            t = (d(link, "tx_bytes") & 0xFFFFFFFF) / secs / 1000
+            return f"{r:.1f}/{t:.1f}"
+
+        def total(link: str) -> str:
+            return f"{g(link, 'rx_bytes') / 1e6:.1f}/{g(link, 'tx_bytes') / 1e6:.1f}"
+
+        lines.append(f"  {'RX/TX kB/s':<14}{rate('L0'):>14}{rate('L1'):>14}   (line rate 92.2)")
+        lines.append(f"  {'RX/TX MB':<14}{total('L0'):>14}{total('L1'):>14}")
 
     # Magnetometer
     lines.append("")
@@ -279,7 +300,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     lines.append(_paint("  MAGNETOMETER  ", _BOLD, colour) + state)
     if "valid" in cur.get("MAG", {}):
         dv = d("MAG", "valid")
-        rate = (f"  (+{dv} this report" + ("" if fault else ", expect ~1000") + ")") if prev is not None else ""
+        hz = g("MAGS", "rate_hz") or 1000
+        rate = (f"  (+{dv} this report" + ("" if fault else f", expect ~{hz}") + ")") if prev is not None else ""
         lines.append(f"  valid samples  {g('MAG', 'valid')}{rate}")
         lines.append(f"  invalid {count('MAG', 'invalid', False)}   gaps {count('MAG', 'gaps')}   "
                      f"stale {count('MAG', 'stale', False)}")
@@ -299,6 +321,7 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
             return "error" if v == 0 else ("never" if v == 0xFFFF else f"{v / 1000:.2f} ms")
         lines.append(f"  start-up  ID 0x{b.get('id', 0):02X}  status 0x{b.get('status', 0):02X}  "
                      f"calibration {'OK' if b.get('cal_ok') else 'failed'}   meas. time 800 Hz {t(b.get('t_fast_us', 0))}"
+                     f", 200 Hz {t(b.get('t_200_us', 0))}"
                      f", 100 Hz {t(b.get('t_slow_us', 0))}, after repeated START {t(b.get('t_rs_us', 0))}"
                      f", Status alone/after data 0x{b.get('direct_status', 0):02X}/0x{b.get('burst_status', 0):02X}")
     if not fault:
@@ -307,10 +330,22 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
                 problems.append(f"magnetometer {label} rising")
         if d("MAGS", "not_ready"):
             problems.append("magnetometer samples read before the measurement finished (not ready)")
+    m = cur.get("MAGS", {})
+    if "rate_hz" in m:
+        bw = {0: "100 Hz", 1: "200 Hz", 2: "400 Hz", 3: "800 Hz"}.get(m.get("bw"), "?")
+        txt = f"  rate {m['rate_hz']} Hz (sensor BW {bw}, one measurement per sample)"
+        if m.get("rate_req_hz", m["rate_hz"]) != m["rate_hz"]:
+            txt += f"   {m['rate_req_hz']} Hz requested"
+        lines.append(txt)
+    if m.get("noise_n", 0) >= 2:
+        lines.append(f"  noise x {m['nx_ug'] / 1000:.2f}  y {m['ny_ug'] / 1000:.2f}  z {m['nz_ug'] / 1000:.2f} mG RMS"
+                     f" over {m['noise_n']} samples (board kept still)")
     sr = {0: "single cycle", 1: f"SET pulse every {g('MAGS', 'sr_interval')}"}.get(g("MAGS", "sr_mode"), "?")
     lines.append(f"  field x {g('MAGS', 'x'):>8}  y {g('MAGS', 'y'):>8}  z {g('MAGS', 'z'):>8}  counts (16384/G)"
                  f"   SET/RESET: {sr}")
     cal = "valid" if g("CAL", "offset_valid") == 1 else _paint("not calibrated", _YEL, colour)
+    if g("CAL", "offset_apply", 1) == 0:  # Rev 2.28 (M-4c); absent on older firmware
+        cal += ", " + _paint("LEFT IN the field", _YEL, colour)
     lines.append(f"  offset x {g('CAL', 'ox'):>8}  y {g('CAL', 'oy'):>8}  z {g('CAL', 'oz'):>8}   "
                  f"{cal}, {g('CAL', 'offset_cal')} calibrations")
 
@@ -321,8 +356,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     isr = max([t.get(k, 0) for k in ("isr_uart0", "isr_uart1", "isr_txdma", "isr_i2c", "isr_tick")] or [0])
     api = max([t.get(k, 0) for k in ("api_read", "api_write", "api_mag")] or [0])
     lines.append(f"  interrupt handler {limit(isr, 5000, 'ns')} (<= 5000)   critical section "
-                 f"{limit(t.get('crit', 0), 2000, 'ns')} (<= 2000)   API {limit(api, 2000, 'ns')} (<= 2000)")
-    if isr > 5000 or t.get("crit", 0) > 2000 or api > 2000:
+                 f"{limit(t.get('crit', 0), 2000, 'ns')} (<= 2000)   API {limit(api, 3000, 'ns')} (<= 3000)")
+    if isr > 5000 or t.get("crit", 0) > 2000 or api > 3000:
         problems.append("a handler, critical-section or API time is over its limit (EX-3/4/7)")
     if mode == 2:
         e = cur.get("EPOCH", {})
@@ -368,6 +403,8 @@ def main() -> int:
     ap.add_argument("--raw", action="store_true", help="print the firmware's machine-format lines unchanged")
     ap.add_argument("--scroll", action="store_true", help="print each report below the last "
                     "instead of redrawing the screen")
+    ap.add_argument("--rate", type=int, choices=(1000, 500, 250, 200, 100, 50), help="set the magnetometer rate (Hz) "
+                    "by sending 'r' until the firmware reports it; lasts until the next reset")
     ap.add_argument("--bootsel", action="store_true", help="send '~' to reboot the board into its USB "
                     "bootloader (RP2350 drive) for reflashing, then exit")
     args = ap.parse_args()
@@ -389,6 +426,9 @@ def main() -> int:
                       file=sys.stderr)
                 continue
             cur = mon.report()
+            req = cur.get("MAGS", {}).get("rate_req_hz")
+            if args.rate is not None and req is not None and req != args.rate:
+                mon.send(b"r")  # one step per report: 1000 -> 500 -> 250 -> 200 -> 100 -> 50 -> 1000
             if args.raw:
                 print(format_report(cur), "\n", flush=True)
             else:

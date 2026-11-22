@@ -13,6 +13,7 @@
  *   RX_SEEN  toggles when link_read() returns data      (V-2)
  *   TX_WRITE toggles immediately before link_write()    (V-3)
  */
+#include <math.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -24,6 +25,8 @@
 #include "config.h"
 #include "link.h"
 #include "mag.h"
+#include "nvstore.h"
+#include "updater.h"
 
 #if APP_MODE == APP_MODE_USER
 #error "app_test.c is built only for APP_MODE echo or pattern"
@@ -39,6 +42,31 @@ volatile uint32_t g_app_mag_invalid; /* invalid (M-9) samples consumed          
 volatile uint32_t g_app_mag_invalid_by_reason[4]; /* indexed by mag_sample_reason_t */
 volatile uint32_t g_app_mag_stale;   /* iterations on which the latest sample was stale */
 volatile uint32_t g_app_rx_pattern_errors[LINK_COUNT]; /* APP_MODE_PATTERN only */
+
+/* D-10 (Rev 2.25): per-axis noise of the valid samples since the last
+ * app_mag_noise_take() (once per status report). Sums of the field and of
+ * its square, in counts; exact in 64 bits for well over 10^5 samples. */
+static int64_t s_noise_sum[3];
+static int64_t s_noise_sq[3];
+static uint32_t s_noise_n;
+
+void app_mag_noise_take(uint32_t *count, uint32_t rms_ug[3]) {
+    uint32_t k = s_noise_n;
+    *count = k;
+    for (unsigned i = 0; i < 3u; i++) {
+        rms_ug[i] = 0u;
+        if (k >= 2u) {
+            /* variance = (n * sum(x^2) - sum(x)^2) / n^2, in counts^2 */
+            int64_t num = (int64_t)k * s_noise_sq[i] - s_noise_sum[i] * s_noise_sum[i];
+            float var = (float)num / ((float)k * (float)k);
+            float sd = var > 0.0f ? sqrtf(var) : 0.0f;
+            rms_ug[i] = (uint32_t)(sd * (1.0e6f / 16384.0f) + 0.5f); /* 16384 counts/G */
+        }
+        s_noise_sum[i] = 0;
+        s_noise_sq[i] = 0;
+    }
+    s_noise_n = 0u;
+}
 
 #if APP_TEST_PINS
 static const uint32_t k_rx_seen_mask[LINK_COUNT] = {1u << TEST_PIN_LINK0_RX_SEEN, 1u << TEST_PIN_LINK1_RX_SEEN};
@@ -60,6 +88,18 @@ static void test_pins_init(void) {}
 #endif
 
 static uint8_t s_buf[256];
+
+/* Rev 2.25: the generic updater trigger (20 consecutive '!', updater.h) on
+ * either UART reboots into the updater on that link. */
+static updater_trigger_t s_trigger[LINK_COUNT];
+_Static_assert((int)LINK_0 == (int)UPDATER_LINK_UART0 && (int)LINK_1 == (int)UPDATER_LINK_UART1,
+               "link and updater link numbers must match");
+
+static void check_trigger(unsigned i, const uint8_t *p, size_t n) {
+    if (updater_trigger_scan(&s_trigger[i], p, n)) {
+        (void)updater_request((updater_link_t)i, UPDATER_REQUEST_KEY); /* does not return */
+    }
+}
 
 #if APP_MODE == APP_MODE_PATTERN
 static uint8_t s_tx_next[LINK_COUNT];
@@ -94,6 +134,7 @@ static void pattern_tx(unsigned i) {
 static void mag_consume(void) {
     static bool have_last;
     static uint32_t last_seq;
+    static uint32_t last_period; /* M-3b: next seq = last_seq + last_period */
     static uint32_t last_published_seq;
     static bool have_published;
 
@@ -118,15 +159,21 @@ static void mag_consume(void) {
         have_last = false; /* gap expected across an abort; counted by counters */
         return;
     }
-    if (have_last && r.s.seq != last_seq + 1u) {
+    if (have_last && r.s.seq != last_seq + last_period) {
         g_app_mag_gaps++;
     }
     have_last = true;
     last_seq = r.s.seq;
+    last_period = r.s.period_ticks;
     g_app_mag_valid++;
 
     int32_t xyz[3];
     mag_field(&r, xyz); /* offset removed when calibrated (M-4b) */
+    for (unsigned i = 0; i < 3u; i++) { /* D-10 */
+        s_noise_sum[i] += xyz[i];
+        s_noise_sq[i] += (int64_t)xyz[i] * xyz[i];
+    }
+    s_noise_n++;
     g_app_mag_offset[0] = r.offset[0];
     g_app_mag_offset[1] = r.offset[1];
     g_app_mag_offset[2] = r.offset[2];
@@ -138,12 +185,18 @@ static void mag_consume(void) {
 
 void app_init(void) {
     test_pins_init();
+    /* NV-11 (Rev 2.28): saved magnetometer rate and offset choice, as in
+     * app_user.c. Diag console: 'r' rate, 'o' offset on/off, 's' saves. */
+    (void)settings_apply_startup();
 }
 
 void app_poll(void) {
     for (unsigned i = 0; i < LINK_COUNT; i++) {
         link_id_t id = (link_id_t)i;
         size_t n = link_read(id, s_buf, sizeof s_buf);
+        if (n != 0u) {
+            check_trigger(i, s_buf, n);
+        }
 #if APP_MODE == APP_MODE_PATTERN
         if (n != 0u) {
             TEST_TOGGLE(k_rx_seen_mask[i]);

@@ -1,12 +1,16 @@
-; I2C bus clear: nine SCL clocks at about 100 kHz, open-drain.
+; I2C bus clear: nine SCL clocks at about 100 kHz, then a STOP, open-drain
+; (UM10204 3.1.16). Rev 2.25: the STOP was added after a bench test. With
+; SCL reconnected mid-transfer, the controller lost arbitration, and it
+; then waited for a STOP before it would start again. Clocks alone never
+; produced one, so every later transaction hung.
 ;
-; The SCL pad's output latch is held at 0, so "set pindirs, 1" pulls SCL
-; low and "set pindirs, 0" releases it to the pull-up. Started by pushing
-; any word to the TX FIFO; signals completion by pushing a word to the RX
-; FIFO. With clkdiv 24 at 150 MHz one cycle is 160 ns, so 32 cycles is
-; ~5.1 us and one clock is ~10.2 us. Total runtime ~100 us.
-;
-; SET pins and IN pins both map to SCL.
+; SET pins map to SDA (bit 0) and SCL (bit 1): SCL must be SDA + 1, which
+; holds for every RP2350 I2C pin pair. Both pads' output latches are held
+; at 0, so a 1 in "set pindirs" pulls that line low and a 0 releases it to
+; the pull-up. IN pin 0 is SCL. Started by pushing any word to the TX FIFO;
+; signals completion by pushing a word to the RX FIFO. With clkdiv 24 at
+; 150 MHz one cycle is 160 ns, so 32 cycles is ~5.1 us and one clock is
+; ~10.2 us. Total runtime ~125 us.
 
 .program i2c_bus_clear
 .wrap_target
@@ -14,8 +18,12 @@
     wait 1 pin 0    [31]  ; SCL released by the I2C controller
     set x, 8        [31]  ; 9 clocks
 clk:
-    set pindirs, 1  [31]  ; SCL low
+    set pindirs, 2  [31]  ; SCL low, SDA released
     set pindirs, 0  [30]  ; SCL released
     jmp x-- clk
+    set pindirs, 2  [31]  ; STOP: SCL low,
+    set pindirs, 3  [31]  ;       then SDA low,
+    set pindirs, 1  [31]  ;       release SCL (SDA still low),
+    set pindirs, 0  [31]  ;       release SDA while SCL is high
     push noblock    [31]  ; done
 .wrap

@@ -20,7 +20,12 @@
 #define MMC_CTRL0_RESET (1u << 4)
 #define MMC_CTRL0_AUTO_SR_EN (1u << 5)
 
-/* Internal Control 1: BW[1:0]. 0b11 = 800 Hz, 0.5 ms measurement time. */
+/* Internal Control 1: BW[1:0]. Datasheet measurement time and RMS noise:
+ * 00 = 100 Hz, 8 ms, 0.4 mG (power-on default); 01 = 200 Hz, 4 ms, 0.6 mG;
+ * 10 = 400 Hz, 2 ms, 0.8 mG; 11 = 800 Hz, 0.5 ms, 1.2 mG. */
+#define MMC_CTRL1_BW_100HZ 0x00u
+#define MMC_CTRL1_BW_200HZ 0x01u
+#define MMC_CTRL1_BW_400HZ 0x02u
 #define MMC_CTRL1_BW_800HZ 0x03u
 #define MMC_CTRL1_SW_RST (1u << 7) /* software reset; 10 ms power-on time */
 

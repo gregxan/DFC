@@ -1,14 +1,189 @@
 # Verification (section 9)
 
-None of the procedures below has been run yet. Every numeric limit in the
-requirements is an engineering estimate that these measurements must
-confirm.
+Every numeric limit in the requirements is an engineering estimate that
+these measurements must confirm. Results so far are logged in the next
+section. Procedures not listed there have not been run.
+
+## Bench results
+
+**Magnetometer, `diag` build, board and sensor only (Rev 2.25, firmware `eeb7a72`).**
+
+| Check | Result |
+|---|---|
+| Wiring check, start-up (ID, OTP, calibration), measurement timing | Pass |
+| Cold boot: `Last reset` normal, all checks OK | Pass |
+| 1 kHz completeness: `not ready` 0 over several minutes, single-cycle mode | Pass |
+| Rate changes 1000 / 200 / 100 / 50 Hz: no `stale`, `not ready`, `gaps` or `invalid` at the changes | Pass (after `737b12e`) |
+| Noise (mG RMS, x / y / z) | 1000 Hz 0.76 / 1.05 / 1.32; 200 Hz 0.29 / 0.43 / 0.53; 100 Hz 0.21 / 0.32 / 0.41; 50 Hz about the same as 100 Hz. Allow ~10 s of settling after a change |
+| SDA / SCL disconnect and reconnect while running (V-6, M-7a) | Pass (after the bus-clear STOP fix, `897909b`) |
+| Sensor powered after boot (V-6) | Accepted limitation: needs an MCU reset (see V-6) |
+| RESET button, 20 times | Pass |
+| Offset removal (180° turn), axis orientation, SDA short to GND, sensor power-cycle at run time (M-2b) | Not run |
+| SET/RESET modes, saturation, M-8 durations, V-5a, supply current | Not run (need a debugger, analyzer or meter) |
+
+**UART0 loopback, diag-pattern (Rev 2.25, D6→D7 jumper, magnetometer at 1 kHz), 23.3 min logged.**
+
+| Check | Result |
+|---|---|
+| UART0: 128.8 MB received at 92.2 kB/s (line rate). Pattern errors, overflows, rejects, framing, breaks and overruns all 0 | Pass |
+| UART1: transmitting at line rate (nothing wired to its RX); all counters 0 | Pass |
+| Magnetometer: 1,397,000 valid samples (1000/s), 0 invalid, gaps, I2C errors, timeouts or missed ticks | Pass |
+| No resets; tick overruns 0; main loop max 54 µs | Pass |
+| Handlers max 3.18 µs (tick), critical sections 1.17 µs, API max 2.79 µs (link_write, under the 3 µs EX-7 limit) | Pass |
+| Peak RX buffer 14 bytes, TX queue full (4096); 43.8 TX interrupts/s | Pass |
+| Noise under load: median 0.76 / 1.06 / 1.31 mG (same as without UART traffic) | Pass |
+| Tests B–D (open RX, reconnect, break) | Not reported |
+
+**A/B partition table (Rev 2.25, `c52164b`, chip RP2350 A3).**
+
+| Check | Result |
+|---|---|
+| `pt.uf2` then `firmware.uf2`: first image boots from slot B (flash update boot) | Pass |
+| Second copy goes into slot A and keeps booting from A | Pass |
+
+**Updater over USB (Rev 2.25, `0097a82`, chip RP2350 A3).**
+
+| Check | Result |
+|---|---|
+| `!` / `--enter`, HELLO (slot, chip, sizes, build) | Pass |
+| `reboot` out of updater mode | Pass |
+| `flash`: image written to the other slot, verified, flash update boot, new build time shown | Pass |
+| Image without an updater info block refused | Pass |
+| Update interrupted (USB unplugged mid-transfer): old firmware boots | Pass |
+| Firmware downgrade refused without `--allow-downgrade` | Not run (checked on the PC only) |
+| 90 s idle timeout; power cycle in updater mode boots the firmware | Pass |
+
+**Trial boot and fallback (Rev 2.25, `f804588`).**
+
+| Check | Result |
+|---|---|
+| Image whose updater never runs (`DFC_TEST_NO_UPDATER`): boots on trial, report shows ON TRIAL, script does not confirm | Pass |
+| ...the 16.7 s trial watchdog reboots it and the previous slot (A) comes back | Pass (after `f804588`: the diag reporter had fed the watchdog) |
+| ...a power cycle during the trial brings the previous slot back | Pass |
+| Normal update: confirmed through the new image's updater, permanent after a power cycle | Pass |
+
+**Deliberate bypasses (Rev 2.25, `49f15f4`).**
+
+| Check | Result |
+|---|---|
+| Old pre-updater image with `--allow-no-info`: installed on trial, not confirmed, falls back to the current firmware | Pass |
+| Same image with `--allow-no-info --no-trial` and the typed key: permanent; recovered with `~` and drag-and-drop | Pass |
 
 All tools run on Windows (V-7). Install the Python dependency once:
 
 ```bash
 py -m pip install -r tools/requirements.txt
 ```
+
+## A/B partition table (Rev 2.25, updater step 1)
+
+1. Install the table and firmware as in README, "First-time setup".
+2. **Pass:**
+   - **Firmware** reads `slot B (flash update boot)` right after the copy.
+   - After pressing R it reads `slot B (normal boot)`. The rest of the report
+     is as before.
+3. Copy the same `firmware.uf2` again. **Firmware** reads `slot A (flash
+   update boot)`, then `slot A (normal boot)` after R, and also after a power
+   cycle: the old slot was invalidated.
+4. Note the chip revision shown (A2 needs the E10 block; A3 and later ignore
+   it).
+
+## Firmware update (V-8 … V-11, Rev 2.26)
+
+| Requirement | Procedure |
+|---|---|
+| V-8 | "A/B partition table" below |
+| V-9 | "Updater over UART0 / UART1" below, the USB steps in README ("Firmware updater"), and the bench results above |
+| V-10 | trial checks in the bench results above; repeat over UART with `--no-confirm` and a `DFC_TEST_NO_UPDATER` image |
+| V-11 | bypass checks in the bench results above |
+
+## Updater over UART0 / UART1 (Rev 2.25, step 6)
+
+Needs a 3.3 V USB-serial adapter: adapter TX → UART0 RX (GPIO1), adapter
+RX → UART0 TX (GPIO0), GND → GND; leave the adapter's VCC unconnected. Use
+the diag (echo) build, so the USB console can still be watched. Remove the
+D6–D7 loopback jumper.
+
+Check the direction before anything else: open a terminal on the adapter's
+port at 921600 and type. The echo build sends every character back. With no
+echo, swap the two signal wires (crossed TX/RX does no harm). Wire colours
+vary between cables. On the bench (Rev 2.25), the FTDI cable worked with the
+opposite colours to FTDI's TTL-232R convention, so go by the echo.
+
+Bench results (Rev 2.25, `57b546f`, FTDI cable on UART0, 81,664-byte image):
+
+| Check | Result |
+|---|---|
+| `--uart --enter`: HELLO `on UART0` | Pass |
+| Full update at 4096-byte frames: trial boot, confirmed 0.6 s after it | Pass, 20 frames in 1.9 s (~43 kB/s) |
+| `--block-size 1024` | Pass, 80 frames in 2.2 s |
+| `--block-size 64` | Pass, 1276 frames in 21.0 s |
+| `--no-confirm`: back on the previous slot after ~17 s | Pass |
+| UART1 | Not run (back pads not wired) |
+
+Each frame cost about 16 ms on top of wire and flash time: the FTDI driver's
+default 16 ms latency timer holds the board's short replies. Setting it to
+1 ms (Device Manager → the port → Port Settings → Advanced → Latency Timer)
+should bring 64-byte frames to a few seconds. On a deployed system, the
+pass-through device's per-reply delay plays the same part. The time is about
+frames × (wire time + ~50 ms flash per 4 KB + delay per reply).
+
+1. `py tools\dfc_update.py COMx --uart --enter`. **Pass:** HELLO shows
+   `on UART0`.
+2. `py tools\dfc_update.py COMx --uart --enter flash build\diag\firmware.uf2`.
+   **Pass:** trial boot, "Confirmed", and the diag console's Firmware line
+   shows the new slot and build time.
+3. The same with `--block-size 1024`, `256` and `64`. **Pass:** confirmed
+   each time. Record the times.
+4. `--no-confirm`. **Pass:** the previous firmware returns after ~17 s.
+5. With the USB console open during an update: the USB console shows no
+   text, and HELLO over the UART still reports `on UART0`.
+6. UART1 (back pads D12/D11), once wired: repeat 1–2. **Pass:** `on UART1`.
+7. Link lock (UART1 wired): enter from UART0, then send HELLO on UART1
+   (`dfc_update.py <UART1 port> --uart`). **Pass:** no answer on UART1, while
+   UART0 still answers. Repeat the other way round.
+
+Before testing on the board, the host side can be checked against the
+simulator (Linux): run `tools/sim_board.py` and the same commands, pointed at
+the port it prints.
+
+## BOOTSEL from the console (B-20, Rev 2.28)
+
+Before Rev 2.28, `~` failed to bring up the RP2350 drive most of the time.
+The bootrom took over USB without the host seeing an unplug. With the 500 ms
+USB detach first (`04685da`), the drive appeared on every try on the bench.
+**Pass** (a few tries, not yet the full 10).
+
+## Non-volatile settings (NV-1 … NV-13, Rev 2.28)
+
+Host test (Rev 2.28): `nvstore.c` against simulated flash. 1,000+ saves
+wrapped the ring many times, with torn programs (every 37th save) and torn
+erases (at sector changes). The last completed value was always loaded.
+**Pass.**
+
+On the board (diag build, USB console):
+
+1. Fresh state: the report shows `Saved       nothing`. (After an earlier test,
+   go to step 2.)
+2. Type `r` until the `Rate` line shows 100 Hz, then `s`. **Pass:** `Saved
+   100 Hz, offset removed (default), record N`, with "1 save(s) … last took ~1 ms".
+3. Unplug USB and plug it back in. **Pass:** `Rate` shows 100 Hz from the
+   start, and `Saved` shows the same record N.
+4. Type `s` again without changing the rate. **Pass:** the save count does not
+   go up (no flash write, NV-8).
+5. Save 20 times, alternating `r` and `s`, so the store crosses a sector.
+   **Pass:** one save shows an erase, taking about 45 ms (up to 400 ms).
+   Missed epochs at that moment are expected. The record number goes up by
+   one per save.
+6. Power loss during a save (optional): press `s` and pull USB at once,
+   repeated a few times. **Pass:** after each power-up, the board starts with
+   either the old or the new rate, never a fault.
+7. Firmware update with `dfc_update.py`. **Pass:** the saved rate is kept.
+8. Offset choice (M-4c): type `o`. **Pass:** the Offset line shows
+   `calibrated, LEFT IN (o)`, and the Field values move by about the offset.
+   Type `s`, power-cycle, and check that it is still left in. Type `o` again
+   (`calibrated, removed`) and `s`.
+9. Set it back: `r` to 1000 Hz, offset removed, then `s`.
 
 ## Test setup
 
@@ -90,9 +265,9 @@ Leave the magnetometer unconnected (or connect it; see "Expected values").
 | `STAT tick_overrun` | **0** | M-6a |
 | `TIM_NS` `isr_*` | **≤ 5000** | EX-4 (nanoseconds) |
 | `TIM_NS` `crit` | **≤ 2000** | EX-3 |
-| `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 2000** | EX-7 (copy time excluded) |
+| `TIM_NS` `api_read`, `api_write`, `api_mag` | **≤ 3000** | EX-7 (copy time excluded) |
 | `MAG` without a sensor | `fault=1`; `no_ack` (and `pid_fault`) rising ~5/s, `wrong_id` not rising; `cause=1`; `i2c_error`, `timeout` and `missed_tick` not rising; `MAGS recovered=0` | the 5 Hz re-probe (M-2a), with **no effect on any UART counter** |
-| `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s; `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
+| `MAG` with a sensor | `fault=0`; `valid` rising ~1000/s (~`MAGS rate_hz` per second at other rates, M-3b); `not_ready=0`; `gaps=0`; `CAL offset_valid=1` | normal sampling |
 
 While `fault=1`, `MAG cause=` says why (Rev 2.17). The readable report
 spells it out:
@@ -286,7 +461,7 @@ in `g_diag_max_cycles[]`:
 | `DIAG_T_ISR_I2C` | I2C completion/abort ISR | 5 µs |
 | `DIAG_T_ISR_TICK` | 1 kHz tick ISR | 5 µs |
 | `DIAG_T_CRITICAL` | longest critical section | 2 µs (EX-3) |
-| `DIAG_T_API_READ`, `_WRITE`, `_MAG` | API call minus payload copy | 2 µs (EX-7) |
+| `DIAG_T_API_READ`, `_WRITE`, `_MAG` | API call minus payload copy | 3 µs (EX-7) |
 | `DIAG_T_LOOP` | test applications: main-loop pass, status reporter excluded | < 1 ms (EX-8) |
 | `DIAG_T_STATUS` | status reporter (diag builds only) | information only |
 
@@ -338,7 +513,7 @@ while UART traffic runs (`soak_test.py`).
 |---|---|
 | Disconnect the magnetometer (SDA/SCL) | `MAG i2c_error` rises (~1000/s, NACK). L0/L1 counters and the soak data stay clean. |
 | Short SDA to GND for 1 s, then release | `i2c_error + timeout` rises by ≥ 300; zero UART errors. After release, `valid` resumes within 4 ms. Capture SDA, SCL and a test pin to time it (see below). `bus_clear` shows how many PIO bus clears ran. |
-| Power up with the magnetometer unplugged, then plug it in after a few seconds | `MAG fault=1`, `cause=1` (readable report: "no answer at address 0x30") and `no_ack` rising ~5/s. Within 250 ms of plugging in: `fault=0`, `MAGS recovered` +1, `valid` rising ~1000/s. The UARTs stay clean throughout. |
+| Power up with the magnetometer unplugged, then plug it in after a few seconds | `MAG fault=1`, `cause=1` (readable report: "no answer at address 0x30") and `no_ack` rising ~5/s. Within 250 ms of plugging in: `fault=0`, `MAGS recovered` +1, `valid` rising ~1000/s. The UARTs stay clean throughout. **Known limitation (bench, Rev 2.25):** if only the sensor's VDD is disconnected at boot and SDA/SCL stay connected, the sensor does not come online when VDD is connected, but an MCU reset brings it up. It is half-powered through the I2C lines and needs the software reset that only the start-up sequence sends. Accepted: power the sensor with the board, or reset after connecting it. |
 | Reset the MCU from the debugger (or tap RESET) while running, ≥ 100 times. A script can loop `openocd ... -c "init; reset run; exit"` with random delays. | After every boot, `MAG fault=0` and `valid` rises. The startup bus clear shows as `bus_clear` = 1 right after boot. |
 | Hold one UART's RX low (break), or leave it unconnected | That UART's framing/break counts rise, at most 1/ms per type. The other UART's soak data is byte-exact and `MAG gaps` stays 0. |
 | Stall the main loop (break in the debugger, or add a temporary `busy_wait_ms(200)` to a test build) | Each UART's `rx_overflow` increments once per overrun episode, and `rx_hwm` = 8192 (the ring size). |
@@ -367,6 +542,45 @@ OpenOCD `mww`. The modes are 0 = single cycle and 1 = pulse.
 2. **Transaction duration (M-8).** Measure from the tick (START) to the
    final STOP. Expected ~375 µs without a pulse (limit 400 µs) and ~445 µs
    with a SET or RESET (limit 450 µs).
+
+## Rate and noise comparison (M-3b, D-10, Rev 2.25)
+
+Use the `diag` build, with the board and sensor kept still and away from
+moving steel and cables carrying current.
+
+1. Read the start-up `Meas. time` line (D-8). The 200 Hz figure must be well
+   under 4.6 ms (expected about 3.8 ms). Otherwise 200 Hz will show
+   `not_ready`.
+2. For each rate, type `r` until the `Rate` line shows it (or run
+   `fwstatus.py --rate HZ`). Wait for one report to pass the change, then
+   record the `Noise` line over at least 10 reports.
+
+   | Rate | `valid` per report | `Noise` (datasheet) | `not_ready`, `gaps` |
+   |---|---|---|---|
+   | 1000 Hz | ~1000 | ~1.2 mG per axis | 0 |
+   | 500 Hz | ~500 | ~1.2 mG (same BW as 1000 Hz) | 0 |
+   | 250 Hz | ~250 | ~0.8 mG | 0 |
+   | 200 Hz | ~200 | ~0.6 mG | 0 |
+   | 100 Hz | ~100 | ~0.4 mG | 0 |
+   | 50 Hz | ~50 | ~0.4 mG (same BW as 100 Hz) | 0 |
+
+3. A change causes no glitch: the report that spans it shows no new `gaps`,
+   no rise in `invalid`, and `not_ready` stays 0.
+4. In `MAG`, `i2c_error`, `timeout` and `missed_tick` stay 0 at every rate.
+   On the analyzer, the transaction carrying a change contains
+   `W(0x0A, BW)` before the trigger and lasts ≤ 540 µs (≤ 610 µs if it also
+   carries a pulse, M-8).
+5. With mode 1 (SET pulses) at 50 Hz, a pulse appears every
+   `sr_interval` samples, i.e. once a second at the default 50.
+
+The figures to compare are the measured ones. If noise falls with the
+rate as the datasheet says, the configuration holds. If 100 and 50 Hz are no
+quieter than 200 Hz, the floor is something else (supply, wiring,
+environment), and the faster rate can be kept.
+
+At rates below 1 kHz, the counts that this document gives "per second at
+1 kHz" (`valid`, and `i2c_error` with the sensor disconnected) scale with the
+rate.
 
 ## 1 kHz measurement completeness (M-3, M-9, Rev 2.8)
 

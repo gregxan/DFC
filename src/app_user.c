@@ -6,7 +6,11 @@
  *   - every UART byte received during the previous epoch is in the RX ring
  *     (DMA, U-3..U-5);
  *   - the newest magnetometer sample was published during the previous
- *     epoch (~445-515 us after its tick, M-8) and is complete.
+ *     epoch (~445-515 us after its tick, M-8) and is complete. At 1 kHz
+ *     every epoch brings a new sample. At a lower rate (M-3b,
+ *     mag_set_rate_hz(): 500/250/200/100/50 Hz) only every 2nd/4th/5th/
+ *     10th/20th epoch does, with the same timing, and s_mag_new is false in
+ *     between. The epochs themselves still run every 1 ms.
  * The whole of app_poll() must finish in < 1 ms (EX-8); main.c measures it
  * (PROF_EPOCH) and counts epochs that run late (DIAG_EPOCH_OVERRUN).
  *
@@ -20,42 +24,84 @@
 #include "app.h"
 #include "link.h"
 #include "mag.h"
+#include "nvstore.h"
 #include "prof.h"
+#include "updater.h"
 
 /* Static, so they use no stack (B-23) and are allocated at build time. */
 static uint8_t s_link0_buf[512];
 static uint8_t s_link1_buf[512];
 
-void app_init(void) {}
+/* Firmware update entry (Rev 2.25): 20 consecutive '!' on either UART
+ * reboots into the updater (updater.h, updater_trigger_scan()). Without an
+ * entry like this a deployed unit cannot be updated over its UARTs. Replace
+ * it with your own protocol's "enter updater" message if you prefer, calling
+ * updater_request(link, UPDATER_REQUEST_KEY) when it arrives. */
+static updater_trigger_t s_upd_trigger[LINK_COUNT];
+
+static void check_update_request(link_id_t id, const uint8_t *p, size_t n) {
+    if (updater_trigger_scan(&s_upd_trigger[id], p, n)) {
+        /* Reboots into the updater (UART0, UART1, and USB in diag builds);
+         * does not return. */
+        (void)updater_request(id == LINK_0 ? UPDATER_LINK_UART0 : UPDATER_LINK_UART1, UPDATER_REQUEST_KEY);
+    }
+}
+
+void app_init(void) {
+    /* Non-volatile settings (NV-11, Rev 2.28): load them and apply the
+     * saved magnetometer rate (M-3b) and offset choice (M-4c). app_init()
+     * runs before the 1 ms tick starts, so the first sample already uses
+     * them. With nothing saved: 1000 Hz, offset removed.
+     *
+     * To change and keep them from your client protocol, see the
+     * commented-out stubs in link0_handler(). */
+    (void)settings_apply_startup();
+}
 
 /* ---- Magnetometer state, shared by all handlers -------------------- */
 /* Filled by mag_handler(), which runs first in app_poll(), so the link
  * handlers always see this epoch's values. File scope: visible to every
  * handler in this file, not exported. */
 static mag_reading_t s_mag;  /* latest reading this epoch (may be invalid or stale) */
-static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G, offset removed */
+/* Field values to use (M-4c, NV-11): the calibrated bridge offset is removed
+ * or left in according to the offset setting (saved in flash, applied at
+ * start-up by settings_apply_startup(), changed with mag_set_offset_apply()).
+ * s_mag.offset_apply says which applied to this sample; nothing is removed
+ * before the first calibration (s_mag.offset_valid false). Do NOT use
+ * s_mag.s.raw / mag_convert() for the field: they always include the
+ * offset, whatever the setting. */
+static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G */
 static int16_t s_mag_xyz16[3]; /* same, 16-bit scale (4096/G), for compact messages */
 static bool s_mag_new;       /* true if this epoch brought a new valid sample */
+static bool s_mag_arrived;   /* true if this epoch brought a new sample, valid or not */
 
 /* ---- Magnetometer: most recent sample ------------------------------- */
 static void mag_handler(void) {
     static bool have_last;
     static uint32_t last_seq;
+    static uint32_t last_period; /* M-3b: ticks to the next sample */
+    static uint32_t last_count;  /* M-13a: mag_sample_count() last epoch */
 
     s_mag_new = false;
-    if (mag_read_latest(&s_mag) && s_mag.s.valid && !s_mag.stale) {
-        if (have_last && s_mag.s.seq == last_seq) {
-            return; /* same sample as last epoch: nothing new */
-        }
-        if (have_last && s_mag.s.seq != last_seq + 1u) {
+    s_mag_arrived = false;
+    if (!mag_read_latest(&s_mag) || s_mag.count == last_count) {
+        return; /* no sample yet, or none new this epoch (lower rates) */
+    }
+    last_count = s_mag.count;
+    s_mag_arrived = true;
+    if (s_mag.s.valid && !s_mag.stale) {
+        if (have_last && s_mag.s.seq != last_seq + last_period) {
             /* gap: samples were missed (abort / fault) */
         }
         have_last = true;
         last_seq = s_mag.s.seq;
-        mag_field(&s_mag, s_mag_xyz);
-        mag_field16(&s_mag, s_mag_xyz16);
+        last_period = s_mag.s.period_ticks;
+        mag_field(&s_mag, s_mag_xyz);     /* offset per the setting (M-4c) */
+        mag_field16(&s_mag, s_mag_xyz16); /* same, 16-bit */
         s_mag_new = true;
-        /* TODO: use s_mag_xyz[] / s_mag_xyz16[], s_mag.s.timestamp_us */
+        /* TODO: use s_mag_xyz[] / s_mag_xyz16[], s_mag.s.timestamp_us
+         * (and s_mag.offset_apply if the client needs to know whether the
+         * offset was removed) */
     }
 }
 
@@ -75,7 +121,41 @@ static void link0_handler(void) {
         if (n == 0u) {
             break;
         }
-        /* TODO: parse / process LINK_0 data here */
+        check_update_request(LINK_0, s_link0_buf, n); /* firmware update entry */
+        /* TODO: parse / process LINK_0 data here. */
+
+        /* Client command: set the magnetometer rate and keep it as the
+         * start-up rate (M-3b, NV-11/NV-12). Decode `hz` from your own
+         * message; the same goes in link1_handler() if LINK_1 takes
+         * commands too. mag_set_rate_hz() rejects an unsupported rate
+         * (1000, 500, 250, 200, 100, 50 Hz only). The save blocks this
+         * epoch for ~1 ms (up to ~400 ms on every 16th save: a few epochs
+         * are missed) and writes nothing if the rate is unchanged. Returns 0
+         * on success, else a negative NV_ERR_* or bootrom error (nvstore.h).
+         *
+         * if (<message is SET_MAG_RATE>) {
+         *     uint32_t hz = <rate from the message>;
+         *     if (mag_set_rate_hz(hz)) {
+         *         int err = settings_save_mag_rate(hz);
+         *         (void)err; // reply ok / error to the client
+         *     } else {
+         *         // reply "unsupported rate" to the client
+         *     }
+         * }
+         */
+
+        /* Client command: choose whether s_mag_xyz[] / s_mag_xyz16[] have
+         * the calibrated bridge offset removed (M-4c), and keep the choice
+         * (NV-11). Takes effect from the next epoch's sample. Same save
+         * cost and return value as above.
+         *
+         * if (<message is SET_MAG_OFFSET>) {
+         *     bool apply = <flag from the message>; // true = offset removed
+         *     mag_set_offset_apply(apply);
+         *     int err = settings_save_mag_offset_apply(apply);
+         *     (void)err; // reply ok / error to the client
+         * }
+         */
         (void)link_write(LINK_1, s_link0_buf, n);
         avail -= n;
     }
@@ -83,8 +163,9 @@ static void link0_handler(void) {
     /* TODO: once per epoch, send the magnetometer values if this epoch
      * brought a new sample (s_mag / s_mag_xyz are filled by mag_handler()):
      *   if (s_mag_new) {
-     *       encode s_mag_xyz16[] (or s_mag_xyz[]) and s_mag.s.timestamp_us
-     *       into a message;
+     *       encode s_mag_xyz16[] (or s_mag_xyz[]; offset removed or not
+     *       per the saved setting) and s_mag.s.timestamp_us into a
+     *       message, optionally with a flag bit for s_mag.offset_apply;
      *       link_write(<link>, msg, len);
      *   } */
 }
@@ -105,6 +186,7 @@ static void link1_handler(void) {
         if (n == 0u) {
             break;
         }
+        check_update_request(LINK_1, s_link1_buf, n); /* firmware update entry */
         /* TODO: parse / process LINK_1 data here */
         (void)link_write(LINK_0, s_link1_buf, n);
         avail -= n;

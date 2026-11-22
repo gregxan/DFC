@@ -194,10 +194,81 @@ inserted before the trigger. That adds ~70 µs, for ~515 µs in total
 
 | Register | Value | Why |
 |---|---|---|
-| Internal Control 1 (0x0A) | `SW_RST` once at startup, then BW = 11 | Known state after an MCU-only reset. BW = 11 is the only 0.5 ms option, at 1.2 mG RMS. The inhibit bits stay 0: the channels run in parallel. |
+| Internal Control 1 (0x0A) | `SW_RST` once at startup, then the rate's BW (M-3b; BW = 11 at 1 kHz) | Known state after an MCU-only reset. BW = 11 is the only 0.5 ms option, at 1.2 mG RMS. The inhibit bits stay 0: the channels run in parallel. |
 | Internal Control 2 (0x0B) | 0x00 | Continuous mode, CM_Freq and periodic SET are off. They would run from the sensor's own oscillator and drift against the tick. |
 | Internal Control 0 (0x09) | TM_M, SET or RESET only | `Auto_SR_en` is not used: the datasheet gives 580 Hz max at BW = 11, consistent with two measurements per output (M-3a). INT, TM_T and OTP stay off. |
 | Internal Control 3 (0x0C) | 0x00 (reset default) | No self-test, I2C (not 3-wire SPI) |
+
+### Output rate (M-3b, Rev 2.25)
+
+The tick stays at 1 kHz: U-8 and U-15a need it. A sample transaction starts
+every N ticks, and the sensor's bandwidth sets the noise. Nothing is averaged
+in firmware.
+
+| `g_mag_rate_hz` | N | BW | Datasheet time | Available | Datasheet noise |
+|---|---|---|---|---|---|
+| 1000 | 1 | 11 | 0.5 ms | ~0.6 ms | 1.2 mG |
+| 500 | 2 | 11 | 0.5 ms | ~1.6 ms | 1.2 mG |
+| 250 | 4 | 10 | 2 ms | ~3.6 ms | 0.8 mG |
+| 200 | 5 | 01 | 4 ms | ~4.6 ms | 0.6 mG |
+| 100 | 10 | 00 | 8 ms | ~9.6 ms | 0.4 mG |
+| 50 | 20 | 00 | 8 ms | ~19.6 ms | 0.4 mG |
+
+"Available" is the time from the trigger (~0.45 ms after the tick) to the
+Status read N ticks later (~0.06 ms after that tick). A measurement that does
+not fit is caught by M-9 and counted as not ready. 200 Hz has the least
+margin. The bring-up figures (0.1 ms at BW 11, 7.5 ms at BW 00) suggest the
+datasheet times are upper bounds, and D-8 now also times BW 01.
+
+- **Schedule.** `s_next_tick` is the tick index of the next sample. In
+  `MAG_IDLE` a tick starts one only when `(int32_t)(tick - s_next_tick) >= 0`,
+  so a skipped tick (M-6a) does not stall sampling. Aborts and re-probes keep
+  their 1 ms handling. The M-16 timeout still fires on the next tick (~1 ms)
+  whatever the rate, since a transaction never takes more than ~0.6 ms.
+- **Changing rate.** The tick ISR reads `g_mag_rate_hz` when it starts a
+  sample. If that differs from the rate the sensor is set to
+  (`s_rate_applied`), the command list is rebuilt into `s_cmd_rate` with
+  `RESTART W(0x0A, BW)` after the read and before any pulse and the trigger.
+  So the sample read in that transaction (old rate) is unaffected, and the
+  measurement it triggers already uses the new BW. `s_rate_applied` is updated
+  only when the transaction completes. After an abort the next transaction
+  writes BW again. The list is 19 words at most. The command channel is
+  DREQ-paced, so it need not fit the 16-entry FIFO.
+- **First read after a BW write.** It waits at least 2 ticks
+  (`first_period()`), because the bench measured 0.72 ms for that first
+  measurement. This applies after a rate change and after a re-probe
+  configuration. `s_cur_period` and `s_trig_period` carry the actual period.
+- **Setting it and detecting new samples (Rev 2.27).** `mag_set_rate_hz()`
+  checks the rate against `k_rates[]` and writes `g_mag_rate_hz`.
+  `publish()` increments `s_sample_count` right after it switches
+  `s_latest`. `mag_read_latest()` copies the count in the same critical
+  section as the slot (`mag_reading_t.count`), so a reading and its count
+  always agree. `app_user.c` sets `s_mag_arrived` and `s_mag_new` from it.
+- **Per-sample period.** Each sample stores `period_ticks` (the ticks from its
+  trigger to its read: N, or 2 after a BW write at 1 kHz). Consumers check gaps with `seq == last_seq + last_period`.
+  `mag_read_latest()` scales the M-17 stale limit by the longer of it and
+  the current rate's N, so the last sample before a slow-down is not stale. It fits in the
+  padding byte, so `mag_sample_t` stays 24 bytes.
+- **Re-probe.** `config_start()` writes the selected rate's BW, and the first
+  sample transaction follows N ticks after the configuration.
+- **M-2b at low rates.** At 200 Hz a power-cycled sensor (default BW 00,
+  8 ms) is still read too early and detected, but after 10 samples (~50 ms).
+  At 100/50 Hz the default BW is the configured one and it is not detected
+  (stated in M-2b).
+- **Not used.** Continuous mode (drift, M-3), and
+  averaging in firmware (by choice: the sensor's own filtering is used).
+  Auto_SR_en (M-3a) would double the measurement time. At 50 Hz, BW 00 with
+  auto SET/RESET might still fit (~16 ms of ~19.6 ms), which is a possible
+  later experiment.
+
+### Noise readout (D-10, Rev 2.25)
+
+`app_test.c` keeps the sum and sum of squares of each axis, in counts with
+the offset removed, over the valid samples it consumes. At each report
+`status.c` calls `app_mag_noise_take()`, which returns
+`sqrt(n·Σx² − (Σx)²) / n` per axis in µG and clears the sums. The sums are
+exact in 64 bits, and the main loop is the only user. Any movement of the
+board during the second adds to the figure.
 
 ### SET/RESET strategy (M-4, Rev 2.4; automatic mode removed in Rev 2.8)
 
@@ -372,15 +443,230 @@ bus in two places:
   sends START + STOP. It blocks for ~110 µs, which is allowed before the
   main loop. This covers an MCU reset or reflash that interrupted a read.
 - **After an arbitration-loss or timeout abort (M-15, M-16).** The I2C ISR
-  hands SCL to a PIO state machine. The state machine sends 9 open-drain
-  clocks (~100 µs) and pushes a word when it's done. The next tick sees
-  that word, gives SCL back to I2C and starts the transaction. That START
+  hands SDA and SCL to a PIO state machine. It sends 9 open-drain clocks,
+  then a STOP (~125 µs), and pushes a word when it's done. The next tick
+  sees that word, gives both pins back to I2C and starts the transaction.
+  The STOP was added in Rev 2.25. On the bench, reconnecting SCL mid-transfer
+  made the controller lose arbitration. It then waited for a STOP before
+  starting again, and clocks alone never produced one. Every transaction then
+  hung, and the result was a permanent abort and bus-clear loop. That START
   resets the sensor. No CPU time is used while it runs. NACK aborts
   (sensor absent) don't trigger a clear, because they can't leave SDA
   stuck.
 
 Neither path touches the I2C controller's configuration. Every clear is
 counted in `DIAG_MAG_BUS_CLEAR` (D-1).
+
+## 4a. Flash layout: A/B slots (Rev 2.25, step 1 of the UART updater)
+
+`partition_table.json` divides the 2 MB flash:
+
+| Offset | Size | Use |
+|---|---|---|
+| 0 K | 8 K | partition table (bootrom) |
+| 8 K | 1012 K | slot A, partition 0 |
+| 1020 K | 1012 K | slot B, partition 1, linked to A |
+| 2032 K | 8 K | unpartitioned: non-volatile settings, two sectors (section 4d, Rev 2.28) |
+| 2040 K | 4 K | unpartitioned: spare |
+| 2044 K | 4 K | unpartitioned: the RP2350-E10 block (last sector) |
+
+- **One image for both slots.** The bootrom maps the booted partition to the
+  start of the XIP window, so the image is linked and built as before.
+  Copy-to-RAM start-up is unchanged.
+- **Slot choice (datasheet 5.1.7, 5.1.16).** At a normal boot the higher
+  image version wins. A UF2 copied to the BOOTSEL drive goes into the slot
+  that is not booting, and the bootrom then does a flash update boot of it.
+  Launching a valid non-TBYB image in a flash update boot erases the first
+  sector of the other slot, so the new image stays selected. Versions do not
+  matter yet. The updater (later steps) uses the same flash update boot, with
+  try-before-you-buy: a 16.7 s fixed watchdog, then `explicit_buy()`, which
+  erases the other slot's first sector.
+- **RP2350-E10 (A2 bootrom).** UF2 drag-and-drop fails when a partition table
+  is present unless the UF2 starts with an absolute-family block aimed at the
+  end of flash. `PICOTOOL_EXTRA_UF2_ARGS` adds it to every `firmware.uf2`,
+  aimed at 0x101FFF00 (the last sector, unpartitioned). A3 and later ignore
+  it. `pt.uf2` (absolute family) cannot carry it, so on A2 the table is
+  installed only on a board without one.
+- **Build checks.** `pt.uf2` is regenerated when the JSON changes. A post-build
+  step fails the build if `firmware.bin` exceeds one slot.
+- **Diag report.** The **Firmware** line shows the slot, the boot type and
+  the chip revision, from the bootrom's boot info. STAT has `slot=`,
+  `boot_type=`, `tbyb=` and `chip_rev=`.
+
+## 4b. Updater info block and version checks (Rev 2.25)
+
+Every image carries a 32-byte **updater info block**
+(`g_updater_info` in `updater.c`):
+
+| Bytes | Field |
+|---|---|
+| 0–7 | 64-bit magic `0x519C4450_55434644` |
+| 8–9 | block format (1) |
+| 10–11 | updater protocol (`UPDATER_PROTOCOL`, `updater.h`) |
+| 12–17 | firmware version major / minor / patch (`DFC_FW_VERSION`, CMake) |
+| 18–19 | protocol floor (`UPDATER_PROTOCOL_FLOOR`) |
+| 20–27 | reserved, 0 |
+| 28–31 | check word: inverted XOR of the seven words before it |
+
+It is found by scanning the image at 4-byte steps, across sector boundaries.
+Its 32-byte alignment is in RAM, not in the flash image (copy_to_ram). The
+magic alone also occurs in the code's literal pool, and the check word
+rejects that. HELLO returns the running image's block.
+
+**Checks before an image is installed:**
+
+| Check | Where | Override |
+|---|---|---|
+| The image has a valid info block | script, and the board at FINISH | none |
+| The image's protocol is one the script supports (`SUPPORTED_PROTOCOLS`) | script | none |
+| The image's protocol is not below the running firmware's floor | board at FINISH | none |
+| The image's protocol is not older than the running one | script | `--allow-older-updater` |
+| The image's firmware version is not older than the running one | script | `--allow-downgrade` |
+
+The board checks before writing the image's first sector, so a refused
+image is never bootable and the running firmware is untouched.
+
+**Release rules:**
+- Raise `DFC_FW_VERSION` for every release.
+- Raise `UPDATER_PROTOCOL` when the host protocol changes in a way older
+  tools cannot drive, and add it to `SUPPORTED_PROTOCOLS` in the script.
+- Raise `UPDATER_PROTOCOL_FLOOR` once the tools stop supporting an older
+  protocol, so no unit can be put back on it.
+
+## 4b2. DATA frame size (Rev 2.25)
+
+DATA chunks may be any size from `UPD_MIN_BLOCK` (64) to 4096 bytes, as
+long as none crosses a 4 KB sector boundary. The script uses powers of two
+(`--block-size`, default 4096). The board assembles each sector in RAM from
+its chunks, in order: a chunk at the sector's start (re)starts it, a chunk at
+the next expected byte extends it, and a resend of received bytes overwrites
+them. When the sector is complete it is erased, written and read back. An
+out-of-order chunk is refused with the expected offset. HELLO advertises the
+smallest and largest chunk; older boards advertise only 4096.
+
+At 921600 baud, a 4096-byte frame is a ~45 ms burst and a 1024-byte frame
+~11 ms. A pass-through device between the host and the DFC needs to buffer
+at least one frame. Stop-and-wait means nothing arrives while the board
+writes flash. A frame stalled for 500 ms mid-way is dropped.
+
+## 4b3. Ports and entry over the UARTs (Rev 2.25, updater step 6)
+
+- **Ports.** UART0 and UART1 are polled, 921600 8N1, with RX pull-ups, and
+  independent of `link.c` and its DMA. The USB console is a port too, in
+  diag builds. The updater serves **only the link that requested it**: the
+  link in the boot flag. A request from UART0 ignores UART1 (and USB), and
+  the other way round. The other ports are not even initialised, so nothing
+  they receive is read. The trial boot after an update comes back on the
+  same link, as the updater writes that link into the boot flag. HELLO
+  reports the link. Plain-text status lines go only to USB, never onto a
+  UART.
+- **Why polling is enough.** The protocol is stop-and-wait, so nothing
+  arrives while the updater writes flash or replies. A byte with a framing
+  error, break or overrun is dropped, and the frame CRC catches it.
+- **Entry.** `updater_trigger_scan()` recognises the generic trigger: 20
+  consecutive `!` (`UPDATER_TRIGGER_CHAR`, `UPDATER_TRIGGER_COUNT`), counted
+  across calls; any other byte restarts the count. The caller then calls
+  `updater_request(link, UPDATER_REQUEST_KEY)`. The user application
+  (`check_update_request()` in `app_user.c`) and the test applications
+  (`check_trigger()` in `app_test.c`) scan both UARTs. The run carries no
+  key, so any stream with 20 `!` in a row enters the updater. Nothing is
+  written then, and the updater returns to the firmware after 90 s without
+  a host. An application with its own protocol can use its own message
+  instead.
+- **Host.** `dfc_update.py --uart` uses the port at `--baud`. `--enter`
+  sends the trigger. A UART does not disappear on a reboot, so the script
+  waits a second and retries HELLO. It skips request frames, so its own
+  frames echoed by an echoing application are ignored. Reply reads take
+  what has arrived, with no fixed-size wait (a 100 ms-per-frame cost
+  before).
+- **REBOOT reply code.** The REBOOT reply is 0xFF (0x7F | 0x80), the same
+  code as an error. It is told apart by its empty payload; error replies
+  always carry a code byte.
+
+## 4c. Trial boot and confirm (Rev 2.25, updater step 5)
+
+1. At FINISH the updater sets the try-before-you-buy (TBYB) bit in the image
+   type of the copy's start block (`set_tbyb()`). The SDK's IMAGE_DEF block
+   has no hash, so this one bit is the only change; a hashed or signed block
+   is refused. It then writes the boot flag for the same link and does a
+   flash update boot of the new slot.
+2. The bootrom runs a TBYB image from a flash update boot under a fixed
+   16.7 s watchdog. The new image's `updater_check_boot()` finds the flag
+   and enters its updater, which only accepts HELLO, CONFIRM and REBOOT while
+   the buy is pending.
+3. The script reconnects. It checks HELLO: the slot just written, on trial,
+   and the info block of the image sent. Then it sends CONFIRM, and the
+   updater calls `explicit_buy()`. The bootrom clears the TBYB bit in flash
+   and erases the old slot's first sector. Then the board reboots into the
+   application.
+4. Without CONFIRM the watchdog fires. At the next boot the bootrom prefers
+   the non-TBYB (old) image over the unconfirmed one. The old firmware is
+   back and the unconfirmed image is never chosen again.
+
+The application never confirms anything. If the new image comes up without
+its updater, for example because the flag check is broken, it runs until
+the watchdog fires and then the old image returns. Diag builds therefore
+do not arm their own watchdog while a buy is pending
+(`updater_trial_pending()`), and the report flags "ON TRIAL". A UF2 copied
+to the BOOTSEL drive is not patched, so bench flashing is permanent as
+before.
+
+**Deliberate bypasses (`dfc_update.py flash`).** Each one prints a
+warning and needs a typed `yes` (or `--yes`). The board-side ones travel as
+BEGIN flags, and the BEGIN reply echoes the flags the board accepted. The
+script stops if the echo does not match what it asked for. Old scripts
+send no flags, so they always get full protection.
+
+| Flag | Skips | Where |
+|---|---|---|
+| `--allow-no-info` | info block required | script; board (BEGIN bit 0) |
+| `--allow-unsupported-protocol` | protocol must be one the script supports (also at confirm) | script |
+| `--allow-below-floor` | protocol floor | board (BEGIN bit 1) |
+| `--allow-older-updater` | updater not older than the running one | script |
+| `--allow-downgrade` | firmware not older than the running one | script |
+| `--no-trial` | trial boot, confirm and fallback (layers 2 and 3): permanent as soon as it boots | board (BEGIN bit 2) |
+
+`--no-trial` also needs `UPDATER_NO_TRIAL_KEY` (64 bits, `updater.h`). The
+script shows it and the user types it back (or passes `--no-trial-key`). The
+board checks every bit before it writes a permanent image. It is for
+deliberately installing firmware that has no DFC updater.
+
+**Layers of protection against a bad image,** in order:
+1. The info block and protocol checks (4b) refuse images that the tools
+   could not update again.
+2. The confirm must come from the new image's own updater.
+3. Automatic fallback: an unconfirmed trial falls back when the 16.7 s
+   watchdog fires.
+
+Layer 3 holds only if nothing feeds the watchdog during the trial. The
+diag build follows this (bench fix, `f804588`). A user application with its
+own watchdog should not arm or feed it while `updater_trial_pending()` is
+true. If it does, an unconfirmed image stays up until a reset, and the
+reset still brings the old image back.
+
+## 4d. Non-volatile settings (Rev 2.28, NV-1 … NV-13)
+
+`nvstore.[ch]`. The settings are a 64-byte struct, `dfc_settings_t`. It holds two fields: `mag_rate_hz` (u16) and `mag_offset` (u8: 0 default, 1 removed, 2 left in, M-4c). The other 61 bytes are reserved, with 0 meaning "default".
+
+**Records.** Each save programs one 256-byte page:
+
+| Bytes | Field |
+|---|---|
+| 0–3 | magic 0xDFC5E771 |
+| 4–7 | sequence number (1, 2, 3, …) |
+| 8–9 | data length (≤ 64) |
+| 10–11 | format (1) |
+| 12–75 | data, zero-padded |
+| 76–79 | CRC-32 (zlib) of bytes 0–75 |
+| 80–255 | left at 0xFF |
+
+**Ring.** The 32 pages of the two sectors are used in order, wrapping around. `nv_load()` and `nv_save()` read all 32 pages, through bootrom `flash_op` in storage addressing with the flash lock held, as `updater.c` does. They note the newest valid record and which pages are blank. A save goes to the first blank page after the newest record and skips pages that are neither blank nor valid. When it moves onto the first page of a sector that is not blank, it erases that sector first. The newest record is always in the other sector, so it is never erased. It then reads the page back and checks it.
+
+**Power loss.** A torn program or erase leaves bytes that fail the magic or CRC check. They are ignored, and the previous record stays current. A host test (simulated flash, 1,000 saves, torn programs and erases) checked this at Rev 2.28.
+
+**Use.** `settings_apply_startup()` runs in `app_init()` (both apps), before `tick_init()`. It loads the settings and passes a stored rate that `mag_rate_supported()` accepts to `mag_set_rate_hz()`. It passes the offset choice to `mag_set_offset_apply()`. `settings_save_*()` write only if a value changed. The diag console's `o` key switches the offset choice, and `s` saves the rate and offset choice in one record. The "Saved" report line shows the stored values and `nv_stats()`.
+
+**Offset choice (M-4c).** `g_mag_offset_apply` is a main-loop setting. `mag_read_latest()` copies it into `mag_reading_t.offset_apply`, and the inline `mag_field()` tests `offset_valid && offset_apply`. The offset calibration itself does not change.
 
 ## 5. Resources (R-1 … R-3)
 
@@ -478,6 +764,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | HW-4, HW-5 | `config.h`; `mag_init()` pins, pull-ups, address 0x30 |
 | HW-5a | Hardware only (SPI_CS, CAP and VDD capacitors); README wiring notes |
 | HW-7, HW-8 | C + Pico SDK; core 1 never launched |
+| NV-1 … NV-13, V-12 | `nvstore.[ch]` (`settings_apply_startup()`, `settings_save_*()`); `app_init()` in `app_user.c`, `app_test.c`; client stubs in `link0_handler()`; `status.c` `o` and `s` keys, `H_MAG_SAVED` |
 | EX-1, EX-2 | `main.c`; every API in `link.c` / `mag.c` / `diag.c` returns without waiting |
 | EX-3 | `cs_enter()` / `cs_exit()` in `diag.h`; max recorded as `DIAG_T_CRITICAL` |
 | EX-4, EX-5 | §2; `irq_set_priority` calls in `link.c`, `mag.c`, `tick.c`, `status.c` |
@@ -494,10 +781,21 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | U-15 … U-15b | `uart_err_service()`, `link_tick_isr()` |
 | U-16 … U-18 | by design (§3); measured by V-2 … V-4 |
 | M-4b, D-1 (calibration, saturation) | `calibrate()`, `count_saturation()`, `blocking_measure()`, `mag_field()` |
+| M-4c (offset choice) | `mag_set_offset_apply()`, `mag_offset_apply()`, `g_mag_offset_apply`, `mag_reading_t.offset_apply`, `mag_field()`/`mag_field16()`; `status.c` `o` key, Offset line, `CAL offset_apply` |
 | M-2b | `publish()` (`s_not_ready_score`), `mag_tick_isr()` (`MAG_IDLE`), `DIAG_MAG_RUNTIME_FAULT` |
 | M-2a | `probe_start()`, `config_start()`, `mag_tick_isr()` (`MAG_FAULT`), `i2c_isr()` |
 | M-1 … M-5 | `mag_init()` (SW_RST, BW, CTRL2), `build_cmds()`, `sr_select()`, `g_mag_sr_mode`, `g_mag_sr_interval` |
 | M-9 (not ready) | `publish()` (`Meas_M_Done` check), `DIAG_MAG_NOT_READY` |
+| F-1 … F-4 | `partition_table.json`, `CMakeLists.txt` (pt.uf2, E10 block, slot-size check); §4a |
+| F-5, F-6 | `g_updater_info`, `keep_info()`, `info_at()`, `scan_chunk()` (`updater.c`); `DFC_FW_VERSION`; `UPDATER_PROTOCOL`, `UPDATER_PROTOCOL_FLOOR` (`updater.h`); §4b |
+| F-7 … F-10 | `updater_request()`, `set_boot_flag()`, `updater_check_boot()`, `updater_trigger_scan()`, `updater_run()`, `k_ports[]`; `!` in `status_poll()`; `check_trigger()` (`app_test.c`); `check_update_request()` (`app_user.c`); §4b3 |
+| F-11 … F-13 | `parse_byte()`, `handle()`, `do_begin()`, `do_data()`, `reply_hello()`; §4b2 |
+| F-14 … F-17 | `flash_op()`, `partition_location()`, `write_sector()`, `do_finish()`; `tools/dfc_update.py` (`check_versions()`, `find_info()`) |
+| F-18 … F-20 | `set_tbyb()`, `flash_update_boot()`, `do_confirm()`, `updater_trial_pending()`; `crash_arm()`/`crash_feed()` gating in `main.c`/`crash.c`; §4c |
+| F-21, F-22 | BEGIN flags in `do_begin()`/`do_finish()`; `confirm_bypasses()` (`dfc_update.py`); `UPDATER_NO_TRIAL_KEY` |
+| F-23 | link interface: DESIGN §4b2; `--block-size` |
+| M-3b | `k_rates[]`, `rate_select()`, `mag_start()` (`s_cmd_rate`), `mag_tick_isr()` (`s_next_tick`), `config_start()`, `g_mag_rate_hz`, `MAG_RATE_DEFAULT_HZ`; console `r` in `status_poll()` |
+| D-10 | `app_mag_noise_take()` (`app_test.c`), `H_MAG_NOISE` and `MAGS noise_*` in `status.c` |
 | M-6, M-6a | `tick.c` |
 | M-7, M-8 | `mag_start()`, `build_cmds()` |
 | M-9 … M-14 | `publish()`, `mag_read_latest()` |
@@ -508,7 +806,7 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | D-5 | No counter or flag triggers anything; only M-15/M-16 aborts and U-9 resync |
 | R-1, R-2 | §5 |
 | B-1 … B-17 | README.md, `CMakePresets.json`, `cmake/host_tools.cmake`, `.gitattributes`, `.gitmodules`, `.vscode/` |
-| B-19, B-20 | `CMakeLists.txt` (`pico_enable_stdio_uart 0`, USB only with `APP_USB_STATUS`), `status_init()` |
+| B-19, B-20 | `CMakeLists.txt` (`pico_enable_stdio_uart 0`, USB only with `APP_USB_STATUS`), `status_init()`; `~`: `status_poll()` (`tud_disconnect()`, `BOOTSEL_DETACH_US`, then `reset_usb_boot()`) |
 | B-21 … B-25 | `CMakeLists.txt` (`-g` in Release, target-wide C flags, per-file SDK exceptions) |
 | V-1 … V-7 | docs/VERIFICATION.md, `tools/` |
 

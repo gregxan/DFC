@@ -1,20 +1,21 @@
 # XIAO RP2350 — dual UART + MMC5983MA firmware
 
 Bare-metal firmware for the Seeed XIAO RP2350 that implements
-*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.16
+*"XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA"*, Revision 2.26
 ([docs/REQUIREMENTS.md](docs/REQUIREMENTS.md)):
 
 - **UART0 and UART1 at 921,600 baud.** RX goes by DMA in endless mode, with no
   interrupt in the data path. TX is DMA-driven from a ring buffer.
 - **MMC5983MA at 1 kHz on I2C1**, run entirely by DMA and published through a
-  double buffer.
+  double buffer. For lower noise or load it can run at 500, 250, 200, 100 or 50 Hz, using the
+  sensor's own slower bandwidth settings with no averaging in firmware (M-3b).
 - **A single non-blocking main loop on core 0.** Core 1 stays idle.
 - **Builds on Windows** with CMake presets and Ninja. It needs no WSL, MSYS2,
   bash or make.
 
 | Document | Contents |
 |---|---|
-| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.16), the baseline for this firmware |
+| [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) | The requirements specification (Rev 2.26), the baseline for this firmware |
 | [docs/DESIGN.md](docs/DESIGN.md) | Architecture, interrupt map, requirement traceability, deviations |
 | [docs/VERIFICATION.md](docs/VERIFICATION.md) | Wiring and procedures for V-1 … V-7, including a board-only loopback self-test |
 
@@ -23,6 +24,7 @@ Bare-metal firmware for the Seeed XIAO RP2350 that implements
 ```
 CMakeLists.txt          build definition (B-6 … B-24)
 CMakePresets.json       release / diag / diag-pattern / debug presets (B-7)
+partition_table.json    A/B firmware slots; built into pt.uf2 (Rev 2.25)
 cmake/host_tools.cmake  finds the toolchain, picotool and pioasm (B-2, B-4)
 lib/pico-sdk/           Pico SDK 2.2.0, git submodule (B-9)
 src/link.[ch]           UART links: RX DMA ring, TX DMA queue, line errors
@@ -232,9 +234,45 @@ that contains `picotoolConfig.cmake` / `pioasmConfig.cmake`.
 
 ## Flashing
 
+**Day to day, flash new builds with the updater** (diag builds, over USB):
+`py tools\dfc_update.py COM13 --enter flash build\diag\firmware.uf2`. The
+running firmware's updater writes the build, and the new build's updater
+confirms it (see "Firmware updater" below). Use the BOOTSEL drive only for
+first-time setup, or to recover a board whose firmware has no working
+updater.
+
+### First-time setup: A/B partition table (Rev 2.25, once per board)
+
+The flash holds two firmware slots, A and B, so a field update can write
+one while the other keeps running (and fall back if the new image fails).
+The layout is in `partition_table.json`: a table at 0 K, slot A at 8 K, slot B
+at 1020 K, 1012 KB each, and 16 KB left unpartitioned at the end. Every build
+writes `pt.uf2` next to `firmware.uf2`.
+
+1. Hold **B**, tap **R**, release **B**. Copy `pt.uf2` to the `RP2350` drive.
+   The table replaces the start of flash, so the old firmware no longer
+   boots. The board comes back as the `RP2350` drive.
+2. Copy `firmware.uf2` to the drive. On a blank pair it goes into slot B (the
+   bootrom fills B first).
+3. The diag report's **Firmware** line shows the slot: `slot B (flash update
+   boot)` right after a copy, `slot B (normal boot)` after a reset. Without
+   the table it says `no partition table`.
+
+After that, flash as below. Each `firmware.uf2` copied to the drive goes into
+the slot that is not running, boots from there, and the bootrom erases the
+start of the old slot, so the new image stays selected. Slots therefore
+alternate A, B, A... from one flash to the next.
+
+On an RP2350 **A2** chip (the diag report shows the revision), copy `pt.uf2`
+only to a board that has no partition table yet. Replacing an existing table
+there needs picotool (RP2350-E10). Every `firmware.uf2` carries the E10
+workaround block, so later copies work on all revisions.
+
 - **BOOTSEL drive (B-15, no driver needed).** Hold **B** (BOOT), tap **R**
   (RESET) and release B. Copy `firmware.uf2` to the `RP2350` drive.
-- **picotool (B-16).** Put the board in BOOTSEL as above, then run:
+- **picotool (B-16).** Not yet checked with the A/B partition table;
+  the BOOTSEL drive is the tested route. Put the board in BOOTSEL as above,
+  then run:
   ```bash
   picotool load -x build\release\firmware.uf2
   ```
@@ -277,6 +315,59 @@ UART-related interrupt (B-20).
   drive appears, ready for a `.uf2`. `py tools\fwstatus.py COM7 --bootsel`
   does the same from a script. (Release builds have no USB console: use
   the BOOT button.)
+- **Magnetometer rate.** Type `r` to step the rate 1000 → 500 → 250 → 200 →
+  100 → 50 → 1000 Hz. The report's `Rate` line shows the rate in use, and in the `diag`
+  and `diag-pattern` builds a `Noise` line shows the per-axis RMS over the
+  last second, in mG. Keep the board still to read sensor noise.
+  `py tools\fwstatus.py COM7 --rate 100` sets the rate from a script. The
+  setting lasts until the next reset, unless you type `s`.
+- **Offset removal.** Type `o` to switch whether the Field values (and the
+  application's `mag_field()` / `mag_field16()`) have the calibrated bridge
+  offset removed (the default) or left in. The Offset line shows which.
+- **Saving settings.** `s` saves the current rate and offset choice in flash
+  as the start-up settings (REQUIREMENTS section 6b). They survive power
+  cycles and firmware updates. The `Saved` line shows what is stored. In
+  the application, `settings_save_mag_rate(hz)` and
+  `settings_save_mag_offset_apply(apply)` do the same (see the stubs in
+  `link0_handler()` in `src/app_user.c`). With nothing saved: 1000 Hz
+  (`MAG_RATE_DEFAULT_HZ`), offset removed (`MAG_OFFSET_APPLY_DEFAULT`), see
+  `src/config.h`.
+- **Firmware updater (REQUIREMENTS section 6a).** Type `!` and the board
+  reboots into its updater on this USB port. The COM port closes and comes
+  back. The updater blinks the LED fast and waits 90 s for
+  `tools\dfc_update.py`, then boots the firmware again. To update the
+  firmware over this port (it goes into the slot that is not running, is
+  checked, then booted):
+  ```bash
+  py tools\dfc_update.py COM13 --enter flash build\diag\firmware.uf2
+  ```
+  The script refuses an image without the updater info block, one whose
+  updater protocol it cannot drive, and (unless overridden) an older firmware
+  version (`--allow-downgrade`) or an older updater protocol
+  (`--allow-older-updater`). Every protection can be switched off on
+  purpose (`--allow-no-info`, `--allow-unsupported-protocol`,
+  `--allow-below-floor`, `--no-trial`); each one warns and needs a typed
+  `yes`, and `--no-trial` also needs its key typed in (DESIGN 4c).
+  Set the version with `-DDFC_FW_VERSION=x.y.z`
+  (default 0.1.0) and raise it for every release (DESIGN 4b).
+  The new image boots **on trial**. The script reconnects to the new image's
+  own updater and confirms it. Only then does it become permanent. If
+  anything goes wrong (it doesn't boot, its updater doesn't answer, it's not
+  the image that was sent), the board goes back to the previous firmware by
+  itself within about 17 s. `--no-confirm` skips the confirm, to watch the
+  fallback happen. A `.uf2` copied to the BOOTSEL drive is not on trial.
+- **Updating over UART0 or UART1** (how a deployed unit is updated): connect
+  a 3.3 V USB-serial adapter (or the pass-through device) to the link, then:
+  ```bash
+  py tools\dfc_update.py COM20 --uart --enter flash build\release\firmware.uf2
+  ```
+  `--enter` sends the trigger, 20 consecutive `!`. The user application
+  (`app_user.c`) and the test builds react to it on both UARTs. Replace it in
+  `app_user.c` if your protocol has its own "enter updater" message. The updater serves only the link that requested it:
+  entered from UART0 it ignores UART1, and the other way round. `--baud` (default 921600)
+  must match the link. `--block-size` shortens bursts for a pass-through
+  device. `tools/sim_board.py` simulates a board over a pty, for testing the
+  script on Linux.
 - **Hang and crash capture.** In diagnostic builds the yellow LED blinks
   while the firmware runs. If it ever stops for 2 s, a watchdog resets the
   board, and the report's **Last reset** line says where it was stuck, or
