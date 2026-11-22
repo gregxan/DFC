@@ -20,6 +20,7 @@
 #include "diag.h"
 #include "link.h"
 #include "mag.h"
+#include "nvstore.h"
 #include "build_id.h"
 #include "updater.h"
 #include "wirecheck.h"
@@ -52,7 +53,8 @@ void app_mag_noise_take(uint32_t *count, uint32_t rms_ug[3]); /* D-10 */
  * switch takes effect at the next report. '~' reboots into the USB
  * bootloader for reflashing (Rev 2.20). 'r' steps the magnetometer rate
  * 1000 -> 500 -> 250 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). '!' reboots into the
- * firmware updater on this USB port (Rev 2.25, updater.h). */
+ * firmware updater on this USB port (Rev 2.25, updater.h). 's' saves the
+ * current rate as the start-up rate in flash (NV-x, Rev 2.28, nvstore.h). */
 static bool s_human = true;
 static bool s_want_human = true;
 
@@ -292,6 +294,7 @@ enum {
     H_BLANK1,
     H_MAG_STATE,
     H_MAG_RATE,
+    H_MAG_SAVED,
 #if APP_MODE != APP_MODE_USER
     H_MAG_SAMPLES,
 #endif
@@ -633,7 +636,7 @@ static int format_human(unsigned line) {
         static const char *const mode[] = {"echo test", "pattern test", "user application"};
         return snprintf(s_buf, n,
                         "\r\n===== DFC status #%" PRIu32 " | up %02" PRIu32 ":%02" PRIu32 ":%02" PRIu32
-                        " | %s =====\r\n(keys: m machine, h readable, r mag rate, ~ reflash, ! updater)\r\n",
+                        " | %s =====\r\n(keys: m machine, h readable, r mag rate, s save rate, ~ reflash, ! updater)\r\n",
                         s_seq, tm / 3600u, (tm / 60u) % 60u, tm % 60u, mode[APP_MODE]);
     }
     case H_BAUD:
@@ -731,6 +734,31 @@ static int format_human(unsigned line) {
         default:
             return put(len, "MAGNETOMETER  FAULT - re-probing 5 times a second\r\n");
         }
+    }
+    case H_MAG_SAVED: { /* NV-x (Rev 2.28) */
+        nv_stats_t st;
+        nv_stats(&st);
+        uint32_t saved = settings_mag_rate_hz();
+        int len;
+        if (st.seq == 0u) {
+            len = put(0, "  Saved rate  none (starts at %u Hz); 's' saves the current rate\r\n",
+                      (unsigned)MAG_RATE_DEFAULT_HZ);
+        } else if (saved == 0u) {
+            len = put(0, "  Saved rate  default (%u Hz), record %" PRIu32 "\r\n", (unsigned)MAG_RATE_DEFAULT_HZ,
+                      st.seq);
+        } else {
+            len = put(0, "  Saved rate  %" PRIu32 " Hz at start-up, record %" PRIu32 "\r\n", saved, st.seq);
+        }
+        if (st.last_err != 0) {
+            snprintf(t, sizeof t, "last save FAILED: error %" PRId32, st.last_err);
+            len = wrap(len, LABEL, 14u, t);
+        } else if (st.saves != 0u) {
+            snprintf(t, sizeof t, "%" PRIu32 " save(s) since boot, %" PRIu32 " erase(s); last took %" PRIu32
+                     ".%03" PRIu32 " ms (main loop stalled)", st.saves, st.erases, st.last_us / 1000u,
+                     st.last_us % 1000u);
+            len = wrap(len, LABEL, 14u, t);
+        }
+        return len;
     }
     case H_MAG_RATE: { /* M-3b (Rev 2.25) */
         static const char *const k_bw[] = {"100 Hz", "200 Hz", "400 Hz", "800 Hz"};
@@ -1042,7 +1070,7 @@ void status_poll(void) {
     }
 
     /* From the host: 'm' machine format, 'h' readable, 'r' mag rate,
-     * '~' bootloader. */
+     * 's' save rate, '~' bootloader. */
     crash_crumb(CRUMB_STATUS_INPUT);
     int ch = getchar_timeout_us(0);
     crash_crumb(CRUMB_IDLE);
@@ -1062,6 +1090,10 @@ void status_poll(void) {
     } else if (ch == 'r' || ch == 'R') {
         /* M-3b (Rev 2.25): next rate; shown from the next report. */
         g_mag_rate_hz = mag_rate_next(g_mag_rate_hz);
+    } else if (ch == 's' || ch == 'S') {
+        /* NV-x (Rev 2.28): save the current rate as the start-up rate. Blocks
+         * the main loop for the flash write (missed epochs are expected). */
+        (void)settings_save_mag_rate(g_mag_rate_hz);
     } else if (ch == '~') {
         static const char k_msg[] = "\r\n\r\n*** '~' received: rebooting into the USB bootloader. The COM port "
                                     "will close; the board appears as the RP2350 drive. ***\r\n";

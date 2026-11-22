@@ -147,6 +147,33 @@ Before testing on the board, the host side can be checked against the
 simulator (Linux): run `tools/sim_board.py` and the same commands, pointed at
 the port it prints.
 
+## Non-volatile settings (NV-1 … NV-13, Rev 2.28)
+
+Host test (Rev 2.28): `nvstore.c` against simulated flash. 1,000+ saves
+wrapped the ring many times, with torn programs (every 37th save) and torn
+erases (at sector changes). The last completed value was always loaded.
+**Pass.**
+
+On the board (diag build, USB console):
+
+1. Fresh state: the report shows `Saved rate  none`. (After an earlier test,
+   go to step 2.)
+2. Type `r` until the `Rate` line shows 100 Hz, then `s`. **Pass:** `Saved
+   rate  100 Hz at start-up, record N`, with "1 save(s) … last took ~1 ms".
+3. Unplug USB and plug it back in. **Pass:** `Rate` shows 100 Hz from the
+   start, and `Saved rate` shows the same record N.
+4. Type `s` again without changing the rate. **Pass:** the save count does not
+   go up (no flash write, NV-8).
+5. Save 20 times, alternating `r` and `s`, so the store crosses a sector.
+   **Pass:** one save shows an erase, taking about 45 ms (up to 400 ms).
+   Missed epochs at that moment are expected. The record number goes up by
+   one per save.
+6. Power loss during a save (optional): press `s` and pull USB at once,
+   repeated a few times. **Pass:** after each power-up, the board starts with
+   either the old or the new rate, never a fault.
+7. Firmware update with `dfc_update.py`. **Pass:** the saved rate is kept.
+8. Set it back: `r` to 1000 Hz, then `s`.
+
 ## Test setup
 
 - Two USB-UART adapters, 3.3 V logic, capable of 921,600 baud. Connect one

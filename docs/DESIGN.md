@@ -466,7 +466,9 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
 | 0 K | 8 K | partition table (bootrom) |
 | 8 K | 1012 K | slot A, partition 0 |
 | 1020 K | 1012 K | slot B, partition 1, linked to A |
-| 2032 K | 16 K | unpartitioned: the RP2350-E10 block (last sector), later settings |
+| 2032 K | 8 K | unpartitioned: non-volatile settings, two sectors (section 4d, Rev 2.28) |
+| 2040 K | 4 K | unpartitioned: spare |
+| 2044 K | 4 K | unpartitioned: the RP2350-E10 block (last sector) |
 
 - **One image for both slots.** The bootrom maps the booted partition to the
   start of the XIP window, so the image is linked and built as before.
@@ -642,6 +644,28 @@ own watchdog should not arm or feed it while `updater_trial_pending()` is
 true. If it does, an unconfirmed image stays up until a reset, and the
 reset still brings the old image back.
 
+## 4d. Non-volatile settings (Rev 2.28, NV-1 … NV-13)
+
+`nvstore.[ch]`. The settings are a 64-byte struct, `dfc_settings_t`. Today it holds one field, `mag_rate_hz`. The other 62 bytes are reserved, with 0 meaning "default".
+
+**Records.** Each save programs one 256-byte page:
+
+| Bytes | Field |
+|---|---|
+| 0–3 | magic 0xDFC5E771 |
+| 4–7 | sequence number (1, 2, 3, …) |
+| 8–9 | data length (≤ 64) |
+| 10–11 | format (1) |
+| 12–75 | data, zero-padded |
+| 76–79 | CRC-32 (zlib) of bytes 0–75 |
+| 80–255 | left at 0xFF |
+
+**Ring.** The 32 pages of the two sectors are used in order, wrapping around. `nv_load()` and `nv_save()` read all 32 pages, through bootrom `flash_op` in storage addressing with the flash lock held, as `updater.c` does. They note the newest valid record and which pages are blank. A save goes to the first blank page after the newest record and skips pages that are neither blank nor valid. When it moves onto the first page of a sector that is not blank, it erases that sector first. The newest record is always in the other sector, so it is never erased. It then reads the page back and checks it.
+
+**Power loss.** A torn program or erase leaves bytes that fail the magic or CRC check. They are ignored, and the previous record stays current. A host test (simulated flash, 1,000 saves, torn programs and erases) checked this at Rev 2.28.
+
+**Use.** `settings_load()` runs in `app_init()` (both apps), before `tick_init()`. A stored rate that `mag_rate_supported()` accepts goes to `mag_set_rate_hz()`. `settings_save_mag_rate()` writes only if the value changed. The diag console's `s` key calls it with `g_mag_rate_hz`. The "Saved rate" report line shows `nv_stats()`.
+
 ## 5. Resources (R-1 … R-3)
 
 | Resource | Use |
@@ -738,6 +762,7 @@ reset still brings the old image back.
 | HW-4, HW-5 | `config.h`; `mag_init()` pins, pull-ups, address 0x30 |
 | HW-5a | Hardware only (SPI_CS, CAP and VDD capacitors); README wiring notes |
 | HW-7, HW-8 | C + Pico SDK; core 1 never launched |
+| NV-1 … NV-13 | `nvstore.[ch]`; `app_init()` in `app_user.c`, `app_test.c`; `status.c` `s` key and `H_MAG_SAVED` |
 | EX-1, EX-2 | `main.c`; every API in `link.c` / `mag.c` / `diag.c` returns without waiting |
 | EX-3 | `cs_enter()` / `cs_exit()` in `diag.h`; max recorded as `DIAG_T_CRITICAL` |
 | EX-4, EX-5 | §2; `irq_set_priority` calls in `link.c`, `mag.c`, `tick.c`, `status.c` |

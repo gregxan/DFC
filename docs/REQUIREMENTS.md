@@ -1,6 +1,6 @@
 # XIAO RP2350 Firmware Requirements: Dual UART + MMC5983MA
 
-**Revision 2.27**. The changes since Revision 2 are listed in sections 11 to 37.
+**Revision 2.28**. The changes since Revision 2 are listed in sections 11 to 38.
 
 ## 1. Scope
 
@@ -10,6 +10,7 @@ Firmware for a Seeed XIAO RP2350 that:
 - Samples an MMC5983MA magnetometer over I2C at 1 kHz, or at 500, 250, 200, 100 or 50 Hz for lower noise or load (M-3b).
 - Exposes all data to a single bare-metal main loop without ever blocking it.
 - Can be updated in the field over either UART, with A/B firmware slots, a trial boot and automatic fallback (section 6a).
+- Keeps a small block of settings, such as the start-up magnetometer rate, in flash across power cycles and updates (section 6b).
 - Builds, flashes, and debugs from a Windows host.
 
 ## 2. Hardware
@@ -129,7 +130,7 @@ Firmware for a Seeed XIAO RP2350 that:
   | 100 Hz | 10 ticks | 00 (100 Hz) | 8 ms | ~9.6 ms | 0.4 mG |
   | 50 Hz | 20 ticks | 00 (100 Hz) | 8 ms | ~19.6 ms | 0.4 mG |
 
-  - The rate at startup is a build option (`MAG_RATE_DEFAULT_HZ`, default 1000). At run time the application sets it with `mag_set_rate_hz(hz)`, which returns false and changes nothing for an unsupported rate *(added in Rev 2.27)*. `mag_rate_hz()` returns the rate in effect. The underlying global, `g_mag_rate_hz`, remains for the debugger. Diagnostic builds also step through the rates from the USB console (B-20).
+  - The rate at startup is a build option (`MAG_RATE_DEFAULT_HZ`, default 1000), unless a rate is saved in the non-volatile settings (NV-11, *added in Rev 2.28*). At run time the application sets it with `mag_set_rate_hz(hz)`, which returns false and changes nothing for an unsupported rate *(added in Rev 2.27)*. `mag_rate_hz()` returns the rate in effect. The underlying global, `g_mag_rate_hz`, remains for the debugger. Diagnostic builds also step through the rates from the USB console (B-20).
   - A change shall take effect at the next sample transaction, which writes the new BW (Internal Control 1) after its read and before its trigger write. The sample read in that transaction belongs to the old rate and is valid. If the transaction is aborted, the next one writes BW again. The sample triggered right after a BW write (rate change or re-probe configuration) is read at least 2 ticks later, because the bench showed the first measurement after a BW write taking 0.72 ms. At 1 kHz this gives one 2 ms step in `seq`, recorded in the sample's period (M-10), so it is not a gap.
   - An unsupported value shall be ignored, and the previous rate remains in use.
   - The re-probe configuration (M-2a) uses the rate selected at that time.
@@ -350,6 +351,24 @@ Firmware for a Seeed XIAO RP2350 that:
 
   Latency between frames only lengthens the update.
 - **F-24** The secrets (request key, boot key, no-trial key) are 64-bit constants in `updater.h`, `updater.c` and the host tool. They guard against accidental use, not against an attacker. Authenticated updates would need signed images (RP2350 secure boot) and are not provided.
+
+## 6b. Non-volatile Settings
+
+*(Added in Rev 2.28.)*
+
+- **NV-1** Firmware shall keep a 64-byte settings block in flash that survives power cycles, resets and firmware updates.
+- **NV-2** The block shall be stored outside both firmware slots, in two 4 KB sectors of the unpartitioned flash at 2032 K and 2036 K (offsets 0x1FC000–0x1FDFFF). It shall not use the last sector (0x1FF000), at which the RP2350-E10 UF2 block is aimed.
+- **NV-3** Each save shall append a record to the next blank 256-byte page. A record holds a 32-bit magic number, a 32-bit sequence number, the data length, a format number, the data and a CRC-32. The current settings are the valid record with the highest sequence number.
+- **NV-4** A save shall never erase or overwrite the current record. A sector is erased only when the next save moves into it, and it then holds only older records.
+- **NV-5** A save interrupted by a power loss or reset shall leave the previous settings in force. A half-written record or a half-erased sector fails its CRC check and is ignored, and the next save skips it.
+- **NV-6** Each save shall be read back and checked. The save function returns 0 on success, or a negative error.
+- **NV-7** A save blocks the main loop for about 1 ms, plus a sector erase (typically 45 ms, up to 400 ms) every 16th save. Interrupts and DMA keep running. Missed epochs during a save are expected. Saves shall be made from the main loop only, never from an interrupt.
+- **NV-8** Saving settings equal to those already stored shall not write the flash.
+- **NV-9** Wear: one sector erase per 16 saves. At the 100,000-cycle flash endurance this allows more than 3 million saves.
+- **NV-10** The settings shall be a C struct of exactly 64 bytes (`dfc_settings_t`). New fields shall be added only at the end, from the reserved bytes. A record saved by older firmware is shorter, and the missing bytes read as 0, so every field shall treat 0 as "use the default".
+- **NV-11** The first field shall be the start-up magnetometer rate (16-bit Hz, 0 = `MAG_RATE_DEFAULT_HZ`). `app_init()` shall load the settings and apply a stored rate that `mag_rate_supported()` accepts, before the 1 ms tick starts, so the first sample uses it. An unsupported stored value shall be ignored.
+- **NV-12** The application shall save the rate with `settings_save_mag_rate(hz)` (for example on a client command). Diagnostic builds shall save the current rate with `s` on the USB console, and the report shall show the stored rate, the record number, and the result and duration of the last save.
+- **NV-13** Erasing the whole chip (for example `picotool erase`) clears the settings. Updates over the updater and BOOTSEL drag-and-drop of firmware images do not touch them.
 
 ## 7. Resources
 
@@ -757,3 +776,8 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 - **Amended M-3b.** 500 Hz (BW 11, every 2 ticks) and 250 Hz (BW 10, every 4 ticks, 0.8 mG) added. The application sets the rate with `mag_set_rate_hz()`.
 - **Added M-13a, amended M-13.** A count of published samples, through `mag_sample_count()` and in every reading, to tell epochs with a new sample from those without.
 - **Amended EX-10.** Epochs run every 1 ms at every rate, and sample epochs keep the 1 kHz timing. The rate-dependent jitter (1–2 µs tick handler, about 3 µs completion interrupt in sample epochs) is stated.
+
+## 38. Revision 2.28 Changes
+
+- **Added section 6b (NV-1 … NV-13).** A 64-byte non-volatile settings block in two reserved flash sectors, written as append-only records with CRC, safe against power loss. Its first field is the start-up magnetometer rate, applied in `app_init()`.
+- **Amended M-3b.** The start-up rate can also come from the saved settings (NV-11).

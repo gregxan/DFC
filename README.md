@@ -320,9 +320,12 @@ UART-related interrupt (B-20).
   and `diag-pattern` builds a `Noise` line shows the per-axis RMS over the
   last second, in mG. Keep the board still to read sensor noise.
   `py tools\fwstatus.py COM7 --rate 100` sets the rate from a script. The
-  setting lasts until the next reset. To change the start-up rate, including
-  in release builds, set `MAG_RATE_DEFAULT_HZ` (see `src/config.h`), or call
-  `mag_set_rate_hz()` from the application.
+  setting lasts until the next reset, unless you type `s`: that saves the
+  current rate in flash as the start-up rate (REQUIREMENTS section 6b). It
+  survives power cycles and firmware updates. The `Saved rate` line shows
+  what is stored. In the application, `settings_save_mag_rate(hz)` does the
+  same (see `app_init()` in `src/app_user.c`). With nothing saved, the
+  start-up rate is `MAG_RATE_DEFAULT_HZ` (see `src/config.h`).
 - **Firmware updater (REQUIREMENTS section 6a).** Type `!` and the board
   reboots into its updater on this USB port. The COM port closes and comes
   back. The updater blinks the LED fast and waits 90 s for

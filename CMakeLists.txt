@@ -65,6 +65,7 @@ set(APP_SOURCES
     src/wirecheck.c
     src/crash.c
     src/updater.c
+    src/nvstore.c
 )
 if(APP_MODE STREQUAL "user")
     list(APPEND APP_SOURCES src/app_user.c)

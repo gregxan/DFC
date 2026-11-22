@@ -24,6 +24,7 @@
 #include "app.h"
 #include "link.h"
 #include "mag.h"
+#include "nvstore.h"
 #include "prof.h"
 #include "updater.h"
 
@@ -47,9 +48,23 @@ static void check_update_request(link_id_t id, const uint8_t *p, size_t n) {
 }
 
 void app_init(void) {
-    /* Magnetometer rate (M-3b): 1000 Hz unless changed here or later, e.g.
-     *     (void)mag_set_rate_hz(100);
+    /* Non-volatile settings (NV-x, Rev 2.28): load them, then apply the
+     * saved start-up magnetometer rate (M-3b). app_init() runs before the
+     * 1 ms tick starts, so the first sample already uses it. With nothing
+     * saved the rate stays at 1000 Hz.
+     *
+     * To change and keep a rate from your client protocol (main loop only;
+     * the flash write stalls the loop, ~1 ms, sometimes up to ~400 ms, and
+     * is skipped if the value is unchanged):
+     *     if (mag_set_rate_hz(hz)) {
+     *         (void)settings_save_mag_rate(hz);
+     *     }
      * Supported: 1000, 500, 250, 200, 100, 50 Hz. */
+    (void)settings_load();
+    uint32_t hz = settings_mag_rate_hz();
+    if (hz != 0u) {
+        (void)mag_set_rate_hz(hz);
+    }
 }
 
 /* ---- Magnetometer state, shared by all handlers -------------------- */
