@@ -11,7 +11,7 @@ format, each second the firmware emits nine lines:
     MAG fault=.. i2c_error=.. missed_tick=.. timeout=.. pid_fault=.. no_ack=.. wrong_id=.. cause=.. id=0x.. bus_clear=.. ...
     MAGS sr_mode=.. sr_interval=.. recovered=.. not_ready=.. x=.. y=.. z=.. rate_hz=.. rate_req_hz=.. bw=..
          noise_n=.. nx_ug=.. ny_ug=.. nz_ug=..   (noise: test builds only)
-    CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=..
+    CAL offset_valid=.. offset_cal=.. saturated=.. ox=.. oy=.. oz=.. offset_apply=..
     WIRE ran=.. sda_low=.. scl_low=.. sda_pullup=.. scl_pullup=.. shorted=.. found=.. mag=.. mag_swapped=.. ...
     BOOT ran=.. id=0x.. status=0x.. cause=.. cal_ok=.. t_fast_us=.. t_slow_us=.. t_rs_us=.. t_200_us=.. ...
     TIM_NS isr_uart0=.. isr_uart1=.. isr_txdma=.. isr_i2c=.. isr_tick=.. crit=.. api_read=.. ...
@@ -344,6 +344,8 @@ def render(cur: dict[str, dict[str, int]], prev: dict[str, dict[str, int]] | Non
     lines.append(f"  field x {g('MAGS', 'x'):>8}  y {g('MAGS', 'y'):>8}  z {g('MAGS', 'z'):>8}  counts (16384/G)"
                  f"   SET/RESET: {sr}")
     cal = "valid" if g("CAL", "offset_valid") == 1 else _paint("not calibrated", _YEL, colour)
+    if g("CAL", "offset_apply", 1) == 0:  # Rev 2.28 (M-4c); absent on older firmware
+        cal += ", " + _paint("LEFT IN the field", _YEL, colour)
     lines.append(f"  offset x {g('CAL', 'ox'):>8}  y {g('CAL', 'oy'):>8}  z {g('CAL', 'oz'):>8}   "
                  f"{cal}, {g('CAL', 'offset_cal')} calibrations")
 

@@ -24,6 +24,7 @@
 #include "pico/bootrom.h"
 #include "pico/time.h"
 
+#include "config.h"
 #include "mag.h"
 
 #define NV_MAGIC 0xDFC5E771u /* "DFC SETTL" */
@@ -254,6 +255,33 @@ int settings_save(const dfc_settings_t *s) {
 uint32_t settings_mag_rate_hz(void) {
     uint32_t hz = s_settings.mag_rate_hz;
     return mag_rate_supported(hz) ? hz : 0u;
+}
+
+bool settings_mag_offset_apply(void) {
+    switch (s_settings.mag_offset) {
+    case NV_OFFSET_APPLY:
+        return true;
+    case NV_OFFSET_RAW:
+        return false;
+    default:
+        return MAG_OFFSET_APPLY_DEFAULT != 0;
+    }
+}
+
+int settings_save_mag_offset_apply(bool apply) {
+    dfc_settings_t s = s_settings;
+    s.mag_offset = apply ? NV_OFFSET_APPLY : NV_OFFSET_RAW;
+    return settings_save(&s);
+}
+
+bool settings_apply_startup(void) {
+    bool found = settings_load();
+    uint32_t hz = settings_mag_rate_hz();
+    if (hz != 0u) {
+        (void)mag_set_rate_hz(hz);
+    }
+    mag_set_offset_apply(settings_mag_offset_apply());
+    return found;
 }
 
 int settings_save_mag_rate(uint32_t hz) {

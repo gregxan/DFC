@@ -44,6 +44,14 @@ extern volatile uint32_t g_mag_rate_hz;
  * a sampling tick sees its sample with the same timing as at 1 kHz (EX-10). */
 bool mag_set_rate_hz(uint32_t hz);
 
+/* M-4c (Rev 2.28): choose whether mag_field() / mag_field16() subtract the
+ * calibrated offset (true, the default: MAG_OFFSET_APPLY_DEFAULT) or return
+ * the field as the sensor measured it, bridge offset included (false). The
+ * offset is still calibrated and reported either way (mag_reading_t.offset).
+ * Takes effect at the next mag_read_latest(). Main loop only. */
+void mag_set_offset_apply(bool apply);
+bool mag_offset_apply(void);
+
 /* M-13a (Rev 2.27): samples published since start-up, valid or not (each
  * transaction that completes publishes one, M-9). Compare it with the value
  * from the previous epoch to tell whether this epoch brought a new sample.
@@ -101,9 +109,11 @@ typedef struct {
                    * (3 ms at 1 kHz, 60 ms at 50 Hz), or none yet */
     /* M-4b (Rev 2.9): bridge offset from the last SET/RESET calibration, in
      * the same signed counts as mag_convert(). Subtract it from every axis:
-     * field = mag_convert(raw) - offset. Not applied by the firmware. */
+     * field = mag_convert(raw) - offset. The raw sample never has it
+     * removed; mag_field() / mag_field16() remove it if offset_apply. */
     int32_t offset[3];
     bool offset_valid; /* false until the first successful calibration */
+    bool offset_apply; /* M-4c (Rev 2.28): mag_offset_apply() at this read */
     /* M-13a (Rev 2.27): mag_sample_count() as of this sample, copied with it.
      * Changes exactly when a new sample has been published. */
     uint32_t count;
@@ -210,10 +220,11 @@ static inline void mag_convert(const uint8_t raw[MMC_SAMPLE_BYTES], int32_t xyz[
 }
 
 /* Convenience: field in signed counts with the calibrated offset removed
- * (offset ignored if not valid). 16384 counts/G. */
+ * (offset ignored if not valid, or if switched off: M-4c, offset_apply).
+ * 16384 counts/G. */
 static inline void mag_field(const mag_reading_t *r, int32_t xyz[3]) {
     mag_convert(r->s.raw, xyz);
-    if (r->offset_valid) {
+    if (r->offset_valid && r->offset_apply) {
         for (int i = 0; i < 3; i++) {
             xyz[i] -= r->offset[i];
         }
@@ -221,7 +232,7 @@ static inline void mag_field(const mag_reading_t *r, int32_t xyz[3]) {
 }
 
 /* Field at 16-bit scale: 4096 counts/G, so +/-8 G spans the int16 range.
- * Calibrated offset removed, rounded to nearest (halves away from zero) and
+ * Calibrated offset removed (as mag_field()), rounded to nearest (halves away from zero) and
  * clamped to [-32768, 32767]. It halves the size of X/Y/Z in a message (6
  * bytes instead of 12). At 1 kHz (BW = 11) the sensor noise (1.2 mG RMS) is
  * about 5 steps of 0.25 mG, so nothing useful is lost. At 100 and 50 Hz

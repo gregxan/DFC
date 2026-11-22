@@ -320,12 +320,18 @@ UART-related interrupt (B-20).
   and `diag-pattern` builds a `Noise` line shows the per-axis RMS over the
   last second, in mG. Keep the board still to read sensor noise.
   `py tools\fwstatus.py COM7 --rate 100` sets the rate from a script. The
-  setting lasts until the next reset, unless you type `s`: that saves the
-  current rate in flash as the start-up rate (REQUIREMENTS section 6b). It
-  survives power cycles and firmware updates. The `Saved rate` line shows
-  what is stored. In the application, `settings_save_mag_rate(hz)` does the
-  same (see `app_init()` in `src/app_user.c`). With nothing saved, the
-  start-up rate is `MAG_RATE_DEFAULT_HZ` (see `src/config.h`).
+  setting lasts until the next reset, unless you type `s`.
+- **Offset removal.** Type `o` to switch whether the Field values (and the
+  application's `mag_field()` / `mag_field16()`) have the calibrated bridge
+  offset removed (the default) or left in. The Offset line shows which.
+- **Saving settings.** `s` saves the current rate and offset choice in flash
+  as the start-up settings (REQUIREMENTS section 6b). They survive power
+  cycles and firmware updates. The `Saved` line shows what is stored. In
+  the application, `settings_save_mag_rate(hz)` and
+  `settings_save_mag_offset_apply(apply)` do the same (see the stubs in
+  `link0_handler()` in `src/app_user.c`). With nothing saved: 1000 Hz
+  (`MAG_RATE_DEFAULT_HZ`), offset removed (`MAG_OFFSET_APPLY_DEFAULT`), see
+  `src/config.h`.
 - **Firmware updater (REQUIREMENTS section 6a).** Type `!` and the board
   reboots into its updater on this USB port. The COM port closes and comes
   back. The updater blinks the LED fast and waits 90 s for

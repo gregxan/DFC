@@ -143,6 +143,7 @@ Firmware for a Seeed XIAO RP2350 that:
 
   A change to either variable shall take effect at the next sample transaction (within one sample period, M-3b). The pulse interval counts samples, so at 50 Hz a SET every 50 samples is once a second. An invalid mode value shall be ignored, and the previous mode remains in use. Leaving a mode partway through a RESET → SET cycle shall still complete the SET. The single-cycle mode provides no ongoing SET; re-selecting it re-calibrates the offset (M-4b).
 - **M-4b** Every RESET → SET cycle shall also calibrate the bridge offset, following the datasheet procedure (p. 18). *(Added in Rev 2.9.)*
+- **M-4c** Whether the field helpers (`mag_field()`, `mag_field16()`) subtract the calibrated offset shall be selectable at run time with `mag_set_offset_apply(bool)`, and readable with `mag_offset_apply()`. The default is on (`MAG_OFFSET_APPLY_DEFAULT`), unless the saved settings say otherwise (NV-11). Off, the helpers return the field as measured, bridge offset included. The offset is calibrated and reported either way. The raw sample never has it removed. Each reading carries the choice in effect (`offset_apply`), so one reading is always converted consistently. *(Added in Rev 2.28.)*
   - Cycles occur at startup, when single-cycle mode is selected at run time, and after a successful re-probe.
   - Measure once after the RESET (−H + offset) and once after the SET (+H + offset). The offset is their per-axis mean, in the same signed counts as the converted field.
   - A calibration is used only if both measurements completed (Meas_M_Done set) and no abort intervened. Otherwise the previous offset is kept.
@@ -366,8 +367,12 @@ Firmware for a Seeed XIAO RP2350 that:
 - **NV-8** Saving settings equal to those already stored shall not write the flash.
 - **NV-9** Wear: one sector erase per 16 saves. At the 100,000-cycle flash endurance this allows more than 3 million saves.
 - **NV-10** The settings shall be a C struct of exactly 64 bytes (`dfc_settings_t`). New fields shall be added only at the end, from the reserved bytes. A record saved by older firmware is shorter, and the missing bytes read as 0, so every field shall treat 0 as "use the default".
-- **NV-11** The first field shall be the start-up magnetometer rate (16-bit Hz, 0 = `MAG_RATE_DEFAULT_HZ`). `app_init()` shall load the settings and apply a stored rate that `mag_rate_supported()` accepts, before the 1 ms tick starts, so the first sample uses it. An unsupported stored value shall be ignored.
-- **NV-12** The application shall save the rate with `settings_save_mag_rate(hz)` (for example on a client command). Diagnostic builds shall save the current rate with `s` on the USB console, and the report shall show the stored rate, the record number, and the result and duration of the last save.
+- **NV-11** The fields shall be:
+  - the start-up magnetometer rate (16-bit Hz, 0 = `MAG_RATE_DEFAULT_HZ`);
+  - the offset choice (M-4c, 8-bit: 0 = `MAG_OFFSET_APPLY_DEFAULT`, 1 = offset removed, 2 = offset left in).
+
+  `app_init()` shall load the settings and apply them (`settings_apply_startup()`) before the 1 ms tick starts, so the first sample uses them. A stored rate that `mag_rate_supported()` rejects, or an unknown offset value, shall be ignored, and the default is used. *(Offset choice added in Rev 2.28.)*
+- **NV-12** The application shall save the rate with `settings_save_mag_rate(hz)` and the offset choice with `settings_save_mag_offset_apply(apply)`, for example on client commands. Diagnostic builds shall switch the offset choice with `o` on the USB console and save the current rate and offset choice together with `s`. The report shall show the stored values, the record number, and the result and duration of the last save. The Offset line and the machine `CAL` line (`offset_apply`) shall show the choice in effect.
 - **NV-13** Erasing the whole chip (for example `picotool erase`) clears the settings. Updates over the updater and BOOTSEL drag-and-drop of firmware images do not touch them.
 
 ## 7. Resources
@@ -781,3 +786,4 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 
 - **Added section 6b (NV-1 … NV-13).** A 64-byte non-volatile settings block in two reserved flash sectors, written as append-only records with CRC, safe against power loss. Its first field is the start-up magnetometer rate, applied in `app_init()`.
 - **Amended M-3b.** The start-up rate can also come from the saved settings (NV-11).
+- **Added M-4c.** A run-time choice of whether the field helpers remove the calibrated offset. It is also kept in the saved settings (NV-11).

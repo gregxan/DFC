@@ -105,6 +105,13 @@
 #define MAG_RATE_DEFAULT_HZ 1000u
 #endif
 
+/* M-4c (Rev 2.28): whether mag_field() / mag_field16() subtract the
+ * calibrated bridge offset (M-4b), unless the saved settings say otherwise
+ * (NV-11a). Changed at run time with mag_set_offset_apply(). */
+#ifndef MAG_OFFSET_APPLY_DEFAULT
+#define MAG_OFFSET_APPLY_DEFAULT 1
+#endif
+
 /* M-17: stale limit per sample period (3 ms at 1 kHz, 60 ms at 50 Hz). */
 #ifndef MAG_STALE_US
 #define MAG_STALE_US 3000u

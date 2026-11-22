@@ -53,8 +53,9 @@ void app_mag_noise_take(uint32_t *count, uint32_t rms_ug[3]); /* D-10 */
  * switch takes effect at the next report. '~' reboots into the USB
  * bootloader for reflashing (Rev 2.20). 'r' steps the magnetometer rate
  * 1000 -> 500 -> 250 -> 200 -> 100 -> 50 -> 1000 Hz (M-3b, Rev 2.25). '!' reboots into the
- * firmware updater on this USB port (Rev 2.25, updater.h). 's' saves the
- * current rate as the start-up rate in flash (NV-x, Rev 2.28, nvstore.h). */
+ * firmware updater on this USB port (Rev 2.25, updater.h). 'o' switches the
+ * offset removal on and off (M-4c), and 's' saves the current rate and
+ * offset choice as the start-up settings in flash (NV-12, Rev 2.28). */
 static bool s_human = true;
 static bool s_want_human = true;
 
@@ -206,9 +207,9 @@ static int format_line(unsigned line) {
         );
     case 5:
         return snprintf(s_buf, n, "CAL offset_valid=%u offset_cal=%" PRIu32 " saturated=%" PRIu32 " ox=%" PRId32
-                        " oy=%" PRId32 " oz=%" PRId32 "\r\n",
+                        " oy=%" PRId32 " oz=%" PRId32 " offset_apply=%u\r\n",
                         (unsigned)s_mag.offset_valid, s_total[DIAG_MAG_OFFSET_CAL], s_total[DIAG_MAG_SATURATED],
-                        s_mag.offset[0], s_mag.offset[1], s_mag.offset[2]);
+                        s_mag.offset[0], s_mag.offset[1], s_mag.offset[2], (unsigned)s_mag.offset_apply);
     case 6: { /* Rev 2.18: start-up wiring check */
         const wirecheck_t *w = wirecheck_result();
         return snprintf(s_buf, n, "WIRE ran=%u sda_low=%u scl_low=%u sda_pullup=%u scl_pullup=%u shorted=%u"
@@ -636,7 +637,7 @@ static int format_human(unsigned line) {
         static const char *const mode[] = {"echo test", "pattern test", "user application"};
         return snprintf(s_buf, n,
                         "\r\n===== DFC status #%" PRIu32 " | up %02" PRIu32 ":%02" PRIu32 ":%02" PRIu32
-                        " | %s =====\r\n(keys: m machine, h readable, r mag rate, s save rate, ~ reflash, ! updater)\r\n",
+                        " | %s =====\r\n(keys: m machine, h readable, r mag rate, o offset, s save, ~ reflash, ! updater)\r\n",
                         s_seq, tm / 3600u, (tm / 60u) % 60u, tm % 60u, mode[APP_MODE]);
     }
     case H_BAUD:
@@ -735,19 +736,19 @@ static int format_human(unsigned line) {
             return put(len, "MAGNETOMETER  FAULT - re-probing 5 times a second\r\n");
         }
     }
-    case H_MAG_SAVED: { /* NV-x (Rev 2.28) */
+    case H_MAG_SAVED: { /* NV-12 (Rev 2.28) */
         nv_stats_t st;
         nv_stats(&st);
-        uint32_t saved = settings_mag_rate_hz();
         int len;
         if (st.seq == 0u) {
-            len = put(0, "  Saved rate  none (starts at %u Hz); 's' saves the current rate\r\n",
+            len = put(0, "  Saved       nothing (defaults: %u Hz, offset removed); 's' saves the current settings\r\n",
                       (unsigned)MAG_RATE_DEFAULT_HZ);
-        } else if (saved == 0u) {
-            len = put(0, "  Saved rate  default (%u Hz), record %" PRIu32 "\r\n", (unsigned)MAG_RATE_DEFAULT_HZ,
-                      st.seq);
         } else {
-            len = put(0, "  Saved rate  %" PRIu32 " Hz at start-up, record %" PRIu32 "\r\n", saved, st.seq);
+            uint32_t saved = settings_mag_rate_hz();
+            len = put(0, "  Saved       %" PRIu32 " Hz%s, offset %s%s, record %" PRIu32 "\r\n",
+                      saved != 0u ? saved : (uint32_t)MAG_RATE_DEFAULT_HZ, saved != 0u ? "" : " (default)",
+                      settings_mag_offset_apply() ? "removed" : "left in",
+                      settings_get()->mag_offset == NV_OFFSET_DEFAULT ? " (default)" : "", st.seq);
         }
         if (st.last_err != 0) {
             snprintf(t, sizeof t, "last save FAILED: error %" PRId32, st.last_err);
@@ -852,7 +853,10 @@ static int format_human(unsigned line) {
                         "  Offset      x %7" PRId32 "   y %7" PRId32 "   z %7" PRId32 "   %s (%" PRIu32 ")\r\n" LABEL
                         "SET/RESET %s   saturated %" PRIu32 "\r\n",
                         s_mag.offset[0], s_mag.offset[1], s_mag.offset[2],
-                        s_mag.offset_valid ? "calibrated" : "not calibrated", s_total[DIAG_MAG_OFFSET_CAL], a,
+                        !s_mag.offset_valid  ? "not calibrated"
+                        : s_mag.offset_apply ? "calibrated, removed"
+                                             : "calibrated, LEFT IN (o)",
+                        s_total[DIAG_MAG_OFFSET_CAL], a,
                         s_total[DIAG_MAG_SATURATED]);
     case H_WIRE: { /* Rev 2.18: start-up wiring check */
         const wirecheck_t *w = wirecheck_result();
@@ -1070,7 +1074,7 @@ void status_poll(void) {
     }
 
     /* From the host: 'm' machine format, 'h' readable, 'r' mag rate,
-     * 's' save rate, '~' bootloader. */
+     * 'o' offset on/off, 's' save settings, '~' bootloader. */
     crash_crumb(CRUMB_STATUS_INPUT);
     int ch = getchar_timeout_us(0);
     crash_crumb(CRUMB_IDLE);
@@ -1090,10 +1094,19 @@ void status_poll(void) {
     } else if (ch == 'r' || ch == 'R') {
         /* M-3b (Rev 2.25): next rate; shown from the next report. */
         g_mag_rate_hz = mag_rate_next(g_mag_rate_hz);
+    } else if (ch == 'o' || ch == 'O') {
+        /* M-4c (Rev 2.28): offset removed / left in, from the next report. */
+        mag_set_offset_apply(!mag_offset_apply());
     } else if (ch == 's' || ch == 'S') {
-        /* NV-x (Rev 2.28): save the current rate as the start-up rate. Blocks
-         * the main loop for the flash write (missed epochs are expected). */
-        (void)settings_save_mag_rate(g_mag_rate_hz);
+        /* NV-12 (Rev 2.28): save the current rate and offset choice as the
+         * start-up settings, in one flash write. Blocks the main loop for
+         * the write (missed epochs are expected). */
+        if (mag_rate_supported(g_mag_rate_hz)) {
+            dfc_settings_t ns = *settings_get();
+            ns.mag_rate_hz = (uint16_t)g_mag_rate_hz;
+            ns.mag_offset = mag_offset_apply() ? NV_OFFSET_APPLY : NV_OFFSET_RAW;
+            (void)settings_save(&ns);
+        }
     } else if (ch == '~') {
         static const char k_msg[] = "\r\n\r\n*** '~' received: rebooting into the USB bootloader. The COM port "
                                     "will close; the board appears as the RP2350 drive. ***\r\n";

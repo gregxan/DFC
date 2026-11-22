@@ -48,18 +48,14 @@ static void check_update_request(link_id_t id, const uint8_t *p, size_t n) {
 }
 
 void app_init(void) {
-    /* Non-volatile settings (NV-x, Rev 2.28): load them, then apply the
-     * saved start-up magnetometer rate (M-3b). app_init() runs before the
-     * 1 ms tick starts, so the first sample already uses it. With nothing
-     * saved the rate stays at 1000 Hz.
+    /* Non-volatile settings (NV-11, Rev 2.28): load them and apply the
+     * saved magnetometer rate (M-3b) and offset choice (M-4c). app_init()
+     * runs before the 1 ms tick starts, so the first sample already uses
+     * them. With nothing saved: 1000 Hz, offset removed.
      *
-     * To change and keep a rate from your client protocol, see the
-     * commented-out stub in link0_handler(). */
-    (void)settings_load();
-    uint32_t hz = settings_mag_rate_hz();
-    if (hz != 0u) {
-        (void)mag_set_rate_hz(hz);
-    }
+     * To change and keep them from your client protocol, see the
+     * commented-out stubs in link0_handler(). */
+    (void)settings_apply_startup();
 }
 
 /* ---- Magnetometer state, shared by all handlers -------------------- */
@@ -136,6 +132,19 @@ static void link0_handler(void) {
          *     } else {
          *         // reply "unsupported rate" to the client
          *     }
+         * }
+         */
+
+        /* Client command: choose whether s_mag_xyz[] / s_mag_xyz16[] have
+         * the calibrated bridge offset removed (M-4c), and keep the choice
+         * (NV-11). Takes effect from the next epoch's sample. Same save
+         * cost and return value as above.
+         *
+         * if (<message is SET_MAG_OFFSET>) {
+         *     bool apply = <flag from the message>; // true = offset removed
+         *     mag_set_offset_apply(apply);
+         *     int err = settings_save_mag_offset_apply(apply);
+         *     (void)err; // reply ok / error to the client
          * }
          */
         (void)link_write(LINK_1, s_link0_buf, n);

@@ -185,13 +185,9 @@ static void mag_consume(void) {
 
 void app_init(void) {
     test_pins_init();
-    /* NV-x (Rev 2.28): saved start-up magnetometer rate, as in app_user.c.
-     * Diag console: 'r' changes the rate, 's' saves it. */
-    (void)settings_load();
-    uint32_t hz = settings_mag_rate_hz();
-    if (hz != 0u) {
-        (void)mag_set_rate_hz(hz);
-    }
+    /* NV-11 (Rev 2.28): saved magnetometer rate and offset choice, as in
+     * app_user.c. Diag console: 'r' rate, 'o' offset on/off, 's' saves. */
+    (void)settings_apply_startup();
 }
 
 void app_poll(void) {

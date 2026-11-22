@@ -254,6 +254,17 @@ static unsigned __not_in_flash_func(rate_select)(void) {
     return r < RATE_COUNT ? r : s_rate_applied;
 }
 
+/* M-4c (Rev 2.28). Main loop only; volatile for the debugger. */
+volatile bool g_mag_offset_apply = MAG_OFFSET_APPLY_DEFAULT;
+
+void mag_set_offset_apply(bool apply) {
+    g_mag_offset_apply = apply;
+}
+
+bool mag_offset_apply(void) {
+    return g_mag_offset_apply;
+}
+
 bool mag_set_rate_hz(uint32_t hz) {
     if (rate_index(hz) >= RATE_COUNT) {
         return false;
@@ -861,6 +872,7 @@ bool __not_in_flash_func(mag_read_latest)(mag_reading_t *r) {
     r->offset[1] = s_offset[1];
     r->offset[2] = s_offset[2];
     r->offset_valid = s_offset_valid;
+    r->offset_apply = g_mag_offset_apply;
     r->count = s_sample_count;
     cs_exit(cs);
 

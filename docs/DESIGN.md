@@ -646,7 +646,7 @@ reset still brings the old image back.
 
 ## 4d. Non-volatile settings (Rev 2.28, NV-1 … NV-13)
 
-`nvstore.[ch]`. The settings are a 64-byte struct, `dfc_settings_t`. Today it holds one field, `mag_rate_hz`. The other 62 bytes are reserved, with 0 meaning "default".
+`nvstore.[ch]`. The settings are a 64-byte struct, `dfc_settings_t`. It holds two fields: `mag_rate_hz` (u16) and `mag_offset` (u8: 0 default, 1 removed, 2 left in, M-4c). The other 61 bytes are reserved, with 0 meaning "default".
 
 **Records.** Each save programs one 256-byte page:
 
@@ -664,7 +664,9 @@ reset still brings the old image back.
 
 **Power loss.** A torn program or erase leaves bytes that fail the magic or CRC check. They are ignored, and the previous record stays current. A host test (simulated flash, 1,000 saves, torn programs and erases) checked this at Rev 2.28.
 
-**Use.** `settings_load()` runs in `app_init()` (both apps), before `tick_init()`. A stored rate that `mag_rate_supported()` accepts goes to `mag_set_rate_hz()`. `settings_save_mag_rate()` writes only if the value changed. The diag console's `s` key calls it with `g_mag_rate_hz`. The "Saved rate" report line shows `nv_stats()`.
+**Use.** `settings_apply_startup()` runs in `app_init()` (both apps), before `tick_init()`. It loads the settings and passes a stored rate that `mag_rate_supported()` accepts to `mag_set_rate_hz()`. It passes the offset choice to `mag_set_offset_apply()`. `settings_save_*()` write only if a value changed. The diag console's `o` key switches the offset choice, and `s` saves the rate and offset choice in one record. The "Saved" report line shows the stored values and `nv_stats()`.
+
+**Offset choice (M-4c).** `g_mag_offset_apply` is a main-loop setting. `mag_read_latest()` copies it into `mag_reading_t.offset_apply`, and the inline `mag_field()` tests `offset_valid && offset_apply`. The offset calibration itself does not change.
 
 ## 5. Resources (R-1 … R-3)
 

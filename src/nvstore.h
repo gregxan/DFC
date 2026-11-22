@@ -67,9 +67,14 @@ void nv_stats(nv_stats_t *s);
 /* ---- Settings ------------------------------------------------------ */
 
 typedef struct {
-    uint16_t mag_rate_hz;   /* start-up magnetometer rate (M-3b); 0 = default (1000 Hz) */
-    uint8_t reserved[62];   /* future settings: 0 = default */
+    uint16_t mag_rate_hz; /* start-up magnetometer rate (M-3b); 0 = default (MAG_RATE_DEFAULT_HZ) */
+    uint8_t mag_offset;   /* M-4c: remove the offset in mag_field()? NV_OFFSET_*; 0 = default */
+    uint8_t reserved[61]; /* future settings: 0 = default */
 } dfc_settings_t;
+
+#define NV_OFFSET_DEFAULT 0u /* MAG_OFFSET_APPLY_DEFAULT (config.h) */
+#define NV_OFFSET_APPLY 1u   /* offset removed */
+#define NV_OFFSET_RAW 2u     /* offset left in (field as measured) */
 
 _Static_assert(sizeof(dfc_settings_t) == NV_DATA_SIZE, "settings must be NV_DATA_SIZE bytes");
 
@@ -87,5 +92,15 @@ int settings_save(const dfc_settings_t *s);
 /* Helpers for the start-up magnetometer rate. */
 uint32_t settings_mag_rate_hz(void); /* stored rate, or 0 if none / not supported */
 int settings_save_mag_rate(uint32_t hz); /* NV_ERR_VALUE if hz is not a supported rate */
+
+/* Helpers for the offset setting (M-4c). settings_mag_offset_apply() gives
+ * the stored choice, or MAG_OFFSET_APPLY_DEFAULT if none (or an unknown
+ * value) is stored. */
+bool settings_mag_offset_apply(void);
+int settings_save_mag_offset_apply(bool apply);
+
+/* Load the settings and apply them (rate, offset) to the magnetometer: the
+ * whole start-up step, for app_init(). Returns settings_load()'s result. */
+bool settings_apply_startup(void);
 
 #endif /* NVSTORE_H */
