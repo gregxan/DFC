@@ -21,15 +21,17 @@ section. Procedures not listed there have not been run.
 | Offset removal (180° turn), axis orientation, SDA short to GND, sensor power-cycle at run time (M-2b) | Not run |
 | SET/RESET modes, saturation, M-8 durations, V-5a, supply current | Not run (need a debugger, analyzer or meter) |
 
-**Open after Rev 2.28 (not yet run on the board).**
+**Rev 2.28 bench status.**
 
 | Check | Status |
 |---|---|
-| Rates 500 and 250 Hz, sample count (M-13a), epoch jitter at lower rates (EX-10) | Not run |
-| Saved settings, steps 1–9 of "Non-volatile settings" below (V-12) | Not run (host test passes) |
-| Offset choice `o` (M-4c): field shifts by the offset, survives a power cycle | Not run |
+| Saved settings, "Non-volatile settings" below (V-12) | Pass (host test and board) |
+| Offset choice `o` (M-4c): field shifts by the offset, survives a power cycle | Pass |
+| Updates over UART0, several builds in a row (V-9) | Pass |
 | `~` USB detach (B-20): drive appears every time | Pass, a few tries (10 not yet done) |
-| Release-build update over UART; UART1 tests (back pads); loopback tests B–D | Not run |
+| Rates 500 and 250 Hz, sample count (M-13a), epoch jitter at lower rates (EX-10) | Not run |
+| UART1: updater, link lock (back pads not wired) | Not run |
+| Release-build update over UART (no USB console to watch); loopback tests B–D | Not run |
 
 **UART0 loopback, diag-pattern (Rev 2.25, D6→D7 jumper, magnetometer at 1 kHz), 23.3 min logged.**
 
@@ -165,6 +167,9 @@ USB detach first (`04685da`), the drive appeared on every try on the bench.
 **Pass** (a few tries, not yet the full 10).
 
 ## Non-volatile settings (NV-1 … NV-13, Rev 2.28)
+
+Bench (Rev 2.28): saved rate and offset choice verified on the board,
+including power cycles and updates. **Pass.**
 
 Host test (Rev 2.28): `nvstore.c` against simulated flash. 1,000+ saves
 wrapped the ring many times, with torn programs (every 37th save) and torn
