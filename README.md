@@ -271,9 +271,10 @@ writes `pt.uf2` next to `firmware.uf2`.
    the table it says `no partition table`.
 
 After that, flash as below. Each `firmware.uf2` copied to the drive goes into
-the slot that is not running, boots from there, and the bootrom erases the
-start of the old slot, so the new image stays selected. Slots therefore
-alternate A, B, A... from one flash to the next.
+the slot that is not running and boots from there. The new image stays
+selected: after a copy into B the bootrom erases the start of A, and a copy
+into A wins over B anyway, so B keeps the previous image (DESIGN 4a). Slots
+therefore alternate A, B, A... from one flash to the next.
 
 On an RP2350 **A2** chip (the diag report shows the revision), copy `pt.uf2`
 only to a board that has no partition table yet. Replacing an existing table

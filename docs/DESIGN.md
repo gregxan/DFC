@@ -477,10 +477,17 @@ counted in `DIAG_MAG_BUS_CLEAR` (D-1).
   image version wins. A UF2 copied to the BOOTSEL drive goes into the slot
   that is not booting, and the bootrom then does a flash update boot of it.
   Launching a valid non-TBYB image in a flash update boot erases the first
-  sector of the other slot, so the new image stays selected. Versions do not
-  matter yet. The updater (later steps) uses the same flash update boot, with
-  try-before-you-buy: a 16.7 s fixed watchdog, then `explicit_buy()`, which
-  erases the other slot's first sector.
+  sector of the other slot only if that slot would otherwise win the next
+  boot (bootrom source, `varm_flash_boot.c`, checked in Rev 2.28). Our images
+  carry no version, so versions tie, and on a tie slot A wins:
+  - new image in **B**: A's first sector is erased (A would win the tie);
+  - new image in **A**: B is left intact (A wins anyway). B still holds the
+    previous image, which boots only if A stops verifying.
+
+  The updater uses the same flash update boot, with try-before-you-buy: a
+  16.7 s fixed watchdog, then `explicit_buy()`, which erases the other slot
+  by the same rule. *(Corrected in Rev 2.28: earlier text said the other
+  slot is always erased.)*
 - **RP2350-E10 (A2 bootrom).** UF2 drag-and-drop fails when a partition table
   is present unless the UF2 starts with an absolute-family block aimed at the
   end of flash. `PICOTOOL_EXTRA_UF2_ARGS` adds it to every `firmware.uf2`,
@@ -597,8 +604,9 @@ writes flash. A frame stalled for 500 ms mid-way is dropped.
 3. The script reconnects. It checks HELLO: the slot just written, on trial,
    and the info block of the image sent. Then it sends CONFIRM, and the
    updater calls `explicit_buy()`. The bootrom clears the TBYB bit in flash
-   and erases the old slot's first sector. Then the board reboots into the
-   application.
+   and erases the old slot's first sector if that slot would otherwise win
+   the next boot (always for an image in B, never for one in A, section 4a).
+   Then the board reboots into the application.
 4. Without CONFIRM the watchdog fires. At the next boot the bootrom prefers
    the non-TBYB (old) image over the unconfirmed one. The old firmware is
    back and the unconfirmed image is never chosen again.
@@ -661,6 +669,8 @@ reset still brings the old image back.
 | 80–255 | left at 0xFF |
 
 **Ring.** The 32 pages of the two sectors are used in order, wrapping around. `nv_load()` and `nv_save()` read all 32 pages, through bootrom `flash_op` in storage addressing with the flash lock held, as `updater.c` does. They note the newest valid record and which pages are blank. A save goes to the first blank page after the newest record and skips pages that are neither blank nor valid. When it moves onto the first page of a sector that is not blank, it erases that sector first. The newest record is always in the other sector, so it is never erased. It then reads the page back and checks it.
+
+**Address guard.** `flash_op()` refuses erase and program outside the two sectors (`NV_ERR_GUARD`). The updater's `flash_op()` does the same outside the write window, which `do_begin()` opens on the target slot only, after checking that it lies between the partition table and 2032 K and does not overlap the running slot.
 
 **Power loss.** A torn program or erase leaves bytes that fail the magic or CRC check. They are ignored, and the previous record stays current. A host test (simulated flash, 1,000 saves, torn programs and erases) checked this at Rev 2.28.
 

@@ -96,7 +96,8 @@ py -m pip install -r tools/requirements.txt
      is as before.
 3. Copy the same `firmware.uf2` again. **Firmware** reads `slot A (flash
    update boot)`, then `slot A (normal boot)` after R, and also after a power
-   cycle: the old slot was invalidated.
+   cycle. Slot B is not erased here: A wins the tie between unversioned
+   images (DESIGN 4a).
 4. Note the chip revision shown (A2 needs the E10 block; A3 and later ignore
    it).
 

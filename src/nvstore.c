@@ -47,7 +47,15 @@ static nv_stats_t s_stats;
 
 /* ---- Flash access (bootrom, storage addresses; see updater.c) ------- */
 
+/* Address guard (Rev 2.28, NV-2): erase and program only inside the two
+ * settings sectors. The partition table leaves unpartitioned flash
+ * writable, so the bootrom would not stop a wrong offset. */
 static int flash_op(uint32_t op, uint32_t offset, uint32_t n, uint8_t *buf) {
+    if (op != CFLASH_OP_VALUE_READ &&
+        (n == 0u || offset < NV_FLASH_OFFSET || n > NV_SECTORS * SECTOR ||
+         offset - NV_FLASH_OFFSET > NV_SECTORS * SECTOR - n)) {
+        return NV_ERR_GUARD;
+    }
     rom_flash_op_fn f = (rom_flash_op_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_OP);
     cflash_flags_t fl = {(op << CFLASH_OP_LSB) | (CFLASH_ASPACE_VALUE_STORAGE << CFLASH_ASPACE_LSB) |
                          (CFLASH_SECLEVEL_VALUE_SECURE << CFLASH_SECLEVEL_LSB)};

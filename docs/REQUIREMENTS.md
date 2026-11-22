@@ -250,7 +250,9 @@ Firmware for a Seeed XIAO RP2350 that:
   - 2040–2044 KB: spare.
   - 2044–2048 KB (0x1FF000): the sector at which the RP2350-E10 block is aimed (F-3).
 
-  The updater shall write and erase only inside the slot it is installing into, so an update never touches the settings.
+  The updater shall write and erase only inside the slot it is installing into, so an update never touches the settings. The partition table leaves unpartitioned flash writable, so the bootrom's permission check does not enforce this. Both flash wrappers shall therefore refuse erase and program outside their own area *(added in Rev 2.28)*:
+  - the updater's, outside the target slot opened at BEGIN, never the partition table or the running slot (error detail −200);
+  - the settings store's, outside its two sectors (`NV_ERR_GUARD`).
 - **F-2** The same image shall run from either slot. The build shall fail if `firmware.bin` exceeds one slot.
 - **F-3** Every `firmware.uf2` shall start with the RP2350-E10 workaround block, aimed at the last flash sector, which is unpartitioned. On A3 and later chips the block is ignored.
 - **F-4** A unit shall be provisioned once over the USB BOOTSEL drive: `pt.uf2`, then `firmware.uf2`. On blank slots the first image goes into slot B. An image copied to the BOOTSEL drive shall not be a trial image (F-18): it is permanent at its first boot, and the bootrom erases the other slot's first sector. After provisioning, updates shall use the updater.
@@ -326,7 +328,7 @@ Firmware for a Seeed XIAO RP2350 that:
   - check HELLO: the slot just written, on trial, and the same info block as the image sent;
   - send CONFIRM.
 
-  CONFIRM shall make the image permanent (`explicit_buy()`, which erases the old slot's first sector) and reboot into the application.
+  CONFIRM shall make the image permanent (`explicit_buy()`) and reboot into the application. *(Corrected in Rev 2.28:)* The bootrom erases the old slot's first sector only if that slot would otherwise win the next boot. With unversioned images (a tie, which slot A wins), that means always for an image in slot B and never for one in slot A. After an update into A, slot B keeps the previous image. It boots only if A stops verifying, and the next update into B erases it first (BEGIN).
 - **F-20** Fallback:
   - Without CONFIRM, the watchdog shall reboot the board, and the bootrom shall boot the previous firmware.
   - The application shall never confirm itself.
@@ -806,6 +808,8 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 - **Amended D-9.** A settings save fits inside the 2 s watchdog, and is allowed during a trial boot.
 - **Amended M-13.** Each reading also carries the offset choice (`offset_apply`).
 - **Amended F-1.** The use of the last 16 KB is stated: settings, spare, E10 sector. The updater never writes outside its target slot.
+- **Corrected F-19 / DESIGN 4a.** The bootrom erases the old slot only when that slot would win the next boot. An update into slot A leaves slot B's previous image intact (bootrom source).
+- **Amended F-1, NV-2: address guards.** The updater and the settings store refuse any erase or program outside their own flash area.
 - **Amended R-2, R-4.** Settings RAM, and image sizes at Rev 2.28.
 - **Added V-12.** Verification of the settings and the offset choice.
 - **Diagnostic report.** A `Saved` line (stored settings, record number, last save). The Offset line shows whether the offset is removed. The machine `CAL` line gains `offset_apply` (`fwstatus.py` shows it).

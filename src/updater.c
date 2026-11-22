@@ -44,7 +44,10 @@
  *                    the bootrom's 16.7 s watchdog.
  *   CONFIRM (0x13) (trial only) -> makes the trial image permanent
  *                    (explicit_buy: the bootrom erases the old slot's first
- *                    sector), replies, and reboots into the application.
+ *                    sector if it would otherwise win the next boot, i.e.
+ *                    for an image in B; an image in A wins the tie anyway,
+ *                    so B keeps the old image), replies, and reboots into
+ *                    the application.
  *                    Without CONFIRM the watchdog fires and the bootrom
  *                    boots the old image again.
  *   REBOOT (0x7F) -> reply, then reboot (during a trial: the old image
@@ -340,7 +343,25 @@ enum {
  * flash_safe_execute() lockout (the bootrom lock is still taken):
  * the whole image runs from RAM (copy_to_ram), so nothing fetches from
  * flash while the bootrom has it out of XIP mode, interrupts included. */
+/* Address guard (Rev 2.28, F-1): the partition table lets unpartitioned
+ * flash be written, so the bootrom's permission check would not stop a
+ * wrong offset from erasing the partition table or the settings. Erase and
+ * program are therefore refused outside the write window, which do_begin()
+ * opens on the target slot only (never the table, the running slot or
+ * anything past the slots). Reads are not limited. */
+#define FLASH_GUARD_REFUSED (-200)
+#define FLASH_SLOTS_START (8u * 1024u)     /* end of the partition table */
+#define FLASH_SLOTS_END (2032u * 1024u)    /* end of slot B (F-1) */
+static uint32_t s_wr_lo, s_wr_hi; /* write window; empty until BEGIN */
+
+static bool write_allowed(uint32_t offset, uint32_t n) {
+    return n != 0u && offset >= s_wr_lo && offset < s_wr_hi && n <= s_wr_hi - offset;
+}
+
 static int flash_op(uint32_t op, uint32_t offset, uint32_t n, uint8_t *buf) {
+    if (op != CFLASH_OP_VALUE_READ && !write_allowed(offset, n)) {
+        return FLASH_GUARD_REFUSED;
+    }
     rom_flash_op_fn f = (rom_flash_op_fn)rom_func_lookup_inline(ROM_FUNC_FLASH_OP);
     cflash_flags_t fl = {(op << CFLASH_OP_LSB) | (CFLASH_ASPACE_VALUE_STORAGE << CFLASH_ASPACE_LSB) |
                          (CFLASH_SECLEVEL_VALUE_SECURE << CFLASH_SECLEVEL_LSB)};
@@ -650,6 +671,18 @@ static void do_begin(uint16_t len) {
         send_error_detail(UPD_ERR_TOO_BIG, sz);
         return;
     }
+    /* Open the write window on the target slot only (address guard). */
+    s_wr_lo = s_wr_hi = 0u;
+    uint32_t run_off;
+    uint32_t run_sz;
+    if (off < FLASH_SLOTS_START || sz > FLASH_SLOTS_END - FLASH_SLOTS_START ||
+        off > FLASH_SLOTS_END - sz || !partition_location(run, &run_off, &run_sz) ||
+        (off < run_off + run_sz && run_off < off + sz)) { /* never the running slot */
+        send_error_detail(UPD_ERR_FLASH, (uint32_t)FLASH_GUARD_REFUSED);
+        return;
+    }
+    s_wr_lo = off;
+    s_wr_hi = off + sz;
     /* Erase the target's first sector now, so whatever it held stops being
      * a bootable image for the whole of the update. */
     int r = flash_op(CFLASH_OP_VALUE_ERASE, off, SECTOR, NULL);
@@ -876,8 +909,9 @@ static void do_finish(void) {
     if (trial) {
         set_boot_flag((uint32_t)s_link); /* the new image starts in its updater */
     }
-    /* Flash update boot. A non-TBYB (NO_TRIAL) image is launched and the
-     * bootrom erases the old slot's first sector at once. */
+    /* Flash update boot. A non-TBYB (NO_TRIAL) image is launched at once;
+     * the bootrom erases the old slot's first sector if that slot would
+     * otherwise win (target B), and leaves it for target A. */
     flash_update_boot(s_up.offset);
 }
 
