@@ -147,6 +147,13 @@ Before testing on the board, the host side can be checked against the
 simulator (Linux): run `tools/sim_board.py` and the same commands, pointed at
 the port it prints.
 
+## BOOTSEL from the console (B-20, Rev 2.28)
+
+Before Rev 2.28, `~` failed to bring up the RP2350 drive most of the time.
+The bootrom took over USB without the host seeing an unplug. With the 500 ms
+USB detach first (`04685da`), the drive appeared on every try on the bench.
+**Pass** (a few tries, not yet the full 10).
+
 ## Non-volatile settings (NV-1 … NV-13, Rev 2.28)
 
 Host test (Rev 2.28): `nvstore.c` against simulated flash. 1,000+ saves

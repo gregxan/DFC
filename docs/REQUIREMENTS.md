@@ -420,8 +420,8 @@ Firmware for a Seeed XIAO RP2350 that:
 - **B-19** Debug printing over UART shall be disabled (`pico_enable_stdio_uart(<target> 0)`), since GPIO0/1 are used by UART0.
 - **B-20** USB serial shall be disabled in production builds. If enabled for debugging, it uses the built-in Windows USB serial driver (shows up as a COM port), and its interrupt priority shall be below all UART-related interrupts.
   - Both USB interrupts shall have that priority: the USB controller IRQ and the IRQ in which the SDK runs `tud_task()`. The SDK assumes neither can preempt the other. *(Added in Rev 2.24.)*
-  - In diagnostic builds, receiving `~` on the USB console shall reboot the board into the USB bootloader (BOOTSEL) for reflashing, about 100 ms later so a notice reaches the terminal. *(Added in Rev 2.20.)*
-  - Diagnostic console keys: `m` machine format, `h` readable format, `r` magnetometer rate (M-3b), `~` BOOTSEL, `!` the updater on this port (F-9). *(Added in Rev 2.26.)*
+  - In diagnostic builds, receiving `~` on the USB console shall reboot the board into the USB bootloader (BOOTSEL) for reflashing, about 100 ms later so a notice reaches the terminal. *(Added in Rev 2.20.)* The firmware shall first disconnect from USB and stay off the bus for 500 ms, so the host sees a clean unplug before the bootloader attaches. *(Added in Rev 2.28: without it, the drive often failed to appear on the bench.)*
+  - Diagnostic console keys: `m` machine format, `h` readable format, `r` magnetometer rate (M-3b), `o` offset removal (M-4c), `s` save settings (NV-12), `~` BOOTSEL, `!` the updater on this port (F-9). *(Added in Rev 2.26.)*
 - **B-21** Release builds shall use `CMAKE_BUILD_TYPE=Release` with `-g`.
 - **B-22** Compiler warnings shall include `-Wall -Wextra -Werror -Wshadow -Wdouble-promotion -Wconversion`. B-22, B-23 and B-24 apply to every C source compiled into the image, including the Pico SDK's (B-25). *(Amended in Rev 2.5.)*
 - **B-23** Stack usage shall be checked with `-fstack-usage` and `-Wstack-usage=1024`.
@@ -786,4 +786,5 @@ The firmware updater, built and bench-tested during Rev 2.25, is now specified.
 
 - **Added section 6b (NV-1 … NV-13).** A 64-byte non-volatile settings block in two reserved flash sectors, written as append-only records with CRC, safe against power loss. Its first field is the start-up magnetometer rate, applied in `app_init()`.
 - **Amended M-3b.** The start-up rate can also come from the saved settings (NV-11).
+- **Amended B-20.** `~` detaches from USB for 500 ms before entering the bootloader. Keys `o` and `s` added.
 - **Added M-4c.** A run-time choice of whether the field helpers remove the calibrated offset. It is also kept in the saved settings (NV-11).
