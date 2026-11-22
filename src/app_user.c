@@ -63,7 +63,14 @@ void app_init(void) {
  * handlers always see this epoch's values. File scope: visible to every
  * handler in this file, not exported. */
 static mag_reading_t s_mag;  /* latest reading this epoch (may be invalid or stale) */
-static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G, offset removed */
+/* Field values to use (M-4c, NV-11): the calibrated bridge offset is removed
+ * or left in according to the offset setting (saved in flash, applied at
+ * start-up by settings_apply_startup(), changed with mag_set_offset_apply()).
+ * s_mag.offset_apply says which applied to this sample; nothing is removed
+ * before the first calibration (s_mag.offset_valid false). Do NOT use
+ * s_mag.s.raw / mag_convert() for the field: they always include the
+ * offset, whatever the setting. */
+static int32_t s_mag_xyz[3]; /* last valid field: signed counts, 16384/G */
 static int16_t s_mag_xyz16[3]; /* same, 16-bit scale (4096/G), for compact messages */
 static bool s_mag_new;       /* true if this epoch brought a new valid sample */
 static bool s_mag_arrived;   /* true if this epoch brought a new sample, valid or not */
@@ -89,10 +96,12 @@ static void mag_handler(void) {
         have_last = true;
         last_seq = s_mag.s.seq;
         last_period = s_mag.s.period_ticks;
-        mag_field(&s_mag, s_mag_xyz);
-        mag_field16(&s_mag, s_mag_xyz16);
+        mag_field(&s_mag, s_mag_xyz);     /* offset per the setting (M-4c) */
+        mag_field16(&s_mag, s_mag_xyz16); /* same, 16-bit */
         s_mag_new = true;
-        /* TODO: use s_mag_xyz[] / s_mag_xyz16[], s_mag.s.timestamp_us */
+        /* TODO: use s_mag_xyz[] / s_mag_xyz16[], s_mag.s.timestamp_us
+         * (and s_mag.offset_apply if the client needs to know whether the
+         * offset was removed) */
     }
 }
 
@@ -154,8 +163,9 @@ static void link0_handler(void) {
     /* TODO: once per epoch, send the magnetometer values if this epoch
      * brought a new sample (s_mag / s_mag_xyz are filled by mag_handler()):
      *   if (s_mag_new) {
-     *       encode s_mag_xyz16[] (or s_mag_xyz[]) and s_mag.s.timestamp_us
-     *       into a message;
+     *       encode s_mag_xyz16[] (or s_mag_xyz[]; offset removed or not
+     *       per the saved setting) and s_mag.s.timestamp_us into a
+     *       message, optionally with a flag bit for s_mag.offset_apply;
      *       link_write(<link>, msg, len);
      *   } */
 }
