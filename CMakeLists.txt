@@ -24,6 +24,18 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/pico_sdk_import.cmake)
 
 project(xiao_dual_uart_mag C CXX ASM)
 
+# Rev 2.25: firmware version, major.minor.patch. It goes into the updater
+# info block in every image (src/updater.c); tools/dfc_update.py refuses to
+# install an older version unless told to (--allow-downgrade). Raise it for
+# every release.
+set(DFC_FW_VERSION "0.1.0" CACHE STRING "Firmware version (major.minor.patch)")
+if(NOT DFC_FW_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+    message(FATAL_ERROR "DFC_FW_VERSION must be major.minor.patch, got '${DFC_FW_VERSION}'")
+endif()
+set(DFC_FW_MAJOR ${CMAKE_MATCH_1})
+set(DFC_FW_MINOR ${CMAKE_MATCH_2})
+set(DFC_FW_PATCH ${CMAKE_MATCH_3})
+
 # B-24 (Rev 2.5): every C source in the image, SDK included, is strict C11.
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -52,12 +64,24 @@ set(APP_SOURCES
     src/status.c
     src/wirecheck.c
     src/crash.c
+    src/updater.c
+    src/nvstore.c
 )
 if(APP_MODE STREQUAL "user")
     list(APPEND APP_SOURCES src/app_user.c)
 else()
     list(APPEND APP_SOURCES src/app_test.c)
 endif()
+
+# Rev 2.25: build_id.c (date and time of this build), regenerated on every
+# build: the extra, never-created output makes the command always run.
+set(DFC_BUILD_ID_C ${CMAKE_CURRENT_BINARY_DIR}/build_id.c)
+add_custom_command(
+    OUTPUT ${DFC_BUILD_ID_C} ${CMAKE_CURRENT_BINARY_DIR}/build_id.always
+    COMMAND ${CMAKE_COMMAND} -DOUT=${DFC_BUILD_ID_C} -P ${CMAKE_CURRENT_LIST_DIR}/cmake/gen_build_id.cmake
+    COMMENT "Build ID"
+    VERBATIM)
+list(APPEND APP_SOURCES ${DFC_BUILD_ID_C})
 
 add_executable(firmware ${APP_SOURCES})
 
@@ -86,6 +110,20 @@ elseif(APP_MODE STREQUAL "user")
     target_compile_definitions(firmware PRIVATE APP_MODE=2)
 else()
     message(FATAL_ERROR "APP_MODE must be 'user', 'echo' or 'pattern'")
+endif()
+
+target_compile_definitions(firmware PRIVATE
+    DFC_FW_MAJOR=${DFC_FW_MAJOR} DFC_FW_MINOR=${DFC_FW_MINOR} DFC_FW_PATCH=${DFC_FW_PATCH})
+
+# TEST ONLY: an image whose updater never runs (it ignores the boot flag),
+# to check that an unconfirmed trial falls back to the previous firmware.
+# Never ship one: it cannot be updated again except over USB BOOTSEL.
+option(DFC_TEST_NO_UPDATER "TEST ONLY: build an image whose updater never runs" OFF)
+if(DFC_TEST_NO_UPDATER)
+    message(WARNING "DFC_TEST_NO_UPDATER: this image's updater is disabled (fallback test only)")
+    target_compile_definitions(firmware PRIVATE DFC_TEST_NO_UPDATER=1)
+else()
+    target_compile_definitions(firmware PRIVATE DFC_TEST_NO_UPDATER=0)
 endif()
 
 if(APP_TEST_PINS)
@@ -156,4 +194,45 @@ set_source_files_properties(
 # B-21: Release keeps debug information.
 target_compile_options(firmware PRIVATE $<$<CONFIG:Release>:-g>)
 
+# ---------------------------------------------------------------------------
+# Rev 2.25: A/B firmware slots (partition_table.json, 2 MB flash).
+#   0K      partition table (bootrom, 8 KB)
+#   8K      slot A (partition 0), 1012 KB
+#   1020K   slot B (partition 1), 1012 KB, linked to A
+#   2032K   16 KB unpartitioned: the RP2350-E10 block, and room for settings
+# The same firmware image runs from either slot (the bootrom maps the slot
+# it boots to the start of the XIP window). A UF2 dragged onto the BOOTSEL
+# drive goes into the slot that is not booting. The bootrom then boots it
+# (flash update boot) and erases the old slot's first sector, so the new
+# image stays selected.
+# pt.uf2 is built next to firmware.uf2. Copy it once per board, before the
+# first firmware.uf2 (README, "First-time setup").
+# ---------------------------------------------------------------------------
+# RP2350-E10: the A2 bootrom mishandles UF2 drag-and-drop when a partition
+# table is present, unless the UF2 starts with an absolute-family block
+# aimed at the end of flash. A3 and later ignore that block. Here it is
+# aimed at the last sector of the 2 MB part, which is unpartitioned.
+set(DFC_E10_BLOCK 0x101fff00)
+set_target_properties(firmware PROPERTIES PICOTOOL_EXTRA_UF2_ARGS "--abs-block;${DFC_E10_BLOCK}")
+
 pico_add_extra_outputs(firmware)
+
+set(DFC_PT_JSON ${CMAKE_CURRENT_LIST_DIR}/partition_table.json)
+set(DFC_PT_UF2 ${CMAKE_CURRENT_BINARY_DIR}/pt.uf2)
+# pt.uf2 is in the absolute family, so it carries no E10 block. --abs-block
+# only checks that the E10 sector is outside every partition. On an A2 chip,
+# install pt.uf2 on a board that has no partition table yet (first-time
+# setup); replacing an existing table there needs picotool, not drag-and-drop.
+add_custom_command(
+    OUTPUT ${DFC_PT_UF2}
+    COMMAND picotool partition create --quiet ${DFC_PT_JSON} ${DFC_PT_UF2} --abs-block ${DFC_E10_BLOCK}
+    DEPENDS ${DFC_PT_JSON}
+    COMMENT "Partition table: pt.uf2"
+    VERBATIM)
+add_custom_target(partition_table ALL DEPENDS ${DFC_PT_UF2})
+
+# The image must fit one slot (1012 KB, partition_table.json).
+add_custom_command(TARGET firmware POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -DBIN=$<TARGET_FILE_DIR:firmware>/firmware.bin -DLIMIT=1036288
+            -P ${CMAKE_CURRENT_LIST_DIR}/cmake/check_slot_size.cmake
+    VERBATIM)

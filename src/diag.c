@@ -31,9 +31,13 @@ static volatile uint32_t s_isr_depth;
 static uint32_t s_isr_t0;
 
 static void __not_in_flash_func(isr_wrap)(void) {
-    uint32_t t = diag_cycles();
     uint32_t irq = __get_current_exception() - VTABLE_FIRST_IRQ;
     uint32_t save = save_and_disable_interrupts();
+    /* Read the time with interrupts off (bench fix, Rev 2.25). Read before,
+     * a higher-priority handler could run in between, be counted as
+     * outermost, and then be counted again inside this one's span. The
+     * double count made the API timings go negative (wrapping to ~2.9 s). */
+    uint32_t t = diag_cycles();
     bool outer = (s_isr_depth++ == 0u);
     if (outer) {
         s_isr_t0 = t;
