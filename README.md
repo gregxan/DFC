@@ -37,8 +37,15 @@ src/app.h               application interface: app_init(), app_poll()
 src/app_user.c          YOUR APPLICATION (production): 1 ms epoch handlers
 src/app_test.c          test application: echo or counting pattern
 src/prof.[ch]           section profiling (PROF_BEGIN / PROF_END)
+src/updater.[ch]        firmware updater over UART / USB, A/B slots (section 6a)
+src/nvstore.[ch]        non-volatile settings in flash (section 6b, Rev 2.28)
+src/crash.[ch]          watchdog and crash capture (diag builds, D-9)
+src/wirecheck.[ch]      start-up I2C wiring check
+src/config.h            compile-time parameters and defaults
 src/i2c_bus_clear.pio   PIO program: 9 SCL clocks after a bus fault (M-18)
-tools/*.py              Windows test scripts (V-1 … V-4)
+tools/dfc_update.py     firmware update host tool (USB or UART)
+tools/sim_board.py      board simulator for the update tool (Linux)
+tools/*.py              other Windows test scripts (V-1 … V-4)
 .vscode/                launch.json (SWD debug), tasks.json, settings
 ```
 
@@ -246,7 +253,12 @@ updater.
 The flash holds two firmware slots, A and B, so a field update can write
 one while the other keeps running (and fall back if the new image fails).
 The layout is in `partition_table.json`: a table at 0 K, slot A at 8 K, slot B
-at 1020 K, 1012 KB each, and 16 KB left unpartitioned at the end. Every build
+at 1020 K, 1012 KB each, and 16 KB left unpartitioned at the end. That
+16 KB holds the saved settings (8 KB at 0x1FC000, section 6b), 4 KB spare,
+and the last sector, used by the RP2350-E10 workaround. Updates, copying
+`firmware.uf2` and copying `pt.uf2` never touch the settings. Erasing the
+whole chip (`picotool erase`) clears them, and the board then starts with
+the defaults. Every build
 writes `pt.uf2` next to `firmware.uf2`.
 
 1. Hold **B**, tap **R**, release **B**. Copy `pt.uf2` to the `RP2350` drive.
@@ -259,9 +271,10 @@ writes `pt.uf2` next to `firmware.uf2`.
    the table it says `no partition table`.
 
 After that, flash as below. Each `firmware.uf2` copied to the drive goes into
-the slot that is not running, boots from there, and the bootrom erases the
-start of the old slot, so the new image stays selected. Slots therefore
-alternate A, B, A... from one flash to the next.
+the slot that is not running and boots from there. The new image stays
+selected: after a copy into B the bootrom erases the start of A, and a copy
+into A wins over B anyway, so B keeps the previous image (DESIGN 4a). Slots
+therefore alternate A, B, A... from one flash to the next.
 
 On an RP2350 **A2** chip (the diag report shows the revision), copy `pt.uf2`
 only to a board that has no partition table yet. Replacing an existing table
@@ -311,7 +324,8 @@ UART-related interrupt (B-20).
   The change applies from the next report. `fwstatus.py` and `soak_test.py`
   send `m` themselves when they connect.
 - **Reflash from the console.** Type `~` in the terminal and the board
-  reboots into its USB bootloader: the COM port closes and the **RP2350**
+  reboots into its USB bootloader: it drops off USB for half a second (so
+  Windows sees a clean unplug), the COM port closes and the **RP2350**
   drive appears, ready for a `.uf2`. `py tools\fwstatus.py COM7 --bootsel`
   does the same from a script. (Release builds have no USB console: use
   the BOOT button.)
@@ -399,9 +413,16 @@ bytes keep arriving by DMA and magnetometer samples keep being published.
 At each epoch start, the previous epoch's data is ready.
 
 The file already contains three stub handlers, each profiled:
-- `mag_handler()`: reads the newest magnetometer sample;
-- `link0_handler()`: forwards UART0 data to UART1;
+- `mag_handler()`: reads the newest magnetometer sample into `s_mag`,
+  `s_mag_xyz[]` and `s_mag_xyz16[]`, and sets `s_mag_new` on epochs that
+  bring a new sample;
+- `link0_handler()`: forwards UART0 data to UART1. It also holds
+  commented-out client-command stubs for setting and saving the
+  magnetometer rate and offset choice;
 - `link1_handler()`: forwards UART1 data to UART0.
+
+`app_init()` loads the saved settings and applies them
+(`settings_apply_startup()`) before the first sample.
 
 Replace the `TODO`s with your own processing. The API calls you'll use:
 
@@ -415,12 +436,27 @@ mag_reading_t r;
 if (mag_read_latest(&r) && r.s.valid && !r.stale) {
     int32_t xyz[3];
     mag_field(&r, xyz);     // signed counts (16384/G), calibrated offset removed
+                            // unless switched off (r.offset_apply, M-4c)
     int16_t xyz16[3];
     mag_field16(&r, xyz16); // same at 16-bit scale (4096/G), for compact messages
 }
 
 uint32_t ovf = diag_take(DIAG_L0_RX_OVERFLOW);  // atomic read-and-clear
+
+mag_set_rate_hz(100);            // 1000/500/250/200/100/50 Hz; false if unsupported
+uint32_t c = mag_sample_count(); // changes exactly when a new sample arrives
+mag_set_offset_apply(false);     // mag_field() leaves the bridge offset in
+
+settings_save_mag_rate(100);            // keep across power cycles (flash)
+settings_save_mag_offset_apply(false);  // 0 = ok; no write if unchanged
 ```
+
+**Saved settings** (`src/nvstore.h`, REQUIREMENTS section 6b): 64 bytes in
+flash, today the start-up rate and the offset choice, with room to add more
+fields (append only, 0 = default). A save blocks the main loop for about
+1 ms, and up to about 400 ms on every 16th save. Call it only on request
+(a client command), from `app_poll()`, never from an interrupt. The epochs
+it delays are expected (EX-8 exception).
 
 **Timing.** The whole `app_poll()` must finish in under 1 ms (EX-8).
 - `main.c` measures every epoch. Build **diag-user** to see it on the

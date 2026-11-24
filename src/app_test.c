@@ -33,7 +33,7 @@
 #endif
 
 /* Observable from a debugger (and reported by status.c). */
-volatile int32_t g_app_mag_xyz[3];       /* field, offset removed when calibrated */
+volatile int32_t g_app_mag_xyz[3];       /* field; offset removed when calibrated, unless switched off (M-4c) */
 volatile int32_t g_app_mag_offset[3];    /* latest calibrated offset (M-4b)       */
 volatile bool g_app_mag_offset_valid;
 volatile uint32_t g_app_mag_gaps;    /* sequence discontinuities between valid samples */
@@ -168,7 +168,7 @@ static void mag_consume(void) {
     g_app_mag_valid++;
 
     int32_t xyz[3];
-    mag_field(&r, xyz); /* offset removed when calibrated (M-4b) */
+    mag_field(&r, xyz); /* offset per M-4b / M-4c */
     for (unsigned i = 0; i < 3u; i++) { /* D-10 */
         s_noise_sum[i] += xyz[i];
         s_noise_sq[i] += (int64_t)xyz[i] * xyz[i];

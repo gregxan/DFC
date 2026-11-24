@@ -35,7 +35,12 @@ try:
     import serial
     import serial.tools.list_ports
 except ImportError:  # pragma: no cover
-    sys.exit("pyserial is required: py -m pip install -r tools/requirements.txt")
+    # Name the interpreter actually running: "python" and "py" can be
+    # different installations on Windows, each with its own packages.
+    sys.exit(f"pyserial is not installed for this Python ({sys.executable}).\n"
+             f"Install it for this interpreter:\n"
+             f'  "{sys.executable}" -m pip install -r tools/requirements.txt\n'
+             f"or run the script with the interpreter that has it (e.g. py).")
 
 SOF = b"\xA5\x5A"
 CMD_HELLO = 0x01

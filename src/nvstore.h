@@ -1,5 +1,5 @@
 /*
- * Non-volatile settings (Rev 2.28, NV-1..NV-12).
+ * Non-volatile settings (Rev 2.28, NV-1..NV-13; offset choice M-4c).
  *
  * A small block of settings (NV_DATA_SIZE = 64 bytes) kept in flash, outside
  * both firmware slots, so it survives power cycles and firmware updates.
@@ -53,6 +53,7 @@ int nv_save(const void *buf, size_t n);
 #define NV_ERR_FULL (-101)   /* no blank page could be made (should not happen) */
 #define NV_ERR_VERIFY (-102) /* read-back did not match */
 #define NV_ERR_VALUE (-103)  /* settings_save_mag_rate(): not a supported rate */
+#define NV_ERR_GUARD (-104)  /* write outside the settings sectors refused (bug) */
 
 typedef struct {
     uint32_t seq;     /* sequence number of the current record; 0 = none */
